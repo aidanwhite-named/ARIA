@@ -8,7 +8,6 @@ from app.enums import ErrorCode, JobStatus
 from app.evaluation.evaluator import evaluate
 from app.providers.base import ExecutionOutcome
 
-from .conftest import wait_for_job
 
 # ------------------------------------------------------------------- CSRF
 
@@ -207,86 +206,62 @@ def test_fail_on_tool_use_setting_is_editable(client) -> None:
     client.put("/api/settings", json={"values": {"fail_on_tool_use": True}})
 
 
-@pytest.mark.parametrize("provider_id", ["mock", "claude", "codex", "gemini"])
+@pytest.mark.parametrize("provider_id", ["agy", "claude", "codex"])
 def test_all_providers_probe_without_error(client, provider_id) -> None:
     data = client.get(f"/api/providers/{provider_id}").json()
     assert data["provider"] == provider_id
     assert "usable" in data
 
 
-def test_mock_job_still_succeeds_end_to_end(client) -> None:
+def test_removed_mock_provider_cannot_create_jobs(client) -> None:
     prompt = client.post(
-        "/api/prompts", json={"name": "하드닝 후 확인", "body": "요약하십시오."}
-    ).json()
-    job = client.post(
-        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "mock"}
-    ).json()
-    final = wait_for_job(client, job["id"])
-    assert final["status"] == "SUCCEEDED"
-
-
-# ------------------------------------------------- 실험적 Provider 게이팅
-
-
-def test_gemini_is_experimental_and_off_by_default(client) -> None:
-    data = client.get("/api/providers/gemini").json()
-    assert data["experimental"] is True
-    assert data["opted_in"] is False
-    assert data["usable"] is False
-    assert data["risks"], "위험 고지가 비어 있습니다."
-
-
-def test_experimental_provider_job_is_refused_without_optin(client) -> None:
-    """UI 를 우회한 직접 호출도 막아야 한다."""
-    prompt = client.post(
-        "/api/prompts", json={"name": "게이팅", "body": "요약"}
+        "/api/prompts", json={"name": "제거된 Provider 확인", "body": "요약하십시오."}
     ).json()
     response = client.post(
-        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "gemini"}
+        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "mock"}
     )
-    assert response.status_code == 403
-    assert "실험적" in response.json()["detail"]
+    assert response.status_code == 400
+    assert client.get("/api/providers/mock").status_code == 404
 
 
-def test_experimental_smoke_test_is_refused_without_optin(client) -> None:
-    response = client.post("/api/providers/gemini/smoke-test")
-    assert response.status_code == 403
+# ---------------------------------------------------------- Provider 표시
 
 
-def test_optin_makes_provider_usable(client) -> None:
-    try:
-        client.put(
-            "/api/settings",
-            json={"values": {"enabled_experimental_providers": ["gemini"]}},
-        )
-        data = client.get("/api/providers/gemini").json()
-        assert data["opted_in"] is True
-        # runnable 은 설치/인증 상태에만 달려 있다.
-        assert data["usable"] == data["runnable"]
-    finally:
-        client.put(
-            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-        )
+def test_agy_uses_its_cli_name_without_experimental_warning(client) -> None:
+    data = client.get("/api/providers/agy").json()
+    assert data["provider"] == "agy"
+    assert data["display_name"] == "agy"
+    assert "experimental" not in data
+    assert "risks" not in data
 
 
-def test_optin_surfaces_a_warning(client) -> None:
-    try:
-        data = client.put(
-            "/api/settings",
-            json={"values": {"enabled_experimental_providers": ["gemini"]}},
-        ).json()
-        assert any("실험적 Provider" in w for w in data["warnings"])
-    finally:
-        client.put(
-            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-        )
-
-
-def test_non_experimental_providers_are_never_gated(client) -> None:
-    for pid in ("mock", "claude", "codex"):
-        data = client.get(f"/api/providers/{pid}").json()
-        assert data["experimental"] is False
-        assert data["opted_in"] is True
+def test_execution_defaults_are_editable(client) -> None:
+    prompt = client.post(
+        "/api/prompts", json={"name": "기본 설정", "body": "요약"}
+    ).json()
+    data = client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "default_prompt_id": prompt["id"],
+                "default_provider": "agy",
+                "default_models": {"agy": "gemini-3.7-flash-high"},
+            }
+        },
+    ).json()
+    assert data["values"]["default_prompt_id"] == prompt["id"]
+    assert data["values"]["default_provider"] == "agy"
+    assert data["values"]["default_models"]["agy"] == "gemini-3.7-flash-high"
+    client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "default_prompt_id": "",
+                "default_provider": "agy",
+                "default_models": {},
+            }
+        },
+    )
 
 
 def test_uncontrollable_tools_cannot_be_relaxed() -> None:
@@ -303,7 +278,7 @@ def test_uncontrollable_tools_cannot_be_relaxed() -> None:
 def test_agy_declares_uncontrollable_tools_and_sandbox() -> None:
     from pathlib import Path
 
-    from app.providers.agy_cli import RISKS, AgyCliProvider
+    from app.providers.agy_cli import AgyCliProvider
     from app.providers.base import ExecutionRequest
 
     provider = AgyCliProvider()
@@ -312,7 +287,6 @@ def test_agy_declares_uncontrollable_tools_and_sandbox() -> None:
     )
     assert "--sandbox" in args
     assert "--dangerously-skip-permissions" not in args
-    assert any("차단" in r for r in RISKS)
 
 
 def test_agy_resolver_does_not_fall_back_to_gemini(monkeypatch) -> None:

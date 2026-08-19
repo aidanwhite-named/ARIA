@@ -5,6 +5,7 @@ import type {
   Prompt,
   PromptVersion,
   ProviderInfo,
+  AttachmentRole,
   UploadResponse,
 } from "./types";
 
@@ -45,10 +46,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string; version: string }>("/api/health"),
 
-  listPrompts: (params: { search?: string; includeArchived?: boolean } = {}) => {
+  listPrompts: (params: { search?: string } = {}) => {
     const query = new URLSearchParams();
     if (params.search) query.set("search", params.search);
-    if (params.includeArchived) query.set("include_archived", "true");
     const suffix = query.toString();
     return request<Prompt[]>(`/api/prompts${suffix ? `?${suffix}` : ""}`);
   },
@@ -62,8 +62,6 @@ export const api = {
     }),
   deletePrompt: (id: string) =>
     request<void>(`/api/prompts/${id}`, { method: "DELETE" }),
-  clonePrompt: (id: string) =>
-    request<Prompt>(`/api/prompts/${id}/clone`, { method: "POST" }),
   promptVersions: (id: string) =>
     request<PromptVersion[]>(`/api/prompts/${id}/versions`),
   exportPrompts: () =>
@@ -85,17 +83,18 @@ export const api = {
       method: "POST",
     }),
 
-  upload: (files: File[]) => {
+  upload: (items: { file: File; role: AttachmentRole }[]) => {
     const form = new FormData();
-    files.forEach((file) => form.append("files", file));
+    items.forEach(({ file }) => form.append("files", file));
+    form.append("roles", JSON.stringify(items.map(({ role }) => role)));
     return request<UploadResponse>("/api/uploads", { method: "POST", body: form });
   },
 
   createJob: (body: {
-    prompt_id: string;
-    provider: string;
+    prompt_id?: string | null;
+    provider?: string | null;
     model?: string | null;
-    user_input?: string;
+    claim_text?: string;
     batch_id?: string | null;
     required_map?: Record<string, boolean>;
   }) => request<Job>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),

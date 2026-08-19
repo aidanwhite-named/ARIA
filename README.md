@@ -24,10 +24,9 @@ ARIA 가 하는 일은 이것뿐입니다.
 
 | Provider | 상태 | 비고 |
 |---|---|---|
-| Mock | 사용 가능 | 실행 흐름 검증용. 모델을 호출하지 않습니다. |
 | Claude (Claude Code) | 설치됨 · 로그인 필요 | `claude setup-token` 실행 후 사용 가능합니다. 도구를 완전히 끌 수 있는 유일한 Provider 입니다. |
-| Gemini (agy) | **실험적 · 기본 비활성** | 동작은 확인했지만 도구를 끌 수 없습니다. Settings 에서 위험을 확인하고 명시적으로 켜야 실행됩니다. |
-| GPT (Codex) | 미설치 | 감지·안내만 제공하며 실행 경로는 미구현입니다. |
+| agy | 설치됨 · 로그인됨 | `agy models` 결과를 모델 드롭다운에 표시합니다. |
+| Codex | 실행 불가 | 감지·안내와 모델 선택을 제공하며 실행 경로는 미구현입니다. |
 
 ## 목차
 
@@ -161,6 +160,8 @@ npm run dev
 
 | 항목 | 경로 |
 |---|---|
+| Master Prompt 원본 | 프로젝트의 `prompt\*.md`, `prompt\*.txt` |
+| 프롬프트 버전 이력 | 프로젝트의 `prompt\.history\` |
 | 데이터 폴더 | `%LOCALAPPDATA%\ARIA` |
 | 데이터베이스 | `%LOCALAPPDATA%\ARIA\aria.db` |
 | 실행별 작업 폴더 | `%LOCALAPPDATA%\ARIA\runs\<job-id>\` |
@@ -214,10 +215,10 @@ claude auth status
 번들된 실행 파일은 WindowsApps 권한 때문에 외부에서 호출할 수 없습니다.
 설치 후 Settings 에서 절대 경로를 지정하고 다시 검사하십시오.
 
-### Gemini (agy CLI)
+### agy CLI
 
-이 프로젝트를 개발한 환경에서 Gemini 는 `gemini` 가 아니라 **`agy`** 라는 이름으로
-설치되어 있었고, ARIA 는 두 이름을 모두 탐색합니다.
+ARIA 의 Provider id와 실행 파일 이름은 모두 **`agy`** 입니다. 계약이 다른 구형
+`gemini` 명령으로 폴백하지 않습니다.
 
 확인:
 
@@ -228,11 +229,7 @@ agy models
 모델 목록이 나오면 로그인된 상태입니다. ARIA 는 이 명령을 인증 probe 로 사용합니다
 (모델 추론이 아니라 목록 조회이므로 토큰 사용량이 발생하지 않습니다).
 
-> **agy 는 실험적 Provider 이며 기본적으로 꺼져 있습니다.**
-> Settings → Provider 상세에서 위험을 확인하고 체크박스를 켜야 실행됩니다.
-> 활성화하지 않으면 API 를 직접 호출해도 403 으로 거부됩니다.
-
-**왜 실험적인가 — 탐지는 차단이 아닙니다**
+**도구 실행 제약 — 탐지는 차단이 아닙니다**
 
 agy 에는 `--tools` 에 해당하는 플래그가 없습니다. `run_command`, `write_to_file` 을
 포함해 57개 도구가 활성 상태로 실행됩니다(`permission_mode: request-review`).
@@ -301,11 +298,10 @@ Claude 보다 약합니다.
 
 ### 실행 화면
 
-1. Master Prompt 를 선택합니다.
-2. Provider 를 선택합니다. 사용할 수 없는 Provider 는 `· 사용 불가` 로 표시되고
-   선택할 수 없습니다.
-3. 필요하면 모델을 지정합니다. 비우면 CLI 기본값을 씁니다.
-4. 추가 입력과 첨부 파일을 넣습니다. 각 파일은 **필수 / 선택**을 지정할 수 있고,
+1. Settings 에서 Master Prompt, Provider, 모델을 드롭다운으로 선택해 저장합니다.
+2. 실행 화면에 출원발명 청구항을 입력합니다.
+3. 인용발명 문헌 PDF와 출원발명 문서 PDF를 추가합니다.
+4. 각 파일은 **필수 / 선택**을 지정할 수 있고,
    업로드 직후 **전달 가능 여부**가 표시됩니다.
 5. **실행**을 누릅니다. 진행 상태와 결과가 실시간으로 표시됩니다.
 6. **중단**을 누르면 해당 작업의 프로세스 트리만 종료됩니다.
@@ -524,7 +520,10 @@ Code 세션 안에서 실행하면 부모가 `ANTHROPIC_BASE_URL`, `CLAUDECODE`,
 
 ## Prompt import/export
 
-Prompt Library 화면에서 JSON 으로 내보내고 가져옵니다.
+Prompt Library의 현재 원본은 SQLite가 아니라 프로젝트의 `prompt` 폴더에 있는
+Markdown 또는 텍스트 파일입니다. 화면에서 편집하거나 JSON을 가져오면 해당 파일을
+직접 갱신하며, 버전 이력은 `prompt\.history\`에 파일로 저장합니다. JSON 내보내기와
+가져오기는 계속 지원합니다.
 
 ```json
 {
@@ -535,8 +534,6 @@ Prompt Library 화면에서 JSON 으로 내보내고 가져옵니다.
       "description": "인용발명과 대비하여 표로 정리",
       "body": "다음 절차로 분석하십시오.\n\n1. 청구항 1을 구성요소별로 분해합니다.\n2. 각 구성요소를 인용발명과 대비합니다.\n3. 결과를 표로 정리합니다.\n",
       "output_mode": "markdown",
-      "default_provider": "claude",
-      "default_model": null,
       "tags": ["특허", "구성대비"],
       "accepted_file_types": [".pdf"]
     }
@@ -567,7 +564,7 @@ cd backend
 
 ```powershell
 cd backend
-.\.venv\Scripts\python.exe -m pytest -m live_cli tests	est_live_agy_safety.py -s
+.\.venv\Scripts\python.exe -m pytest -m live_cli tests\test_live_agy_safety.py -s
 ```
 
 모델의 응답이나 이벤트가 아니라 **실제 파일시스템**을 기준으로 검증합니다.
@@ -597,7 +594,12 @@ cd backend
 .\.venv\Scripts\python.exe tests\e2e_smoke.py http://127.0.0.1:8765
 ```
 
-업로드·차단·실행·판정·취소·이력을 실제 HTTP 로 확인합니다.
+위 명령은 모델을 호출하지 않고 HTTP·프롬프트·업로드 경계만 확인합니다. agy까지
+실제로 한 번 호출하려면 다음처럼 Provider를 명시합니다. 사용량이 발생합니다.
+
+```powershell
+.\.venv\Scripts\python.exe tests\e2e_smoke.py http://127.0.0.1:8765 agy
+```
 
 ### 프론트엔드
 
@@ -620,7 +622,8 @@ CLI 는 버전마다 플래그가 바뀝니다. 고쳐야 할 위치는 다음�
 | Claude 인증 판정 | `claude_cli.py` 의 `_interpret_auth()` |
 | 실행 파일 탐색 | `backend/app/providers/resolver.py` |
 | 환경변수 정책 | `backend/app/providers/env.py` |
-| Codex / Gemini 구현 | `backend/app/providers/pending.py` |
+| agy 구현 | `backend/app/providers/agy_cli.py` |
+| Codex 감지 | `backend/app/providers/pending.py` |
 | 결과 판정 규칙 | `backend/app/evaluation/evaluator.py` |
 
 새 Provider 를 추가하려면 `Provider` 추상 클래스(`providers/base.py`)를 구현하고
@@ -643,10 +646,8 @@ claude --help
 
 - **Codex 실행** — 감지와 상태 표시는 되지만 실행 경로는 미구현입니다. 외부에서
   호출 가능한 Codex CLI 를 개발 환경에서 찾지 못해 검증할 수 없었습니다.
-- **Gemini(agy) 는 실험적 분류** — 도구를 끌 수 없고 시스템 프롬프트도 분리할 수
-  없습니다. ARIA 는 탐지·경고·차단(실행 거부)까지 하지만, 도구 호출 자체를 막지는
-  못합니다. 장기적으로는 OS 수준 샌드박스나 도구가 없는 Gemini API Provider 로
-  대체하는 것이 맞습니다.
+- **agy 도구 제한** — 도구를 끌 수 없고 시스템 프롬프트도 분리할 수 없습니다.
+  ARIA 는 도구 호출을 탐지해 실행을 실패 처리하지만 호출 자체를 막지는 못합니다.
 - **agy 도구 탐지의 한계** — `step_type == "tool"` 은 실측으로 확인했지만, 관찰하지
   못한 다른 이름이 있을 수 있습니다. 보조 패턴 매칭으로 보완하고 있으나 완전하지
   않습니다.

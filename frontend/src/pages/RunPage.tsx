@@ -5,12 +5,16 @@ import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
 import type {
   AttachmentAnalysis,
+  AttachmentRole,
   Job,
   Prompt,
   ProviderInfo,
   UploadResponse,
 } from "../lib/types";
 import { useJobStream } from "../lib/useJobStream";
+
+type RunTab = "input" | "result";
+const PROVIDER_IDS = new Set(["agy", "claude", "codex"]);
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -25,38 +29,56 @@ function deliveryLabel(file: AttachmentAnalysis): { text: string; cls: string } 
   return { text: "전달 불가", cls: "danger" };
 }
 
+function roleLabel(role: AttachmentRole): string {
+  if (role === "APPLICATION") return "출원발명";
+  if (role === "CITATION") return "인용발명";
+  return "기타 자료";
+}
+
 export default function RunPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [promptId, setPromptId] = useState("");
-  const [providerId, setProviderId] = useState("mock");
+  const [providerId, setProviderId] = useState("agy");
   const [model, setModel] = useState("");
-  const [userInput, setUserInput] = useState("");
+  const [claimText, setClaimText] = useState("");
+  const [applicationFile, setApplicationFile] = useState<File | null>(null);
+  const [citationFiles, setCitationFiles] = useState<File[]>([]);
   const [upload, setUpload] = useState<UploadResponse | null>(null);
   const [required, setRequired] = useState<Record<string, boolean>>({});
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState("");
-  const fileInput = useRef<HTMLInputElement>(null);
+  const [activeTab, setActiveTab] = useState<RunTab>("input");
+  const applicationFileInput = useRef<HTMLInputElement>(null);
+  const citationFileInput = useRef<HTMLInputElement>(null);
 
   const stream = useJobStream(
     job && !["SUCCEEDED", "FAILED", "CANCELLED"].includes(job.status) ? job.id : null,
   );
 
   useEffect(() => {
-    api.listPrompts().then(setPrompts).catch((e) => setError(String(e.message)));
-    api.listProviders().then(setProviders).catch(() => undefined);
-  }, []);
+    Promise.all([api.listPrompts(), api.listProviders(), api.settings()])
+      .then(([promptList, providerList, appSettings]) => {
+        setPrompts(promptList);
+        setProviders(providerList);
+        const configuredPromptId = appSettings.values.default_prompt_id;
+        const fallbackPrompt = promptList.find((p) => p.enabled) ?? promptList[0];
+        const configuredPrompt = promptList.find(
+          (p) => p.id === configuredPromptId && p.enabled,
+        );
+        setPromptId(configuredPrompt?.id || fallbackPrompt?.id || "");
 
-  useEffect(() => {
-    if (!promptId && prompts.length > 0) {
-      const first = prompts.find((p) => p.enabled) ?? prompts[0];
-      setPromptId(first.id);
-      if (first.default_provider) setProviderId(first.default_provider);
-      if (first.default_model) setModel(first.default_model);
-    }
-  }, [prompts, promptId]);
+        const configuredProvider = appSettings.values.default_provider;
+        const nextProvider = PROVIDER_IDS.has(configuredProvider)
+          ? configuredProvider
+          : "agy";
+        setProviderId(nextProvider);
+        setModel(appSettings.values.default_models?.[nextProvider] ?? "");
+      })
+      .catch((e) => setError(String(e.message)));
+  }, []);
 
   // 실행이 끝나면 최종 상태를 다시 읽어 온다.
   useEffect(() => {
@@ -92,46 +114,67 @@ export default function RunPage() {
         (sum, f) => sum + (f.read_ok ? f.char_count + 200 : 0),
         0,
       ) ?? 0;
-    return attachmentChars + userInput.length + (selectedPrompt?.body.length ?? 0);
-  }, [upload, userInput, selectedPrompt]);
+    return (
+      attachmentChars +
+      claimText.length +
+      (selectedPrompt?.body.length ?? 0)
+    );
+  }, [upload, claimText, selectedPrompt]);
 
   const budget = upload?.max_inline_chars ?? 300000;
   const overBudget = totalChars > budget;
 
-  const handleFiles = useCallback(async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
+  const selectedUploadItems = useMemo(
+    () => [
+      ...(applicationFile
+        ? [{ file: applicationFile, role: "APPLICATION" as const }]
+        : []),
+      ...citationFiles.map((file) => ({ file, role: "CITATION" as const })),
+    ],
+    [applicationFile, citationFiles],
+  );
+
+  const uploadSelectedFiles = useCallback(async () => {
+    if (selectedUploadItems.length === 0) return null;
     setUploading(true);
     setError("");
     try {
-      const response = await api.upload(Array.from(files));
+      const response = await api.upload(selectedUploadItems);
       setUpload(response);
       const map: Record<string, boolean> = {};
       response.files.forEach((f) => {
-        map[f.attachment_id] = f.read_ok;
+        map[f.attachment_id] = true;
       });
       setRequired(map);
+      return response;
     } catch (e) {
-      setError((e as Error).message);
+      throw e;
     } finally {
       setUploading(false);
-      if (fileInput.current) fileInput.current.value = "";
     }
-  }, []);
+  }, [selectedUploadItems]);
+
+  const prepareFiles = async () => {
+    try {
+      await uploadSelectedFiles();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const run = async () => {
     if (!promptId) return;
     setSubmitting(true);
     setError("");
     try {
+      const preparedUpload = upload ?? (await uploadSelectedFiles());
       const created = await api.createJob({
-        prompt_id: promptId,
-        provider: providerId,
-        model: model.trim() || null,
-        user_input: userInput,
-        batch_id: upload?.batch_id ?? null,
+        claim_text: claimText,
+        batch_id: preparedUpload?.batch_id ?? null,
         required_map: required,
       });
       setJob(created);
+      setActiveTab("result");
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -152,7 +195,12 @@ export default function RunPage() {
     setJob(null);
     setUpload(null);
     setRequired({});
-    setUserInput("");
+    setClaimText("");
+    setApplicationFile(null);
+    setCitationFiles([]);
+    setActiveTab("input");
+    if (applicationFileInput.current) applicationFileInput.current.value = "";
+    if (citationFileInput.current) citationFileInput.current.value = "";
   };
 
   const displayText = job?.result_text ?? stream.streamText;
@@ -164,117 +212,155 @@ export default function RunPage() {
       <div className="page-head">
         <h1>실행</h1>
         <p>
-          선택한 Master Prompt 를 선택한 Provider 에서 실행합니다. 업무 로직은
-          전부 Master Prompt 안에 있으며 ARIA 는 어떤 지시도 추가하지 않습니다.
+          Settings 에 저장된 Master Prompt, Provider, 모델로 특허 분석을 실행합니다.
         </p>
       </div>
 
       {error && <div className="notice danger">{error}</div>}
 
-      {selectedProvider?.experimental && selectedProvider.opted_in && (
-        <div className="notice warn">
-          <strong>실험적 Provider 를 사용 중입니다 — {selectedProvider.display_name}</strong>
-          <ul>
-            {selectedProvider.risks.map((risk, i) => (
-              <li key={i}>{risk}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <div className="card no-print">
-        <h2>1. 프롬프트와 Provider</h2>
-        <div className="card-row">
-          <div className="field">
-            <label htmlFor="prompt">Master Prompt</label>
-            <select
-              id="prompt"
-              value={promptId}
-              onChange={(e) => setPromptId(e.target.value)}
-              disabled={running}
-            >
-              {prompts.length === 0 && <option value="">프롬프트가 없습니다</option>}
-              {prompts.map((p) => (
-                <option key={p.id} value={p.id} disabled={!p.enabled}>
-                  {p.name} (v{p.version}){p.enabled ? "" : " · 비활성"}
-                </option>
-              ))}
-            </select>
-            {selectedPrompt && (
-              <span className="hint">
-                출력 형식: {selectedPrompt.output_mode} ·{" "}
-                {selectedPrompt.description || "설명 없음"}
-              </span>
-            )}
-          </div>
-
-          <div className="field">
-            <label htmlFor="provider">Provider</label>
-            <select
-              id="provider"
-              value={providerId}
-              onChange={(e) => setProviderId(e.target.value)}
-              disabled={running}
-            >
-              {providers.map((p) => (
-                <option key={p.provider} value={p.provider} disabled={!p.usable}>
-                  {p.display_name}
-                  {p.usable ? "" : " · 사용 불가"}
-                </option>
-              ))}
-            </select>
-            {selectedProvider && !selectedProvider.usable && (
-              <span className="hint" style={{ color: "var(--danger)" }}>
-                {selectedProvider.experimental && !selectedProvider.opted_in
-                  ? "실험적 Provider 입니다. Settings 에서 위험을 확인하고 활성화해야 사용할 수 있습니다."
-                  : selectedProvider.auth_state === "NOT_LOGGED_IN"
-                    ? "CLI 에 로그인되어 있지 않습니다. Settings 에서 안내를 확인하십시오."
-                    : "이 Provider 는 현재 사용할 수 없습니다."}
-              </span>
-            )}
-          </div>
-
-          <div className="field">
-            <label htmlFor="model">모델 (비우면 기본값)</label>
-            <input
-              id="model"
-              type="text"
-              value={model}
-              placeholder="예: sonnet"
-              onChange={(e) => setModel(e.target.value)}
-              disabled={running}
-            />
-          </div>
-        </div>
+      <div className="run-tabs no-print" role="tablist" aria-label="실행 화면">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "input"}
+          className={`run-tab ${activeTab === "input" ? "active" : ""}`}
+          onClick={() => setActiveTab("input")}
+        >
+          전용 입력
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "result"}
+          className={`run-tab ${activeTab === "result" ? "active" : ""}`}
+          onClick={() => setActiveTab("result")}
+        >
+          분석 결과
+          {running && <span className="spinner" aria-label="실행 중" />}
+        </button>
       </div>
 
+      {activeTab === "input" && (
+        <>
       <div className="card no-print">
-        <h2>2. 추가 입력과 첨부 자료</h2>
-        <div className="field">
-          <label htmlFor="userInput">사용자 추가 입력 (선택)</label>
-          <textarea
-            id="userInput"
-            value={userInput}
-            onChange={(e) => setUserInput(e.target.value)}
-            placeholder="Master Prompt 에 더해 전달할 내용을 입력합니다."
-            disabled={running}
-          />
+        <h2>1. 특허 분석 전용 입력</h2>
+        <div className="run-config-summary">
+          <span>
+            <strong>Prompt</strong> {selectedPrompt ? `${selectedPrompt.name} (v${selectedPrompt.version})` : "설정 필요"}
+          </span>
+          <span>
+            <strong>Provider</strong> {selectedProvider?.display_name ?? providerId}
+          </span>
+          <span>
+            <strong>모델</strong> {model || "CLI 기본값"}
+          </span>
+          <a href="#/settings">Settings에서 변경</a>
+        </div>
+        <div className="patent-input-grid">
+          <section className="input-panel application claim-panel">
+            <div className="input-panel-head">
+              <span className="input-step">A</span>
+              <div>
+                <strong>출원발명 청구항</strong>
+                <div className="hint">분석할 청구항을 그대로 붙여넣으십시오.</div>
+              </div>
+            </div>
+            <textarea
+              id="claimText"
+              className="claim-input"
+              aria-label="출원발명 청구항"
+              value={claimText}
+              onChange={(e) => setClaimText(e.target.value)}
+              placeholder={
+                "예: 청구항 1. ...\n\n여러 청구항을 한 번에 입력할 수 있습니다."
+              }
+              disabled={running}
+            />
+          </section>
+
+          <section className="input-panel citation">
+            <div className="input-panel-head">
+              <span className="input-step">B</span>
+              <div>
+                <strong>인용발명 문헌</strong>
+                <div className="hint">
+                  대비할 PDF를 모두 선택하십시오. 업로드 순서로 인용번호를 정하지 않습니다.
+                </div>
+              </div>
+            </div>
+            <input
+              ref={citationFileInput}
+              type="file"
+              multiple
+              accept=".pdf,application/pdf"
+              aria-label="인용발명 PDF"
+              onChange={(e) => {
+                setCitationFiles(Array.from(e.target.files ?? []));
+                setUpload(null);
+                setRequired({});
+              }}
+              disabled={running || uploading}
+            />
+            {citationFiles.length > 0 && (
+              <div className="selected-files">
+                {citationFiles.map((file, index) => (
+                  <div className="selected-file" key={`${file.name}-${index}`}>
+                    <span className="pill warn">인용 후보 {index + 1}</span>
+                    <span>{file.name}</span>
+                    <span className="faint">{formatBytes(file.size)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="input-panel application">
+            <div className="input-panel-head">
+              <span className="input-step">C</span>
+              <div>
+                <strong>출원발명 문서</strong>
+                <div className="hint">명세서 PDF가 있으면 1개를 추가하십시오.</div>
+              </div>
+            </div>
+            <input
+              ref={applicationFileInput}
+              type="file"
+              accept=".pdf,application/pdf"
+              aria-label="출원발명 PDF"
+              onChange={(e) => {
+                setApplicationFile(e.target.files?.[0] ?? null);
+                setUpload(null);
+                setRequired({});
+              }}
+              disabled={running || uploading}
+            />
+            {applicationFile && (
+              <div className="selected-file">
+                <span className="pill accent">출원발명</span>
+                <span>{applicationFile.name}</span>
+                <span className="faint">{formatBytes(applicationFile.size)}</span>
+              </div>
+            )}
+          </section>
         </div>
 
-        <div className="field">
-          <label>첨부 파일</label>
-          <input
-            ref={fileInput}
-            type="file"
-            multiple
-            accept=".txt,.md,.markdown,.json,.csv,.pdf"
-            onChange={(e) => handleFiles(e.target.files)}
-            disabled={running || uploading}
-          />
+        <div className="btn-row file-prepare-row">
+          <button
+            type="button"
+            className="btn"
+            onClick={prepareFiles}
+            disabled={
+              running || uploading || selectedUploadItems.length === 0 || Boolean(upload)
+            }
+          >
+            {upload
+              ? "PDF 처리 완료"
+              : uploading
+                ? "자료 처리 중…"
+                : "선택한 PDF 업로드 및 확인"}
+          </button>
           <span className="hint">
-            지원 형식: TXT, MD, JSON, CSV, 텍스트 레이어가 있는 PDF. ARIA 가 텍스트로
-            정규화해서 프롬프트에 직접 넣습니다. 모델이 파일을 읽을지 여부에 의존하지
-            않습니다.
+            실행 버튼을 눌러도 아직 처리하지 않은 PDF는 자동으로 업로드됩니다.
           </span>
         </div>
 
@@ -304,7 +390,14 @@ export default function RunPage() {
               return (
                 <div className="file-item" key={file.attachment_id}>
                   <div className="file-main">
-                    <div className="file-name">{file.original_filename}</div>
+                    <div className="file-name">
+                      <span
+                        className={`pill ${file.role === "APPLICATION" ? "accent" : "warn"}`}
+                      >
+                        {roleLabel(file.role)}
+                      </span>{" "}
+                      {file.original_filename}
+                    </div>
                     <div className="file-meta">
                       {formatBytes(file.size_bytes)} · {file.mime_type}
                       {file.page_count ? ` · ${file.page_count}페이지` : ""}
@@ -348,18 +441,33 @@ export default function RunPage() {
             </div>
           </div>
         )}
+
+        {!upload && (
+          <div
+            className={`notice ${overBudget ? "danger" : "info"}`}
+            style={{ marginTop: 12 }}
+          >
+            현재 텍스트 입력 예상 크기 {totalChars.toLocaleString()}자 / 허용{" "}
+            {budget.toLocaleString()}자
+          </div>
+        )}
       </div>
 
       <div className="card no-print">
+        <h2>2. 분석 실행</h2>
         <div className="btn-row">
           <button
             className="btn primary"
             onClick={run}
             disabled={
-              running || submitting || !promptId || !selectedProvider?.usable
+              running ||
+              uploading ||
+              submitting ||
+              !promptId ||
+              !selectedProvider?.usable
             }
           >
-            {submitting ? "제출 중…" : "실행"}
+            {submitting ? "제출 중…" : "분석 실행"}
           </button>
           <button className="btn danger" onClick={cancel} disabled={!running}>
             중단
@@ -377,15 +485,35 @@ export default function RunPage() {
         </div>
       </div>
 
-      {job && (
+        </>
+      )}
+
+      {activeTab === "result" && !job && (
+        <div className="card empty">
+          <strong>아직 분석 결과가 없습니다.</strong>
+          <div>전용 입력 탭에서 자료를 넣고 실행하면 이곳으로 자동 이동합니다.</div>
+        </div>
+      )}
+
+      {activeTab === "result" && job && (
         <div className="card">
           <div className="split" style={{ marginBottom: 12 }}>
-            <h2 style={{ margin: 0 }}>실행 결과</h2>
-            <StatusPill
-              status={job.status}
-              quality={job.result_quality}
-              errorCode={job.error_code}
-            />
+            <h2 style={{ margin: 0 }}>분석 결과</h2>
+            <div className="btn-row no-print">
+              <StatusPill
+                status={job.status}
+                quality={job.result_quality}
+                errorCode={job.error_code}
+              />
+              <button className="btn small danger" onClick={cancel} disabled={!running}>
+                중단
+              </button>
+              {job && !running && (
+                <button className="btn small" onClick={reset}>
+                  새 분석
+                </button>
+              )}
+            </div>
           </div>
 
           {job.error_code && (

@@ -28,6 +28,7 @@ class PendingCliProvider(Provider):
 
     command: str = ""
     pending_note: str = ""
+    models: tuple[str, ...] = ()
 
     def __init__(self, executable_override: str | None = None) -> None:
         self._override = executable_override or None
@@ -43,9 +44,10 @@ class PendingCliProvider(Provider):
                 "stdin_prompt": None,
                 "system_prompt_override": None,
                 "tools_disabled": None,
-                "model_select": None,
+                "model_select": bool(self.models),
                 "cancellable": None,
                 "native_pdf": None,
+                "models": list(self.models),
             },
         )
 
@@ -101,8 +103,15 @@ class PendingCliProvider(Provider):
 
 class CodexCliProvider(PendingCliProvider):
     id = "codex"
-    display_name = "GPT (Codex CLI)"
+    display_name = "Codex"
     command = "codex"
+    models = (
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+    )
     install_hint = (
         "외부에서 호출 가능한 Codex CLI 가 필요합니다. Codex 데스크톱 앱에 번들된 "
         "실행 파일은 WindowsApps 권한 때문에 외부 프로세스에서 호출할 수 없습니다. "

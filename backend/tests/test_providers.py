@@ -14,7 +14,6 @@ from app.execution import process as proc
 from app.providers.base import ExecutionRequest
 from app.providers.claude_cli import ClaudeCliProvider
 from app.providers.env import build_child_env, describe_filtering, is_blocked
-from app.providers.mock import MockProvider
 from app.providers.registry import PROVIDER_ORDER, build_provider, probe_all
 from app.providers.resolver import resolve_claude, resolve_simple
 
@@ -202,12 +201,6 @@ def test_system_prompt_redacted_in_stored_args() -> None:
 
 
 # ----------------------------------------------------------------- probe
-
-
-async def test_mock_probe_is_usable() -> None:
-    result = await MockProvider().probe()
-    assert result.usable
-    assert result.auth_state == AuthState.NOT_APPLICABLE
 
 
 async def test_probe_all_covers_every_provider() -> None:

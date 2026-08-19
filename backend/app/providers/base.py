@@ -30,12 +30,6 @@ class ProbeResult:
     notes: list[str] = field(default_factory=list)
     install_hint: str = ""
 
-    # 실험적 Provider: 기술적으로는 동작하지만 ARIA 의 안전 원칙을
-    # 충족하지 못한다. 사용자가 Settings 에서 명시적으로 켜야 쓸 수 있다.
-    experimental: bool = False
-    opted_in: bool = True
-    risks: list[str] = field(default_factory=list)
-
     @property
     def runnable(self) -> bool:
         """설치/실행/인증만 본 상태. 안전 정책은 반영하지 않는다."""
@@ -46,8 +40,6 @@ class ProbeResult:
 
     @property
     def usable(self) -> bool:
-        if self.experimental and not self.opted_in:
-            return False
         return self.runnable
 
 

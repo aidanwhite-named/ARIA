@@ -9,8 +9,6 @@ const BLANK = {
   body: "",
   output_mode: "markdown" as "markdown" | "text",
   tags: [] as string[],
-  default_provider: null as string | null,
-  default_model: null as string | null,
 };
 
 type Draft = typeof BLANK & { id?: string };
@@ -18,7 +16,6 @@ type Draft = typeof BLANK & { id?: string };
 export default function PromptsPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [search, setSearch] = useState("");
-  const [includeArchived, setIncludeArchived] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [versions, setVersions] = useState<PromptVersion[] | null>(null);
   const [message, setMessage] = useState("");
@@ -27,10 +24,10 @@ export default function PromptsPage() {
 
   const load = useCallback(() => {
     api
-      .listPrompts({ search, includeArchived })
+      .listPrompts({ search })
       .then(setPrompts)
       .catch((e) => setError(e.message));
-  }, [search, includeArchived]);
+  }, [search]);
 
   useEffect(() => {
     load();
@@ -52,13 +49,11 @@ export default function PromptsPage() {
           body: draft.body,
           output_mode: draft.output_mode,
           tags: draft.tags,
-          default_provider: draft.default_provider,
-          default_model: draft.default_model,
         });
-        notify("저장했습니다. 본문이 바뀌었으면 버전이 올라갑니다.");
+        notify("prompt 폴더에 저장했습니다. 본문이 바뀌었으면 버전이 올라갑니다.");
       } else {
         await api.createPrompt(draft);
-        notify("새 프롬프트를 만들었습니다.");
+        notify("prompt 폴더에 새 프롬프트 파일을 만들었습니다.");
       }
       setDraft(null);
       load();
@@ -111,9 +106,9 @@ export default function PromptsPage() {
       <div className="page-head">
         <h1>Prompt Library</h1>
         <p>
-          Master Prompt 의 본문이 업무 로직의 유일한 출처입니다. 실행 시점의 원문과
-          버전은 스냅샷으로 저장되어, 나중에 수정하거나 삭제해도 과거 실행 내용을
-          확인할 수 있습니다.
+          프로젝트의 prompt 폴더에 있는 Markdown 또는 텍스트 파일이 Master Prompt의
+          유일한 출처입니다. 편집 내용과 버전 이력도 파일로 저장되며, 실행 시점의
+          원문은 작업 이력에 별도 스냅샷으로 남습니다.
         </p>
       </div>
 
@@ -130,14 +125,6 @@ export default function PromptsPage() {
               onChange={(e) => setSearch(e.target.value)}
               style={{ maxWidth: 320 }}
             />
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={includeArchived}
-                onChange={(e) => setIncludeArchived(e.target.checked)}
-              />
-              보관함 포함
-            </label>
           </div>
           <div className="btn-row">
             <button className="btn small" onClick={exportAll}>
@@ -196,9 +183,7 @@ export default function PromptsPage() {
                       ))}
                     </td>
                     <td>
-                      {p.archived ? (
-                        <span className="pill neutral">보관됨</span>
-                      ) : p.enabled ? (
+                      {p.enabled ? (
                         <span className="pill ok">활성</span>
                       ) : (
                         <span className="pill warn">비활성</span>
@@ -216,18 +201,10 @@ export default function PromptsPage() {
                               body: p.body,
                               output_mode: p.output_mode,
                               tags: p.tags ?? [],
-                              default_provider: p.default_provider,
-                              default_model: p.default_model,
                             })
                           }
                         >
                           편집
-                        </button>
-                        <button
-                          className="btn small"
-                          onClick={() => act(() => api.clonePrompt(p.id), "복제했습니다.")}
-                        >
-                          복제
                         </button>
                         <button
                           className="btn small"
@@ -239,17 +216,6 @@ export default function PromptsPage() {
                           }
                         >
                           {p.enabled ? "비활성" : "활성"}
-                        </button>
-                        <button
-                          className="btn small"
-                          onClick={() =>
-                            act(
-                              () => api.updatePrompt(p.id, { archived: !p.archived }),
-                              p.archived ? "보관을 해제했습니다." : "보관했습니다.",
-                            )
-                          }
-                        >
-                          {p.archived ? "복원" : "보관"}
                         </button>
                         <button
                           className="btn small"
@@ -347,8 +313,9 @@ export default function PromptsPage() {
                 onChange={(e) => setDraft({ ...draft, body: e.target.value })}
               />
               <span className="hint">
-                ARIA 는 이 본문 앞뒤에 어떤 업무 지시도 추가하지 않습니다. 첨부 자료의
-                신뢰 경계에 관한 규칙만 시스템 프롬프트로 별도 전달됩니다.
+                저장하면 prompt 폴더의 파일이 즉시 갱신됩니다. ARIA 는 이 본문 앞뒤에
+                어떤 업무 지시도 추가하지 않습니다. 첨부 자료의 신뢰 경계에 관한
+                규칙만 시스템 프롬프트로 별도 전달됩니다.
               </span>
             </div>
             <div className="btn-row">

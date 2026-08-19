@@ -40,7 +40,7 @@ _CHILD_ENV_EXTRA = {
 
 class ClaudeCliProvider(Provider):
     id = "claude"
-    display_name = "Claude (Claude Code CLI)"
+    display_name = "Claude"
     install_hint = (
         "npm install -g @anthropic-ai/claude-code 로 설치한 뒤, 별도 터미널에서 "
         "claude setup-token 또는 claude auth login 으로 로그인하십시오. "
@@ -71,6 +71,9 @@ class ClaudeCliProvider(Provider):
                 "model_select": True,
                 "cancellable": True,
                 "native_pdf": False,
+                # Claude Code 는 계정별 모델 목록 명령을 제공하지 않는다.
+                # 설치된 CLI 가 공식적으로 해석하는 최신 모델 alias 만 노출한다.
+                "models": ["sonnet", "opus", "haiku"],
             },
         )
 

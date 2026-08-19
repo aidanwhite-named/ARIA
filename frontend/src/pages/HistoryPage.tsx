@@ -68,10 +68,9 @@ export default function HistoryPage() {
           </select>
           <select value={providerFilter} onChange={(e) => setProviderFilter(e.target.value)} style={{ maxWidth: 180 }}>
             <option value="">모든 Provider</option>
-            <option value="mock">mock</option>
             <option value="claude">claude</option>
             <option value="codex">codex</option>
-            <option value="gemini">gemini</option>
+            <option value="agy">agy</option>
           </select>
           <button className="btn small" onClick={load}>
             새로고침

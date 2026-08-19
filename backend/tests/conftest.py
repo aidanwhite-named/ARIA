@@ -10,7 +10,9 @@ import os
 import tempfile
 
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="aria-test-")
+_TEST_PROMPT_DIR = tempfile.mkdtemp(prefix="aria-prompts-test-")
 os.environ["ARIA_DATA_DIR"] = _TEST_DATA_DIR
+os.environ["ARIA_PROMPT_DIR"] = _TEST_PROMPT_DIR
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -34,6 +36,20 @@ def work_dir(tmp_path):
 @pytest.fixture(scope="module")
 def client():
     from app.main import app
+    from app.api import jobs as jobs_api
+    from app.execution import runner as runner_module
+    from app.providers.registry import build_provider as build_production_provider
+
+    from .fake_provider import DeterministicTestProvider
+
+    def build_test_provider(provider_id: str, overrides=None):
+        if provider_id == "test":
+            return DeterministicTestProvider()
+        return build_production_provider(provider_id, overrides)
+
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(jobs_api, "build_provider", build_test_provider)
+    patcher.setattr(runner_module, "build_provider", build_test_provider)
 
     PATHS.ensure()
     init_engine()
@@ -41,6 +57,7 @@ def client():
         # CSRF 가드가 변경 요청에 요구하는 헤더.
         test_client.headers.update({"X-ARIA-Client": "1"})
         yield test_client
+    patcher.undo()
 
 
 def wait_for_job(client: TestClient, job_id: str, timeout: float = 60.0) -> dict:

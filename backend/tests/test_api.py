@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from .conftest import wait_for_job
 from .pdf_fixture import build_pdf, build_scanned_like_pdf
+from app.config import PROMPT_DIR
 
 
 @pytest.fixture()
@@ -44,27 +47,37 @@ def test_prompt_crud_and_versioning(client) -> None:
     assert client.get(f"/api/prompts/{created['id']}").status_code == 404
 
 
-def test_prompt_clone(client, prompt) -> None:
-    clone = client.post(f"/api/prompts/{prompt['id']}/clone").json()
-    assert clone["id"] != prompt["id"]
-    assert clone["body"] == prompt["body"]
-    assert "복제" in clone["name"]
+def test_prompt_enable_and_disable(client, prompt) -> None:
+    disabled = client.put(
+        f"/api/prompts/{prompt['id']}", json={"enabled": False}
+    ).json()
+    assert disabled["enabled"] is False
+    assert prompt["id"] in [p["id"] for p in client.get("/api/prompts").json()]
 
-
-def test_prompt_enable_and_archive(client, prompt) -> None:
-    client.put(f"/api/prompts/{prompt['id']}", json={"archived": True})
-    names = [p["id"] for p in client.get("/api/prompts").json()]
-    assert prompt["id"] not in names
-    with_archived = [
-        p["id"] for p in client.get("/api/prompts?include_archived=true").json()
-    ]
-    assert prompt["id"] in with_archived
+    enabled = client.put(
+        f"/api/prompts/{prompt['id']}", json={"enabled": True}
+    ).json()
+    assert enabled["enabled"] is True
 
 
 def test_prompt_search(client) -> None:
     client.post("/api/prompts", json={"name": "고유검색어ABC", "body": "본문"})
     found = client.get("/api/prompts?search=고유검색어ABC").json()
     assert len(found) == 1
+
+
+def test_prompt_file_is_the_live_source(client) -> None:
+    created = client.post(
+        "/api/prompts", json={"name": "파일 원본 확인", "body": "처음 본문"}
+    ).json()
+    target = PROMPT_DIR / created["id"]
+    assert target.is_file()
+
+    target.write_text("# 외부에서 수정한 프롬프트\n\n바뀐 본문", encoding="utf-8")
+    loaded = client.get(f"/api/prompts/{created['id']}").json()
+    assert loaded["body"] == "# 외부에서 수정한 프롬프트\n\n바뀐 본문"
+
+    assert client.delete(f"/api/prompts/{created['id']}").status_code == 204
 
 
 def test_prompt_export_import_roundtrip(client) -> None:
@@ -97,8 +110,8 @@ def test_invalid_output_mode_rejected(client) -> None:
 def test_provider_list_reports_usability(client) -> None:
     providers = client.get("/api/providers").json()["providers"]
     by_id = {p["provider"]: p for p in providers}
-    assert by_id["mock"]["usable"] is True
-    for pid in ("claude", "codex", "gemini"):
+    assert "mock" not in by_id
+    for pid in ("agy", "claude", "codex"):
         assert pid in by_id
         assert "install_hint" in by_id[pid]
 
@@ -131,13 +144,39 @@ def test_upload_requires_files(client) -> None:
     assert client.post("/api/uploads", files=[]).status_code in (400, 422)
 
 
+def test_upload_preserves_application_and_citation_roles(client) -> None:
+    files = [
+        ("files", ("application.txt", b"claim body", "text/plain")),
+        ("files", ("citation.txt", b"prior art body", "text/plain")),
+    ]
+    response = client.post(
+        "/api/uploads",
+        files=files,
+        data={"roles": json.dumps(["APPLICATION", "CITATION"])},
+    )
+    assert response.status_code == 200
+    assert [item["role"] for item in response.json()["files"]] == [
+        "APPLICATION",
+        "CITATION",
+    ]
+
+
+def test_upload_rejects_mismatched_roles(client) -> None:
+    response = client.post(
+        "/api/uploads",
+        files=[("files", ("one.txt", b"body", "text/plain"))],
+        data={"roles": json.dumps(["APPLICATION", "CITATION"])},
+    )
+    assert response.status_code == 400
+
+
 # ------------------------------------------------------------------- jobs
 
 
 def test_job_success_flow(client, prompt) -> None:
     job = client.post(
         "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "mock", "user_input": "요약해줘"},
+        json={"prompt_id": prompt["id"], "provider": "test"},
     ).json()
     final = wait_for_job(client, job["id"])
 
@@ -150,9 +189,42 @@ def test_job_success_flow(client, prompt) -> None:
     assert final["duration_ms"] is not None
 
 
+def test_claim_and_document_roles_reach_final_prompt(client, prompt) -> None:
+    upload = client.post(
+        "/api/uploads",
+        files=[
+            ("files", ("application.txt", b"application document", "text/plain")),
+            ("files", ("citation.txt", b"citation document", "text/plain")),
+        ],
+        data={"roles": json.dumps(["APPLICATION", "CITATION"])},
+    ).json()
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 전용 청구항 표식",
+            "batch_id": upload["batch_id"],
+        },
+    ).json()
+    final = wait_for_job(client, job["id"])
+    prompt_text = client.get(f"/api/jobs/{job['id']}/final-prompt").text
+
+    assert final["claim_text"] == "청구항 1. 전용 청구항 표식"
+    assert {
+        item["original_filename"]: item["role"] for item in final["attachments"]
+    } == {
+        "application.txt": "APPLICATION",
+        "citation.txt": "CITATION",
+    }
+    assert "[출원발명 청구항]" in prompt_text
+    assert "[출원발명 문서]" in prompt_text
+    assert "[인용발명 문헌]" in prompt_text
+
+
 def test_job_snapshot_survives_prompt_deletion(client) -> None:
     p = client.post("/api/prompts", json={"name": "삭제될 프롬프트", "body": "원본 본문"}).json()
-    job = client.post("/api/jobs", json={"prompt_id": p["id"], "provider": "mock"}).json()
+    job = client.post("/api/jobs", json={"prompt_id": p["id"], "provider": "test"}).json()
     wait_for_job(client, job["id"])
     client.delete(f"/api/prompts/{p['id']}")
 
@@ -164,27 +236,27 @@ def test_job_snapshot_survives_prompt_deletion(client) -> None:
 @pytest.mark.parametrize(
     ("keyword", "status", "code"),
     [
-        ("MOCK_FAIL", "FAILED", "PROCESS_ERROR"),
-        ("MOCK_EMPTY", "FAILED", "EMPTY_RESULT"),
-        ("MOCK_AUTH", "FAILED", "AUTH_REQUIRED"),
-        ("MOCK_RATELIMIT", "FAILED", "RATE_LIMITED"),
-        ("MOCK_WARN", "SUCCEEDED", None),
+        ("TEST_FAIL", "FAILED", "PROCESS_ERROR"),
+        ("TEST_EMPTY", "FAILED", "EMPTY_RESULT"),
+        ("TEST_AUTH", "FAILED", "AUTH_REQUIRED"),
+        ("TEST_RATELIMIT", "FAILED", "RATE_LIMITED"),
+        ("TEST_WARN", "SUCCEEDED", None),
     ],
 )
 def test_job_failure_paths(client, prompt, keyword, status, code) -> None:
     job = client.post(
         "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "mock", "user_input": keyword},
+        json={"prompt_id": prompt["id"], "provider": "test", "claim_text": keyword},
     ).json()
     final = wait_for_job(client, job["id"])
     assert final["status"] == status
     assert final["error_code"] == code
 
 
-def test_mock_warn_is_success_with_warnings(client, prompt) -> None:
+def test_deterministic_warning_is_success_with_warnings(client, prompt) -> None:
     job = client.post(
         "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "mock", "user_input": "MOCK_WARN"},
+        json={"prompt_id": prompt["id"], "provider": "test", "claim_text": "TEST_WARN"},
     ).json()
     final = wait_for_job(client, job["id"])
     assert final["result_quality"] == "SUCCESS_WITH_WARNINGS"
@@ -201,7 +273,7 @@ def test_required_attachment_failure_fails_job(client, prompt) -> None:
         "/api/jobs",
         json={
             "prompt_id": prompt["id"],
-            "provider": "mock",
+            "provider": "test",
             "batch_id": upload["batch_id"],
             "required_map": {attachment_id: True},
         },
@@ -226,7 +298,7 @@ def test_optional_attachment_failure_only_warns(client, prompt) -> None:
         "/api/jobs",
         json={
             "prompt_id": prompt["id"],
-            "provider": "mock",
+            "provider": "test",
             "batch_id": upload["batch_id"],
             "required_map": required,
         },
@@ -245,7 +317,7 @@ def test_attachment_content_reaches_final_prompt(client, prompt) -> None:
         "/api/jobs",
         json={
             "prompt_id": prompt["id"],
-            "provider": "mock",
+            "provider": "test",
             "batch_id": upload["batch_id"],
         },
     ).json()
@@ -265,7 +337,7 @@ def test_input_too_large(client, prompt) -> None:
             "/api/jobs",
             json={
                 "prompt_id": prompt["id"],
-                "provider": "mock",
+                "provider": "test",
                 "batch_id": upload["batch_id"],
             },
         ).json()
@@ -278,7 +350,7 @@ def test_input_too_large(client, prompt) -> None:
 
 def test_job_with_unknown_prompt_404(client) -> None:
     response = client.post(
-        "/api/jobs", json={"prompt_id": "does-not-exist", "provider": "mock"}
+        "/api/jobs", json={"prompt_id": "does-not-exist", "provider": "test"}
     )
     assert response.status_code == 404
 
@@ -289,7 +361,7 @@ def test_batch_cannot_be_reused(client, prompt) -> None:
     ).json()
     body = {
         "prompt_id": prompt["id"],
-        "provider": "mock",
+        "provider": "test",
         "batch_id": upload["batch_id"],
     }
     first = client.post("/api/jobs", json=body)
@@ -299,7 +371,7 @@ def test_batch_cannot_be_reused(client, prompt) -> None:
 
 
 def test_result_download_formats(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "mock"}).json()
+    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
     wait_for_job(client, job["id"])
 
     md = client.get(f"/api/jobs/{job['id']}/result?fmt=md")
@@ -311,7 +383,7 @@ def test_result_download_formats(client, prompt) -> None:
 
 
 def test_cancel_finished_job_is_noop(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "mock"}).json()
+    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
     wait_for_job(client, job["id"])
     assert client.post(f"/api/jobs/{job['id']}/cancel").json()["cancelled"] is False
 
@@ -320,14 +392,14 @@ def test_cancel_finished_job_is_noop(client, prompt) -> None:
 
 
 def test_history_lists_and_deletes(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "mock"}).json()
+    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
     wait_for_job(client, job["id"])
 
     items = client.get("/api/history").json()
     assert any(i["id"] == job["id"] for i in items)
 
-    filtered = client.get("/api/history?provider=mock").json()
-    assert all(i["provider"] == "mock" for i in filtered)
+    filtered = client.get("/api/history?provider=test").json()
+    assert all(i["provider"] == "test" for i in filtered)
 
     assert client.delete(f"/api/history/{job['id']}").status_code == 204
     assert client.get(f"/api/history/{job['id']}").status_code == 404

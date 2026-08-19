@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .enums import OutputMode
+from .enums import AttachmentRole, OutputMode
 
 
 class PromptBase(BaseModel):
@@ -15,8 +15,6 @@ class PromptBase(BaseModel):
     description: str = ""
     body: str = Field(min_length=1)
     output_mode: str = OutputMode.MARKDOWN
-    default_provider: str | None = None
-    default_model: str | None = None
     tags: list[str] = Field(default_factory=list)
     accepted_file_types: list[str] = Field(default_factory=list)
 
@@ -38,12 +36,9 @@ class PromptUpdate(BaseModel):
     description: str | None = None
     body: str | None = Field(default=None, min_length=1)
     output_mode: str | None = None
-    default_provider: str | None = None
-    default_model: str | None = None
     tags: list[str] | None = None
     accepted_file_types: list[str] | None = None
     enabled: bool | None = None
-    archived: bool | None = None
 
     @field_validator("output_mode")
     @classmethod
@@ -60,7 +55,6 @@ class PromptOut(PromptBase):
     id: str
     version: int
     enabled: bool
-    archived: bool
     created_at: datetime
     updated_at: datetime
 
@@ -94,6 +88,7 @@ class AttachmentAnalysis(BaseModel):
     mime_type: str
     size_bytes: int
     sha256: str
+    role: str = AttachmentRole.SUPPLEMENTAL
     page_count: int | None = None
     char_count: int
     extraction_method: str
@@ -111,10 +106,12 @@ class UploadResponse(BaseModel):
 
 
 class JobCreate(BaseModel):
-    prompt_id: str
-    provider: str
+    # 실행 화면은 이 값을 보내지 않고 Settings 의 기본값을 사용한다.
+    # 선택적 override 는 기존 API 클라이언트와 테스트 호환을 위해 유지한다.
+    prompt_id: str | None = None
+    provider: str | None = None
     model: str | None = None
-    user_input: str = ""
+    claim_text: str = ""
     batch_id: str | None = None
     required_map: dict[str, bool] = Field(default_factory=dict)
 
@@ -126,6 +123,7 @@ class JobAttachmentOut(BaseModel):
     size_bytes: int
     sha256: str
     required: bool
+    role: str = AttachmentRole.SUPPLEMENTAL
     page_count: int | None = None
     char_count: int
     extraction_method: str
@@ -144,7 +142,7 @@ class JobOut(BaseModel):
     prompt_version: int | None = None
     prompt_snapshot: str
     output_mode: str
-    user_input: str
+    claim_text: str = ""
     provider: str
     model: str | None = None
     cli_path: str | None = None

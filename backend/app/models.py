@@ -21,7 +21,6 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -38,54 +37,6 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class PromptTemplate(Base):
-    __tablename__ = "prompt_templates"
-
-    id = Column(String(36), primary_key=True, default=_uuid)
-    name = Column(String(200), nullable=False)
-    description = Column(Text, default="")
-    body = Column(Text, nullable=False)
-    version = Column(Integer, nullable=False, default=1)
-    enabled = Column(Boolean, nullable=False, default=True)
-    archived = Column(Boolean, nullable=False, default=False)
-    output_mode = Column(String(20), nullable=False, default="markdown")
-    default_provider = Column(String(30), nullable=True)
-    default_model = Column(String(80), nullable=True)
-    tags = Column(JSON, nullable=False, default=list)
-    accepted_file_types = Column(JSON, nullable=False, default=list)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
-    updated_at = Column(
-        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
-    )
-
-    versions = relationship(
-        "PromptVersion",
-        back_populates="prompt",
-        cascade="all, delete-orphan",
-        order_by="PromptVersion.version",
-    )
-
-
-class PromptVersion(Base):
-    __tablename__ = "prompt_versions"
-    __table_args__ = (
-        UniqueConstraint("prompt_id", "version", name="uq_prompt_version"),
-    )
-
-    id = Column(String(36), primary_key=True, default=_uuid)
-    prompt_id = Column(
-        String(36), ForeignKey("prompt_templates.id", ondelete="CASCADE"), nullable=False
-    )
-    version = Column(Integer, nullable=False)
-    name = Column(String(200), nullable=False)
-    description = Column(Text, default="")
-    body = Column(Text, nullable=False)
-    output_mode = Column(String(20), nullable=False, default="markdown")
-    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
-
-    prompt = relationship("PromptTemplate", back_populates="versions")
-
-
 class ExecutionJob(Base):
     __tablename__ = "execution_jobs"
 
@@ -97,7 +48,7 @@ class ExecutionJob(Base):
     prompt_version = Column(Integer, nullable=True)
     prompt_snapshot = Column(Text, nullable=False, default="")
     output_mode = Column(String(20), nullable=False, default="markdown")
-    user_input = Column(Text, nullable=False, default="")
+    claim_text = Column(Text, nullable=False, default="")
 
     provider = Column(String(30), nullable=False)
     model = Column(String(80), nullable=True)
@@ -173,6 +124,7 @@ class Attachment(Base):
     size_bytes = Column(Integer, nullable=False, default=0)
     sha256 = Column(String(64), nullable=False, default="")
     required = Column(Boolean, nullable=False, default=True)
+    role = Column(String(30), nullable=False, default="SUPPLEMENTAL")
 
     stored_path = Column(Text, nullable=False)
     normalized_text_path = Column(Text, nullable=True)

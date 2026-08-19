@@ -8,14 +8,9 @@ from dataclasses import asdict
 from .agy_cli import AgyCliProvider
 from .base import ProbeResult, Provider
 from .claude_cli import ClaudeCliProvider
-from .mock import MockProvider
 from .pending import CodexCliProvider
 
-PROVIDER_ORDER = ["mock", "claude", "codex", "gemini"]
-
-# 기술적으로 동작하지만 ARIA 의 안전 원칙(도구 없음)을 충족하지 못하는
-# Provider. 사용자가 Settings 에서 명시적으로 켜야 실행된다.
-EXPERIMENTAL_PROVIDERS = frozenset({"gemini"})
+PROVIDER_ORDER = ["agy", "claude", "codex"]
 
 _cache: dict[str, ProbeResult] = {}
 _lock = asyncio.Lock()
@@ -24,13 +19,11 @@ _lock = asyncio.Lock()
 def build_provider(provider_id: str, overrides: dict[str, str] | None = None) -> Provider | None:
     overrides = overrides or {}
     path = overrides.get(provider_id) or None
-    if provider_id == "mock":
-        return MockProvider()
     if provider_id == "claude":
         return ClaudeCliProvider(path)
     if provider_id == "codex":
         return CodexCliProvider(path)
-    if provider_id == "gemini":
+    if provider_id == "agy":
         return AgyCliProvider(path)
     return None
 
@@ -42,23 +35,6 @@ def all_providers(overrides: dict[str, str] | None = None) -> list[Provider]:
         if provider is not None:
             providers.append(provider)
     return providers
-
-
-def apply_optin(results: list[ProbeResult], enabled: list[str] | None) -> list[ProbeResult]:
-    """실험적 Provider 의 opt-in 여부를 반영한다."""
-    allowed = set(enabled or [])
-    for item in results:
-        if item.provider in EXPERIMENTAL_PROVIDERS:
-            item.experimental = True
-            item.opted_in = item.provider in allowed
-    return results
-
-
-def is_allowed(provider_id: str, enabled: list[str] | None) -> bool:
-    """실행을 허용해도 되는 Provider 인가."""
-    if provider_id not in EXPERIMENTAL_PROVIDERS:
-        return True
-    return provider_id in set(enabled or [])
 
 
 async def probe_all(

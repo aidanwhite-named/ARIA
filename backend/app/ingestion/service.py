@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pypdf
 
-from ..enums import DeliveryMode, ExtractionMethod
+from ..enums import AttachmentRole, DeliveryMode, ExtractionMethod
 from .security import (
     UnsafeFilename,
     contains_executable_signature,
@@ -49,6 +49,7 @@ class IngestedFile:
     sha256: str
     required: bool
     stored_path: str
+    role: str = AttachmentRole.SUPPLEMENTAL
     normalized_text_path: str | None = None
     page_count: int | None = None
     char_count: int = 0
@@ -67,6 +68,7 @@ class IngestedFile:
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
             "required": self.required,
+            "role": self.role,
             "page_count": self.page_count,
             "char_count": self.char_count,
             "extraction_method": self.extraction_method,
@@ -171,6 +173,7 @@ def ingest_one(
     work_dir: Path,
     required: bool,
     limits: IngestionLimits,
+    role: str = AttachmentRole.SUPPLEMENTAL,
 ) -> IngestedFile:
     safe = validate_filename(raw_filename)
 
@@ -206,6 +209,7 @@ def ingest_one(
         sha256=_sha256(data),
         required=required,
         stored_path=str(stored_path),
+        role=role,
     )
 
     if safe.extension == ".pdf":
@@ -254,7 +258,7 @@ def _write_normalized(work_dir: Path, attachment_id: str, text: str) -> str:
 
 
 def ingest_many(
-    uploads: list[tuple[str, bytes, bool]],
+    uploads: list[tuple[str, bytes, bool] | tuple[str, bytes, bool, str]],
     work_dir: Path,
     limits: IngestionLimits,
 ) -> IngestionResult:
@@ -265,16 +269,20 @@ def ingest_many(
             f"파일 개수가 제한을 넘었습니다: {len(uploads)} (최대 {limits.max_files})"
         )
 
-    total = sum(len(data) for _, data, _ in uploads)
+    total = sum(len(upload[1]) for upload in uploads)
     if total > limits.max_total_upload_bytes:
         raise UnsafeFilename(
             f"총 업로드 크기가 제한을 넘었습니다: {total:,} bytes "
             f"(제한 {limits.max_total_upload_bytes:,} bytes)"
         )
 
-    for filename, data, required in uploads:
+    for upload in uploads:
+        filename, data, required = upload[:3]
+        role = upload[3] if len(upload) == 4 else AttachmentRole.SUPPLEMENTAL
         try:
-            result.files.append(ingest_one(filename, data, work_dir, required, limits))
+            result.files.append(
+                ingest_one(filename, data, work_dir, required, limits, role=role)
+            )
         except UnsafeFilename as exc:
             result.rejected.append({"filename": filename, "reason": str(exc)})
     return result

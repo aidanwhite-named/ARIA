@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
-import type { AppSettings, ProviderInfo } from "../lib/types";
+import type { AppSettings, Prompt, ProviderInfo } from "../lib/types";
 
 const AUTH_LABEL: Record<string, { text: string; cls: string }> = {
   OK: { text: "로그인됨", cls: "ok" },
@@ -12,19 +12,34 @@ const AUTH_LABEL: Record<string, { text: string; cls: string }> = {
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [probing, setProbing] = useState(false);
   const [smoke, setSmoke] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [paths, setPaths] = useState<Record<string, string>>({});
+  const [defaultPromptId, setDefaultPromptId] = useState("");
+  const [defaultProvider, setDefaultProvider] = useState("agy");
+  const [defaultModels, setDefaultModels] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.settings().then((s) => {
-      setSettings(s);
-      setPaths(s.values.provider_paths ?? {});
-    }).catch((e) => setError(e.message));
-    api.listProviders().then(setProviders).catch(() => undefined);
+    Promise.all([api.settings(), api.listPrompts(), api.listProviders()])
+      .then(([s, promptList, providerList]) => {
+        setSettings(s);
+        setPrompts(promptList);
+        setProviders(providerList);
+        setPaths(s.values.provider_paths ?? {});
+        const configuredPromptId = s.values.default_prompt_id ?? "";
+        const configuredPrompt = promptList.find(
+          (prompt) => prompt.id === configuredPromptId && prompt.enabled,
+        );
+        const fallbackPrompt = promptList.find((prompt) => prompt.enabled);
+        setDefaultPromptId(configuredPrompt?.id ?? fallbackPrompt?.id ?? "");
+        setDefaultProvider(s.values.default_provider ?? "agy");
+        setDefaultModels(s.values.default_models ?? {});
+      })
+      .catch((e) => setError(e.message));
   }, []);
 
   const notify = (text: string) => {
@@ -56,19 +71,15 @@ export default function SettingsPage() {
     }
   };
 
-  const toggleExperimental = async (id: string, on: boolean) => {
-    if (!settings) return;
-    const current = settings.values.enabled_experimental_providers ?? [];
-    const next = on
-      ? Array.from(new Set([...current, id]))
-      : current.filter((x) => x !== id);
+  const saveExecutionDefaults = async () => {
     try {
       const updated = await api.updateSettings({
-        enabled_experimental_providers: next,
+        default_prompt_id: defaultPromptId,
+        default_provider: defaultProvider,
+        default_models: defaultModels,
       });
       setSettings(updated);
-      setProviders(await api.listProviders());
-      notify(on ? "활성화했습니다." : "비활성화했습니다.");
+      notify("실행 기본 설정을 저장했습니다.");
     } catch (e) {
       setError((e as Error).message);
     }
@@ -102,6 +113,13 @@ export default function SettingsPage() {
   }
 
   const v = settings.values;
+  const selectedProvider = providers.find((p) => p.provider === defaultProvider);
+  const modelOptions = Array.isArray(selectedProvider?.capabilities.models)
+    ? selectedProvider.capabilities.models
+    : [];
+  const selectedModel = modelOptions.includes(defaultModels[defaultProvider])
+    ? defaultModels[defaultProvider]
+    : "";
 
   return (
     <div>
@@ -120,6 +138,77 @@ export default function SettingsPage() {
           {w}
         </div>
       ))}
+
+      <div className="card">
+        <h2>실행 기본 설정</h2>
+        <p className="faint" style={{ marginTop: -6 }}>
+          실행 화면은 아래 설정을 그대로 사용합니다.
+        </p>
+        <div className="card-row">
+          <div className="field">
+            <label htmlFor="default-prompt">Master Prompt</label>
+            <select
+              id="default-prompt"
+              value={defaultPromptId}
+              onChange={(e) => setDefaultPromptId(e.target.value)}
+            >
+              <option value="">최근 활성 프롬프트 자동 선택</option>
+              {prompts.map((prompt) => (
+                <option key={prompt.id} value={prompt.id} disabled={!prompt.enabled}>
+                  {prompt.name} (v{prompt.version}){prompt.enabled ? "" : " · 비활성"}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="default-provider">Provider</label>
+            <select
+              id="default-provider"
+              value={defaultProvider}
+              onChange={(e) => setDefaultProvider(e.target.value)}
+            >
+              {providers.map((provider) => (
+                <option key={provider.provider} value={provider.provider}>
+                  {provider.display_name}{provider.usable ? "" : " · 사용 불가"}
+                </option>
+              ))}
+            </select>
+            {selectedProvider && !selectedProvider.usable && (
+              <span className="hint" style={{ color: "var(--danger)" }}>
+                설치 또는 로그인을 완료한 뒤 사용할 수 있습니다.
+              </span>
+            )}
+          </div>
+          <div className="field">
+            <label htmlFor="default-model">모델</label>
+            <select
+              id="default-model"
+              value={selectedModel}
+              onChange={(e) =>
+                setDefaultModels((current) => {
+                  const next = { ...current };
+                  if (e.target.value) next[defaultProvider] = e.target.value;
+                  else delete next[defaultProvider];
+                  return next;
+                })
+              }
+            >
+              <option value="">CLI 기본 모델</option>
+              {modelOptions.map((model) => (
+                <option key={model} value={model}>{model}</option>
+              ))}
+            </select>
+            <span className="hint">
+              {modelOptions.length > 0
+                ? `${modelOptions.length}개 모델을 선택할 수 있습니다.`
+                : "모델 목록을 확인할 수 없습니다."}
+            </span>
+          </div>
+        </div>
+        <button className="btn primary" onClick={saveExecutionDefaults}>
+          실행 기본 설정 저장
+        </button>
+      </div>
 
       <div className="card">
         <div className="split" style={{ marginBottom: 12 }}>
@@ -164,12 +253,8 @@ export default function SettingsPage() {
                     <td>{cap("stream_json")}</td>
                     <td>{cap("tools_disabled")}</td>
                     <td>
-                      {p.experimental && !p.opted_in ? (
-                        <span className="pill warn">실험적 · 비활성</span>
-                      ) : p.usable ? (
-                        <span className={`pill ${p.experimental ? "warn" : "ok"}`}>
-                          {p.experimental ? "실험적 · 활성" : "사용 가능"}
-                        </span>
+                      {p.usable ? (
+                        <span className="pill ok">사용 가능</span>
                       ) : (
                         <span className="pill danger">사용 불가</span>
                       )}
@@ -188,32 +273,6 @@ export default function SettingsPage() {
                 {p.display_name} — 상세 및 설치/로그인 안내
               </summary>
               <div style={{ padding: "10px 0 4px" }}>
-                {p.experimental && (
-                  <div className="notice warn">
-                    <strong>
-                      실험적 Provider — ARIA 의 안전 원칙(도구 없는 실행)을 충족하지
-                      못합니다
-                    </strong>
-                    <ul>
-                      {p.risks.map((risk, i) => (
-                        <li key={i}>{risk}</li>
-                      ))}
-                    </ul>
-                    <label className="checkbox" style={{ marginTop: 10 }}>
-                      <input
-                        type="checkbox"
-                        checked={p.opted_in}
-                        onChange={(e) => toggleExperimental(p.provider, e.target.checked)}
-                      />
-                      위 내용을 확인했으며 이 Provider 를 활성화합니다
-                    </label>
-                    {!p.runnable && (
-                      <div className="faint" style={{ marginTop: 6 }}>
-                        활성화해도 설치 또는 인증이 완료되어야 실행됩니다.
-                      </div>
-                    )}
-                  </div>
-                )}
                 {p.notes.length > 0 && (
                   <ul style={{ margin: "0 0 10px", paddingLeft: 18 }}>
                     {p.notes.map((n, i) => (
@@ -244,15 +303,13 @@ export default function SettingsPage() {
                   >
                     경로 저장
                   </button>
-                  {p.provider !== "mock" && (
-                    <button
-                      className="btn small"
-                      onClick={() => runSmoke(p.provider)}
-                      disabled={!p.executable_ok}
-                    >
-                      실제 호출 테스트 (사용량 발생)
-                    </button>
-                  )}
+                  <button
+                    className="btn small"
+                    onClick={() => runSmoke(p.provider)}
+                    disabled={!p.executable_ok}
+                  >
+                    실제 호출 테스트 (사용량 발생)
+                  </button>
                 </div>
               </div>
             </details>

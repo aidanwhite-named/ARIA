@@ -155,7 +155,7 @@ class AgyStreamParser:
             (
                 "provider_start",
                 {
-                    "message": "Gemini(agy) 세션 시작",
+                    "message": "agy 세션 시작",
                     "tools": len(state.tools_advertised),
                     "permission_mode": state.permission_mode,
                 },

@@ -1,4 +1,4 @@
-"""Gemini Provider (agy CLI) — 실험적.
+"""agy CLI Provider.
 
 이 PC 의 Gemini CLI 는 `agy` 라는 이름의 네이티브 실행 파일이다.
 agy 1.1.15 를 실제로 실행해서 계약을 확인했다.
@@ -23,10 +23,8 @@ Claude 와 다른 두 가지 제약이 있다.
    못한다. 실패로 표시되는 시점에는 이미 파일 쓰기나 명령 실행이 끝난
    뒤일 수 있다. 이건 fail-closed 가 아니라 사후 탐지다.
 
-   그래서 이 Provider 는 experimental 로 분류하고, 사용자가 Settings 에서
-   명시적으로 켜지 않으면 실행되지 않는다. --sandbox 를 붙이지만 그것을
-   안전 경계로 취급하지 않는다. --dangerously-skip-permissions 는 절대
-   쓰지 않는다.
+   --sandbox 를 붙이지만 그것을 안전 경계로 취급하지 않는다.
+   --dangerously-skip-permissions 는 절대 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -43,22 +41,6 @@ from .agy_stream import AgyStreamParser, build_stdin_message
 from .base import EmitFn, ExecutionOutcome, ExecutionRequest, ProbeResult, Provider
 from .env import build_child_env
 from .resolver import ExecutableKind, ResolvedExecutable, resolve_simple
-
-# 이 Provider 를 쓰기 전에 사용자가 알아야 할 것. Settings 에 그대로 표시된다.
-RISKS = (
-    "도구를 끄는 플래그가 없습니다. run_command, write_to_file 을 포함해 수십 개 "
-    "도구가 활성 상태로 실행됩니다.",
-    "ARIA 는 도구 호출을 '탐지'해서 실패로 기록할 뿐, 호출 자체를 '차단'하지 "
-    "못합니다. 차단은 agy 의 승인 정책(request-review)과 --sandbox 에 의존하며 "
-    "ARIA 가 보장하는 경계가 아닙니다. agy 버전이 바뀌면 달라질 수 있습니다.",
-    "실측(agy 1.1.15): 파일 쓰기와 셸 명령을 요청했을 때 도구 호출이 시도됐고 "
-    "ARIA 가 탐지해 실패 처리했으며, 디스크에는 아무 변화가 없었습니다. 다만 "
-    "이는 세 가지 시나리오를 확인한 것일 뿐 모든 경우를 검증한 것이 아닙니다.",
-    "시스템 프롬프트를 분리할 수 없어 ARIA 런타임 컨텍스트가 사용자 메시지에 "
-    "포함됩니다. 첨부 문서와 같은 층위라 프롬프트 인젝션 방어가 약합니다.",
-    "신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.",
-)
-
 
 _KNOWN_INSTALL_DIRS = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin",
@@ -104,8 +86,8 @@ def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
 
 
 class AgyCliProvider(Provider):
-    id = "gemini"
-    display_name = "Gemini via agy CLI — 실험적"
+    id = "agy"
+    display_name = "agy"
     install_hint = (
         "agy CLI 를 설치하고 로그인하십시오. 설치되어 있으면 `agy models` 가 "
         "모델 목록을 반환합니다. ARIA 는 API Key 를 입력받지 않고 CLI 에 저장된 "
@@ -127,8 +109,6 @@ class AgyCliProvider(Provider):
             provider=self.id,
             display_name=self.display_name,
             install_hint=self.install_hint,
-            experimental=True,
-            risks=list(RISKS),
             capabilities={
                 "non_interactive": True,
                 "stream_json": True,

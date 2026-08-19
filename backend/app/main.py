@@ -19,8 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .api import history, jobs, prompts, providers, settings
 from .config import HOST, PATHS, PORT
-from .db import init_engine, session_scope
-from .models import PromptTemplate, PromptVersion
+from .db import init_engine
+from .prompt_store import PROMPT_STORE
 
 # Windows 에서 asyncio 서브프로세스는 Proactor 이벤트 루프에서만 동작한다.
 # Selector 루프면 create_subprocess_exec 이 NotImplementedError 를 던진다.
@@ -33,58 +33,12 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 CLIENT_HEADER = "X-ARIA-Client"
 CLIENT_HEADER_VALUE = "1"
 
-_STARTER_PROMPT = {
-    "name": "예시: 문서 요약",
-    "description": (
-        "ARIA 동작 확인용 예시입니다. 업무 로직은 전부 이 본문에만 들어갑니다. "
-        "실제 업무 프롬프트로 교체하거나 새로 만들어 사용하십시오."
-    ),
-    "body": (
-        "첨부된 자료를 읽고 아래 형식으로 정리하십시오.\n\n"
-        "## 1. 개요\n자료가 무엇에 관한 것인지 3문장 이내로 서술합니다.\n\n"
-        "## 2. 핵심 내용\n중요한 항목을 불릿으로 정리합니다. 각 항목 끝에 근거가 된 "
-        "페이지 번호를 (p.N) 형식으로 표기합니다.\n\n"
-        "## 3. 확인되지 않은 사항\n자료만으로 판단할 수 없는 내용을 명시합니다. "
-        "추측해서 채우지 마십시오.\n"
-    ),
-    "output_mode": "markdown",
-    "tags": ["예시"],
-}
-
-
-def _seed(app: FastAPI) -> None:
-    del app
-    with session_scope() as session:
-        if session.query(PromptTemplate).count() > 0:
-            return
-        prompt = PromptTemplate(
-            name=_STARTER_PROMPT["name"],
-            description=_STARTER_PROMPT["description"],
-            body=_STARTER_PROMPT["body"],
-            output_mode=_STARTER_PROMPT["output_mode"],
-            tags=_STARTER_PROMPT["tags"],
-            accepted_file_types=[],
-            version=1,
-        )
-        session.add(prompt)
-        session.flush()
-        session.add(
-            PromptVersion(
-                prompt_id=prompt.id,
-                version=1,
-                name=prompt.name,
-                description=prompt.description,
-                body=prompt.body,
-                output_mode=prompt.output_mode,
-            )
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    del app
     PATHS.ensure()
+    PROMPT_STORE.ensure()
     init_engine()
-    _seed(app)
     yield
 
 

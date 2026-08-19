@@ -13,6 +13,16 @@ import sys
 from pathlib import Path
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def default_prompt_dir() -> Path:
+    override = os.environ.get("ARIA_PROMPT_DIR")
+    if override:
+        return Path(override)
+    return PROJECT_ROOT / "prompt"
+
+
 def default_data_dir() -> Path:
     override = os.environ.get("ARIA_DATA_DIR")
     if override:
@@ -52,6 +62,7 @@ class Paths:
 
 
 PATHS = Paths()
+PROMPT_DIR = default_prompt_dir()
 
 HOST = os.environ.get("ARIA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ARIA_PORT", "8765"))
@@ -81,11 +92,11 @@ DEFAULTS: dict[str, object] = {
     "max_concurrency_per_provider": 1,
     "runtime_context": DEFAULT_RUNTIME_CONTEXT,
     "runtime_context_enabled": True,
+    "default_prompt_id": "",
+    "default_provider": "agy",
     "provider_paths": {},
     "default_models": {},
     "keep_raw_output": True,
     # 도구를 끌 수 없는 Provider 라도, 실제 도구 호출이 발생하면 실패로 본다.
     "fail_on_tool_use": True,
-    # 실험적 Provider 는 여기에 id 를 넣어야만 실행된다. 기본은 비어 있다.
-    "enabled_experimental_providers": [],
 }

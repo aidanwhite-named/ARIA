@@ -60,6 +60,14 @@ class DeliveryMode(StrEnum):
     FAILED = "FAILED"
 
 
+class AttachmentRole(StrEnum):
+    """분석 안에서 첨부 자료가 맡는 역할."""
+
+    APPLICATION = "APPLICATION"
+    CITATION = "CITATION"
+    SUPPLEMENTAL = "SUPPLEMENTAL"
+
+
 class ExtractionMethod(StrEnum):
     RAW_TEXT = "RAW_TEXT"
     PDF_TEXT_LAYER = "PDF_TEXT_LAYER"

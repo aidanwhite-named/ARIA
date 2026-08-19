@@ -14,13 +14,14 @@ from sqlalchemy.orm import Session
 from .. import settings_service
 from ..config import PATHS
 from ..db import get_db
-from ..enums import JobStatus, derive_quality
+from ..enums import AttachmentRole, JobStatus, derive_quality
 from ..execution.bus import BUS
 from ..execution.runner import RUNNER
 from ..ingestion.security import UnsafeFilename
 from ..ingestion.service import IngestionLimits, ingest_many
-from ..models import Attachment, ExecutionJob, PromptTemplate
-from ..providers.registry import is_allowed
+from ..models import Attachment, ExecutionJob
+from ..prompt_store import PROMPT_STORE, InvalidPromptFile, PromptNotFound
+from ..providers.registry import build_provider, cached, probe_one
 from ..schemas import AttachmentAnalysis, JobCreate, JobOut, UploadResponse
 
 router = APIRouter(prefix="/api", tags=["jobs"])
@@ -69,6 +70,7 @@ def _limits(session: Session) -> IngestionLimits:
 @router.post("/uploads", response_model=UploadResponse)
 async def upload_files(
     files: list[UploadFile] = File(default_factory=list),
+    roles: str = Form(default=""),
     session: Session = Depends(get_db),
 ) -> UploadResponse:
     """파일을 실행별 격리 폴더에 저장하고 전달 가능 여부를 미리 알려준다.
@@ -78,6 +80,22 @@ async def upload_files(
     """
     if not files:
         raise HTTPException(400, "업로드된 파일이 없습니다.")
+
+    if roles:
+        try:
+            parsed_roles = json.loads(roles)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "첨부 역할 정보가 올바른 JSON 이 아닙니다.") from exc
+        if not isinstance(parsed_roles, list) or len(parsed_roles) != len(files):
+            raise HTTPException(400, "첨부 역할 수와 파일 수가 일치하지 않습니다.")
+    else:
+        parsed_roles = [AttachmentRole.SUPPLEMENTAL] * len(files)
+
+    allowed_roles = {role.value for role in AttachmentRole}
+    if any(
+        not isinstance(role, str) or role not in allowed_roles for role in parsed_roles
+    ):
+        raise HTTPException(400, "알 수 없는 첨부 역할이 포함되어 있습니다.")
 
     batch_id = str(uuid.uuid4())
     work_dir = PATHS.run_dir(batch_id)
@@ -91,14 +109,14 @@ async def upload_files(
             f"파일 개수가 제한을 넘었습니다: {len(files)} (최대 {limits.max_files})",
         )
 
-    payloads: list[tuple[str, bytes, bool]] = []
+    payloads: list[tuple[str, bytes, bool, str]] = []
     consumed = 0
-    for upload in files:
+    for upload, role in zip(files, parsed_roles, strict=True):
         try:
             data, consumed = await _read_limited(upload, limits, consumed)
         except UnsafeFilename as exc:
             raise HTTPException(400, str(exc)) from exc
-        payloads.append((upload.filename or "", data, True))
+        payloads.append((upload.filename or "", data, True, role))
 
     try:
         result = ingest_many(payloads, work_dir, limits)
@@ -117,6 +135,7 @@ async def upload_files(
                 size_bytes=item.size_bytes,
                 sha256=item.sha256,
                 required=True,
+                role=item.role,
                 stored_path=item.stored_path,
                 normalized_text_path=item.normalized_text_path,
                 page_count=item.page_count,
@@ -139,6 +158,7 @@ async def upload_files(
                 mime_type=f.mime_type,
                 size_bytes=f.size_bytes,
                 sha256=f.sha256,
+                role=f.role,
                 page_count=f.page_count,
                 char_count=f.char_count,
                 extraction_method=f.extraction_method,
@@ -165,7 +185,7 @@ def _job_out(job: ExecutionJob) -> JobOut:
         prompt_version=job.prompt_version,
         prompt_snapshot=job.prompt_snapshot,
         output_mode=job.output_mode,
-        user_input=job.user_input,
+        claim_text=job.claim_text or "",
         provider=job.provider,
         model=job.model,
         cli_path=job.cli_path,
@@ -189,6 +209,7 @@ def _job_out(job: ExecutionJob) -> JobOut:
                 "size_bytes": a.size_bytes,
                 "sha256": a.sha256,
                 "required": a.required,
+                "role": a.role,
                 "page_count": a.page_count,
                 "char_count": a.char_count,
                 "extraction_method": a.extraction_method,
@@ -208,22 +229,45 @@ def _job_out(job: ExecutionJob) -> JobOut:
 
 @router.post("/jobs", response_model=JobOut, status_code=201)
 async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> JobOut:
-    prompt = session.get(PromptTemplate, payload.prompt_id)
+    values = settings_service.get_all(session)
+    configured_prompt_id = str(values.get("default_prompt_id") or "")
+    prompt_id = payload.prompt_id or configured_prompt_id
+    prompt = None
+    if prompt_id:
+        try:
+            prompt = PROMPT_STORE.get(prompt_id)
+        except PromptNotFound:
+            # An explicit API override must be valid. A stale configured default
+            # (for example an old database UUID) falls back to the prompt folder.
+            if payload.prompt_id:
+                raise HTTPException(404, "프롬프트를 찾을 수 없습니다.")
+        except InvalidPromptFile as exc:
+            raise HTTPException(422, str(exc)) from exc
+    if prompt is None:
+        try:
+            prompt = next((item for item in PROMPT_STORE.list() if item.enabled), None)
+        except InvalidPromptFile as exc:
+            raise HTTPException(422, str(exc)) from exc
     if prompt is None:
         raise HTTPException(404, "프롬프트를 찾을 수 없습니다.")
     if not prompt.enabled:
         raise HTTPException(400, "비활성화된 프롬프트입니다.")
-
-    enabled_experimental = settings_service.get(
-        session, "enabled_experimental_providers"
-    )
-    if not is_allowed(payload.provider, enabled_experimental):
-        raise HTTPException(
-            403,
-            f"{payload.provider} 는 실험적 Provider 입니다. 도구를 끌 수 없어 "
-            "신뢰할 수 없는 문서 분석에 안전하지 않습니다. Settings 에서 위험을 "
-            "확인하고 명시적으로 활성화한 뒤 사용하십시오.",
+    provider_id = payload.provider or str(values.get("default_provider") or "agy")
+    provider_paths = values.get("provider_paths") or {}
+    if build_provider(provider_id, provider_paths) is None:
+        raise HTTPException(400, f"알 수 없거나 제거된 Provider 입니다: {provider_id}")
+    default_models = values.get("default_models") or {}
+    selected_model = payload.model or default_models.get(provider_id) or None
+    if selected_model and provider_id in {"agy", "claude", "codex"}:
+        provider_info = cached(provider_id) or await probe_one(provider_id, provider_paths)
+        available_models = (
+            provider_info.capabilities.get("models", []) if provider_info else []
         )
+        if available_models and selected_model not in available_models:
+            raise HTTPException(
+                400,
+                f"{provider_id} 에서 사용할 수 없는 모델입니다: {selected_model}",
+            )
 
     work_dir = (
         PATHS.run_dir(payload.batch_id) if payload.batch_id else None
@@ -235,9 +279,9 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         prompt_version=prompt.version,
         prompt_snapshot=prompt.body,
         output_mode=prompt.output_mode,
-        user_input=payload.user_input or "",
-        provider=payload.provider,
-        model=payload.model or prompt.default_model,
+        claim_text=payload.claim_text or "",
+        provider=provider_id,
+        model=selected_model,
         status=JobStatus.QUEUED,
     )
     session.add(job)
