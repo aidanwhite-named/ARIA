@@ -47,6 +47,11 @@ export interface ProviderInfo {
   notes: string[];
   install_hint: string;
   usable: boolean;
+  /** 설치/실행/인증만 본 상태. 안전 정책은 반영하지 않음. */
+  runnable: boolean;
+  experimental: boolean;
+  opted_in: boolean;
+  risks: string[];
 }
 
 export interface AttachmentAnalysis {
@@ -137,6 +142,8 @@ export interface AppSettings {
     provider_paths: Record<string, string>;
     default_models: Record<string, string>;
     keep_raw_output: boolean;
+    fail_on_tool_use: boolean;
+    enabled_experimental_providers: string[];
   };
   warnings: string[];
   data_dir: string;

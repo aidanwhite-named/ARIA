@@ -76,7 +76,11 @@ def evaluate(
             JobStatus.FAILED, ErrorCode.TOOL_POLICY_VIOLATION, warnings, errors
         )
 
-    if outcome.tool_uses and (outcome.tools_must_be_disabled or fail_on_tool_use):
+    if outcome.tool_uses and (
+        outcome.tools_must_be_disabled
+        or outcome.tools_uncontrollable
+        or fail_on_tool_use
+    ):
         errors.append(
             "실행 중 도구가 호출되었습니다: "
             + ", ".join(sorted(set(outcome.tool_uses))[:10])

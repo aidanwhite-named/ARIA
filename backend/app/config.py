@@ -86,4 +86,6 @@ DEFAULTS: dict[str, object] = {
     "keep_raw_output": True,
     # 도구를 끌 수 없는 Provider 라도, 실제 도구 호출이 발생하면 실패로 본다.
     "fail_on_tool_use": True,
+    # 실험적 Provider 는 여기에 id 를 넣어야만 실행된다. 기본은 비어 있다.
+    "enabled_experimental_providers": [],
 }

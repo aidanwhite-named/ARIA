@@ -27,6 +27,7 @@ EDITABLE_KEYS = frozenset(
         "default_models",
         "keep_raw_output",
         "fail_on_tool_use",
+        "enabled_experimental_providers",
     }
 )
 
@@ -79,6 +80,10 @@ def _coerce(key: str, value: Any) -> Any:
         return bool(value)
     if key == "runtime_context":
         return str(value)
+    if key == "enabled_experimental_providers":
+        if not isinstance(value, list):
+            raise ValueError("enabled_experimental_providers 는 배열이어야 합니다.")
+        return [str(v) for v in value]
     if key in ("provider_paths", "default_models"):
         if not isinstance(value, dict):
             raise ValueError(f"{key} 는 객체여야 합니다.")
@@ -108,6 +113,12 @@ def warnings_for(values: dict[str, Any]) -> list[str]:
         notes.append(
             "Provider 동시 실행이 2 이상입니다. 메모리 사용량이 늘고 계정 사용량 "
             "제한에 더 빨리 도달할 수 있습니다."
+        )
+    enabled = values.get("enabled_experimental_providers") or []
+    if enabled:
+        notes.append(
+            f"실험적 Provider 가 활성화되어 있습니다: {', '.join(enabled)}. "
+            "도구를 끌 수 없어 신뢰할 수 없는 문서 분석에는 권장하지 않습니다."
         )
     if not values.get("runtime_context_enabled", True):
         notes.append(

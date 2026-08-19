@@ -171,6 +171,17 @@ export default function RunPage() {
 
       {error && <div className="notice danger">{error}</div>}
 
+      {selectedProvider?.experimental && selectedProvider.opted_in && (
+        <div className="notice warn">
+          <strong>실험적 Provider 를 사용 중입니다 — {selectedProvider.display_name}</strong>
+          <ul>
+            {selectedProvider.risks.map((risk, i) => (
+              <li key={i}>{risk}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="card no-print">
         <h2>1. 프롬프트와 Provider</h2>
         <div className="card-row">
@@ -214,9 +225,11 @@ export default function RunPage() {
             </select>
             {selectedProvider && !selectedProvider.usable && (
               <span className="hint" style={{ color: "var(--danger)" }}>
-                {selectedProvider.auth_state === "NOT_LOGGED_IN"
-                  ? "CLI 에 로그인되어 있지 않습니다. Settings 에서 안내를 확인하십시오."
-                  : "이 Provider 는 현재 사용할 수 없습니다."}
+                {selectedProvider.experimental && !selectedProvider.opted_in
+                  ? "실험적 Provider 입니다. Settings 에서 위험을 확인하고 활성화해야 사용할 수 있습니다."
+                  : selectedProvider.auth_state === "NOT_LOGGED_IN"
+                    ? "CLI 에 로그인되어 있지 않습니다. Settings 에서 안내를 확인하십시오."
+                    : "이 Provider 는 현재 사용할 수 없습니다."}
               </span>
             )}
           </div>

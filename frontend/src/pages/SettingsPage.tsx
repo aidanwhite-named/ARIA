@@ -56,6 +56,24 @@ export default function SettingsPage() {
     }
   };
 
+  const toggleExperimental = async (id: string, on: boolean) => {
+    if (!settings) return;
+    const current = settings.values.enabled_experimental_providers ?? [];
+    const next = on
+      ? Array.from(new Set([...current, id]))
+      : current.filter((x) => x !== id);
+    try {
+      const updated = await api.updateSettings({
+        enabled_experimental_providers: next,
+      });
+      setSettings(updated);
+      setProviders(await api.listProviders());
+      notify(on ? "활성화했습니다." : "비활성화했습니다.");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const runSmoke = async (id: string) => {
     if (
       !window.confirm(
@@ -146,8 +164,12 @@ export default function SettingsPage() {
                     <td>{cap("stream_json")}</td>
                     <td>{cap("tools_disabled")}</td>
                     <td>
-                      {p.usable ? (
-                        <span className="pill ok">사용 가능</span>
+                      {p.experimental && !p.opted_in ? (
+                        <span className="pill warn">실험적 · 비활성</span>
+                      ) : p.usable ? (
+                        <span className={`pill ${p.experimental ? "warn" : "ok"}`}>
+                          {p.experimental ? "실험적 · 활성" : "사용 가능"}
+                        </span>
                       ) : (
                         <span className="pill danger">사용 불가</span>
                       )}
@@ -166,6 +188,32 @@ export default function SettingsPage() {
                 {p.display_name} — 상세 및 설치/로그인 안내
               </summary>
               <div style={{ padding: "10px 0 4px" }}>
+                {p.experimental && (
+                  <div className="notice warn">
+                    <strong>
+                      실험적 Provider — ARIA 의 안전 원칙(도구 없는 실행)을 충족하지
+                      못합니다
+                    </strong>
+                    <ul>
+                      {p.risks.map((risk, i) => (
+                        <li key={i}>{risk}</li>
+                      ))}
+                    </ul>
+                    <label className="checkbox" style={{ marginTop: 10 }}>
+                      <input
+                        type="checkbox"
+                        checked={p.opted_in}
+                        onChange={(e) => toggleExperimental(p.provider, e.target.checked)}
+                      />
+                      위 내용을 확인했으며 이 Provider 를 활성화합니다
+                    </label>
+                    {!p.runnable && (
+                      <div className="faint" style={{ marginTop: 6 }}>
+                        활성화해도 설치 또는 인증이 완료되어야 실행됩니다.
+                      </div>
+                    )}
+                  </div>
+                )}
                 {p.notes.length > 0 && (
                   <ul style={{ margin: "0 0 10px", paddingLeft: 18 }}>
                     {p.notes.map((n, i) => (
@@ -264,6 +312,18 @@ export default function SettingsPage() {
           />
           raw stdout/stderr 를 파일로 보존
         </label>
+        <label className="checkbox" style={{ marginTop: 8 }}>
+          <input
+            type="checkbox"
+            checked={v.fail_on_tool_use}
+            onChange={(e) => saveValue("fail_on_tool_use", e.target.checked)}
+          />
+          도구 호출이 감지되면 실패로 처리
+        </label>
+        <div className="hint">
+          도구를 끌 수 있는 Provider(Claude)와 끌 수 없는 Provider(agy)에서는 이
+          설정과 무관하게 항상 실패로 처리합니다.
+        </div>
       </div>
 
       <div className="card">

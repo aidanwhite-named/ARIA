@@ -223,3 +223,109 @@ def test_mock_job_still_succeeds_end_to_end(client) -> None:
     ).json()
     final = wait_for_job(client, job["id"])
     assert final["status"] == "SUCCEEDED"
+
+
+# ------------------------------------------------- 실험적 Provider 게이팅
+
+
+def test_gemini_is_experimental_and_off_by_default(client) -> None:
+    data = client.get("/api/providers/gemini").json()
+    assert data["experimental"] is True
+    assert data["opted_in"] is False
+    assert data["usable"] is False
+    assert data["risks"], "위험 고지가 비어 있습니다."
+
+
+def test_experimental_provider_job_is_refused_without_optin(client) -> None:
+    """UI 를 우회한 직접 호출도 막아야 한다."""
+    prompt = client.post(
+        "/api/prompts", json={"name": "게이팅", "body": "요약"}
+    ).json()
+    response = client.post(
+        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "gemini"}
+    )
+    assert response.status_code == 403
+    assert "실험적" in response.json()["detail"]
+
+
+def test_experimental_smoke_test_is_refused_without_optin(client) -> None:
+    response = client.post("/api/providers/gemini/smoke-test")
+    assert response.status_code == 403
+
+
+def test_optin_makes_provider_usable(client) -> None:
+    try:
+        client.put(
+            "/api/settings",
+            json={"values": {"enabled_experimental_providers": ["gemini"]}},
+        )
+        data = client.get("/api/providers/gemini").json()
+        assert data["opted_in"] is True
+        # runnable 은 설치/인증 상태에만 달려 있다.
+        assert data["usable"] == data["runnable"]
+    finally:
+        client.put(
+            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
+        )
+
+
+def test_optin_surfaces_a_warning(client) -> None:
+    try:
+        data = client.put(
+            "/api/settings",
+            json={"values": {"enabled_experimental_providers": ["gemini"]}},
+        ).json()
+        assert any("실험적 Provider" in w for w in data["warnings"])
+    finally:
+        client.put(
+            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
+        )
+
+
+def test_non_experimental_providers_are_never_gated(client) -> None:
+    for pid in ("mock", "claude", "codex"):
+        data = client.get(f"/api/providers/{pid}").json()
+        assert data["experimental"] is False
+        assert data["opted_in"] is True
+
+
+def test_uncontrollable_tools_cannot_be_relaxed() -> None:
+    """도구를 끌 수 없는 Provider 는 설정으로 완화할 수 없다."""
+    outcome = _ok()
+    outcome.tools_must_be_disabled = False
+    outcome.tools_uncontrollable = True
+    outcome.tool_uses = ["tool"]
+    verdict = evaluate(outcome, fail_on_tool_use=False)
+    assert verdict.status == JobStatus.FAILED
+    assert verdict.error_code == ErrorCode.TOOL_POLICY_VIOLATION
+
+
+def test_agy_declares_uncontrollable_tools_and_sandbox() -> None:
+    from pathlib import Path
+
+    from app.providers.agy_cli import RISKS, AgyCliProvider
+    from app.providers.base import ExecutionRequest
+
+    provider = AgyCliProvider()
+    args = provider.build_args(
+        ExecutionRequest(job_id="j", work_dir=Path("."), system_prompt="s", user_message="m")
+    )
+    assert "--sandbox" in args
+    assert "--dangerously-skip-permissions" not in args
+    assert any("차단" in r for r in RISKS)
+
+
+def test_agy_resolver_does_not_fall_back_to_gemini(monkeypatch) -> None:
+    """구형 gemini CLI 는 계약이 달라 조용히 오작동한다."""
+    import app.providers.agy_cli as agy
+
+    calls: list[str] = []
+
+    def fake_resolve_simple(command, override=None):
+        calls.append(command)
+        return None
+
+    monkeypatch.setattr(agy, "resolve_simple", fake_resolve_simple)
+    monkeypatch.setattr(agy, "_KNOWN_INSTALL_DIRS", ())
+    assert agy.resolve_agy() is None
+    assert calls == ["agy"], f"gemini 로 폴백했습니다: {calls}"

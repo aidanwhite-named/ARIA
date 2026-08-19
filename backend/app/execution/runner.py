@@ -24,7 +24,7 @@ from ..ingestion.service import IngestedFile, preprocessing_versions
 from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
 from ..prompt_assembly import InputTooLarge, assemble
 from ..providers.base import ExecutionRequest
-from ..providers.registry import build_provider
+from ..providers.registry import build_provider, is_allowed
 from . import process as proc
 from .bus import BUS
 
@@ -155,6 +155,16 @@ class JobRunner:
         overrides = values.get("provider_paths") or {}
 
         await self._emit(job_id, "stage", {"stage": "queued", "message": "실행 대기 중"})
+
+        # 실행 직전 최종 확인. 작업이 큐에 들어간 뒤 사용자가 실험적
+        # Provider 를 다시 껐을 수도 있다.
+        if not is_allowed(provider_id, values.get("enabled_experimental_providers")):
+            await self._fail(
+                job_id,
+                ErrorCode.PROVIDER_UNAVAILABLE,
+                f"{provider_id} 는 실험적 Provider 이며 활성화되어 있지 않습니다.",
+            )
+            return
 
         semaphore = self._semaphore(provider_id, limit)
         async with semaphore:

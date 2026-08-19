@@ -1,7 +1,7 @@
-"""Gemini Provider (agy CLI).
+"""Gemini Provider (agy CLI) — 실험적.
 
-이 PC 에서 Gemini 는 `gemini` 가 아니라 `agy` 라는 이름으로 설치되어 있다.
-agy 1.1.14 를 실제로 실행해서 계약을 확인했다.
+이 PC 의 Gemini CLI 는 `agy` 라는 이름의 네이티브 실행 파일이다.
+agy 1.1.15 를 실제로 실행해서 계약을 확인했다.
 
   실행 : agy --input-format stream-json --output-format stream-json
              --disable-slash-commands [--model M]
@@ -17,11 +17,16 @@ Claude 와 다른 두 가지 제약이 있다.
 
 2. 도구를 끌 수 없다.
    `--tools` 에 해당하는 플래그가 없고, init 이벤트가 run_command,
-   write_to_file 을 포함해 57개 도구를 광고한다. permission_mode 는
-   request-review 다. 그래서 tools_must_be_disabled 를 참으로 두지 않고,
-   실제 도구 호출이 감지되면 설정(fail_on_tool_use)에 따라 실패 처리한다.
+   write_to_file 을 포함해 57개 도구를 광고한다.
 
-   --dangerously-skip-permissions 는 절대 쓰지 않는다.
+   여기서 분명히 해둘 것: ARIA 는 도구 호출을 **탐지**할 뿐 **차단**하지
+   못한다. 실패로 표시되는 시점에는 이미 파일 쓰기나 명령 실행이 끝난
+   뒤일 수 있다. 이건 fail-closed 가 아니라 사후 탐지다.
+
+   그래서 이 Provider 는 experimental 로 분류하고, 사용자가 Settings 에서
+   명시적으로 켜지 않으면 실행되지 않는다. --sandbox 를 붙이지만 그것을
+   안전 경계로 취급하지 않는다. --dangerously-skip-permissions 는 절대
+   쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -39,6 +44,22 @@ from .base import EmitFn, ExecutionOutcome, ExecutionRequest, ProbeResult, Provi
 from .env import build_child_env
 from .resolver import ExecutableKind, ResolvedExecutable, resolve_simple
 
+# 이 Provider 를 쓰기 전에 사용자가 알아야 할 것. Settings 에 그대로 표시된다.
+RISKS = (
+    "도구를 끄는 플래그가 없습니다. run_command, write_to_file 을 포함해 수십 개 "
+    "도구가 활성 상태로 실행됩니다.",
+    "ARIA 는 도구 호출을 '탐지'해서 실패로 기록할 뿐, 호출 자체를 '차단'하지 "
+    "못합니다. 차단은 agy 의 승인 정책(request-review)과 --sandbox 에 의존하며 "
+    "ARIA 가 보장하는 경계가 아닙니다. agy 버전이 바뀌면 달라질 수 있습니다.",
+    "실측(agy 1.1.15): 파일 쓰기와 셸 명령을 요청했을 때 도구 호출이 시도됐고 "
+    "ARIA 가 탐지해 실패 처리했으며, 디스크에는 아무 변화가 없었습니다. 다만 "
+    "이는 세 가지 시나리오를 확인한 것일 뿐 모든 경우를 검증한 것이 아닙니다.",
+    "시스템 프롬프트를 분리할 수 없어 ARIA 런타임 컨텍스트가 사용자 메시지에 "
+    "포함됩니다. 첨부 문서와 같은 층위라 프롬프트 인젝션 방어가 약합니다.",
+    "신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.",
+)
+
+
 _KNOWN_INSTALL_DIRS = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin",
     Path.home() / "AppData" / "Local" / "agy" / "bin",
@@ -47,7 +68,7 @@ _KNOWN_INSTALL_DIRS = (
 
 
 def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
-    """`agy` 를 먼저 찾고, 없으면 `gemini` 도 확인한다."""
+    """`agy` 만 찾는다. 구형 `gemini` 로 폴백하지 않는다."""
     if override:
         path = Path(override)
         if path.is_file():
@@ -59,10 +80,12 @@ def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
             return ResolvedExecutable(str(path), kind, source="사용자 지정")
         return None
 
-    for command in ("agy", "gemini"):
-        resolved = resolve_simple(command)
-        if resolved is not None:
-            return resolved
+    # `gemini` 로 폴백하지 않는다. 구형 gemini CLI 는 stdin/출력 계약이
+    # 전혀 달라서, 여기 구현으로 호출하면 조용히 오작동한다. 그 CLI 를
+    # 쓰려면 별도 Adapter 를 만들어야 한다.
+    resolved = resolve_simple("agy")
+    if resolved is not None:
+        return resolved
 
     exe_name = "agy.exe" if sys.platform == "win32" else "agy"
     for directory in _KNOWN_INSTALL_DIRS:
@@ -82,7 +105,7 @@ def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
 
 class AgyCliProvider(Provider):
     id = "gemini"
-    display_name = "Gemini (agy CLI)"
+    display_name = "Gemini via agy CLI — 실험적"
     install_hint = (
         "agy CLI 를 설치하고 로그인하십시오. 설치되어 있으면 `agy models` 가 "
         "모델 목록을 반환합니다. ARIA 는 API Key 를 입력받지 않고 CLI 에 저장된 "
@@ -104,6 +127,8 @@ class AgyCliProvider(Provider):
             provider=self.id,
             display_name=self.display_name,
             install_hint=self.install_hint,
+            experimental=True,
+            risks=list(RISKS),
             capabilities={
                 "non_interactive": True,
                 "stream_json": True,
@@ -120,7 +145,7 @@ class AgyCliProvider(Provider):
 
         resolved = self._resolve()
         if resolved is None:
-            result.notes.append("`agy` 또는 `gemini` 를 찾지 못했습니다.")
+            result.notes.append("`agy` 를 찾지 못했습니다.")
             return result
 
         result.installed = True
@@ -162,14 +187,6 @@ class AgyCliProvider(Provider):
             detail = (models_run.stderr or models_run.stdout or "").strip()[:160]
             result.notes.append(f"`agy models` 가 실패했습니다. 로그인이 필요합니다. {detail}")
 
-        result.notes.append(
-            "도구를 끄는 플래그가 없어 파일/셸 도구가 활성 상태로 실행됩니다. "
-            "ARIA 는 실제 도구 호출이 감지되면 기본적으로 실패로 처리합니다."
-        )
-        result.notes.append(
-            "시스템 프롬프트를 분리할 수 없어 런타임 컨텍스트가 사용자 메시지에 "
-            "포함됩니다. Claude 보다 인젝션 방어가 약합니다."
-        )
         return result
 
     # ---------------------------------------------------------------- execute
@@ -181,6 +198,9 @@ class AgyCliProvider(Provider):
             "--output-format",
             "stream-json",
             "--disable-slash-commands",
+            # 방어 심화용. 터미널 제한을 켜지만 이것만으로 도구가
+            # 차단되지는 않는다. 안전 경계로 취급하지 않는다.
+            "--sandbox",
         ]
         if request.model:
             args += ["--model", request.model]
@@ -258,6 +278,9 @@ class AgyCliProvider(Provider):
         # 도구를 끌 수 없는 Provider 다. 광고된 목록은 정보로만 남기고,
         # 실제 호출만 정책 위반으로 다룬다.
         outcome.tools_must_be_disabled = False
+        # 도구를 끌 수단이 없다. 호출이 감지되면 사용자가 설정으로
+        # 완화할 수 없게 항상 실패 처리한다.
+        outcome.tools_uncontrollable = True
         outcome.tool_uses = list(state.tool_uses)
         if state.tools_advertised:
             outcome.warnings.append(

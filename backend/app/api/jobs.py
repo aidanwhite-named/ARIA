@@ -20,6 +20,7 @@ from ..execution.runner import RUNNER
 from ..ingestion.security import UnsafeFilename
 from ..ingestion.service import IngestionLimits, ingest_many
 from ..models import Attachment, ExecutionJob, PromptTemplate
+from ..providers.registry import is_allowed
 from ..schemas import AttachmentAnalysis, JobCreate, JobOut, UploadResponse
 
 router = APIRouter(prefix="/api", tags=["jobs"])
@@ -212,6 +213,17 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         raise HTTPException(404, "프롬프트를 찾을 수 없습니다.")
     if not prompt.enabled:
         raise HTTPException(400, "비활성화된 프롬프트입니다.")
+
+    enabled_experimental = settings_service.get(
+        session, "enabled_experimental_providers"
+    )
+    if not is_allowed(payload.provider, enabled_experimental):
+        raise HTTPException(
+            403,
+            f"{payload.provider} 는 실험적 Provider 입니다. 도구를 끌 수 없어 "
+            "신뢰할 수 없는 문서 분석에 안전하지 않습니다. Settings 에서 위험을 "
+            "확인하고 명시적으로 활성화한 뒤 사용하십시오.",
+        )
 
     work_dir = (
         PATHS.run_dir(payload.batch_id) if payload.batch_id else None

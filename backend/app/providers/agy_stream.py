@@ -35,6 +35,12 @@ from dataclasses import dataclass, field
 _BENIGN_STEPS = frozenset(
     {"user_input", "checkpoint", "agent_response", "thinking", "finish", "done"}
 )
+
+# 실측으로 확인한 도구 단계 이름. agy 1.1.15 에 파일 쓰기와 셸 명령을
+# 요청했을 때 step_type 이 정확히 "tool" 로 왔다.
+_KNOWN_TOOL_STEPS = frozenset({"tool", "tool_call", "tool_use", "command"})
+
+# 아직 관찰하지 못한 이름을 놓치지 않기 위한 보조 패턴.
 _TOOL_HINTS = ("tool", "command", "action", "browser", "shell", "edit", "write")
 
 _AUTH_MARKERS = (
@@ -165,7 +171,9 @@ class AgyStreamParser:
         events: list[tuple[str, dict]] = []
         lowered = step_type.lower()
         if lowered and lowered not in _BENIGN_STEPS:
-            if any(hint in lowered for hint in _TOOL_HINTS):
+            if lowered in _KNOWN_TOOL_STEPS or any(
+                hint in lowered for hint in _TOOL_HINTS
+            ):
                 state.tool_uses.append(step_type)
                 events.append(("tool_use", {"name": step_type}))
             else:
