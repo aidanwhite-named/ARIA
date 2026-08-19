@@ -1,0 +1,22 @@
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# 로컬 데이터 (기본 위치는 %LOCALAPPDATA%\ARIA 이지만 ARIA_DATA_DIR 로 옮길 수 있음)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 에디터
+.vscode/
+.idea/
+
+# 빌드 캐시
+frontend/tsconfig.tsbuildinfo
