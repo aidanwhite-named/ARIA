@@ -333,8 +333,8 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         # 사용자가 위험을 확인하지 않은 채 실행하게 된다.
         raise HTTPException(
             400,
-            "사용할 Provider 를 지정하지 않았고 기본 Provider 도 설정되어 "
-            "있지 않습니다. 실행 화면에서 Provider 를 직접 선택하십시오.",
+            "사용할 Provider 가 지정되지 않았습니다. Settings 에서 기본 "
+            "Provider 를 선택한 뒤 다시 실행하십시오.",
         )
     provider_paths = values.get("provider_paths") or {}
     if build_provider(provider_id, provider_paths) is None:

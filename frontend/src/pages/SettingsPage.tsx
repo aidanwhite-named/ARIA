@@ -186,7 +186,7 @@ export default function SettingsPage() {
               value={defaultProvider}
               onChange={(e) => setDefaultProvider(e.target.value)}
             >
-              <option value="">지정 안 함 (실행 시 직접 선택)</option>
+              <option value="">지정 안 함 (실행 불가)</option>
               {providers.map((provider) => (
                 <option key={provider.provider} value={provider.provider}>
                   {provider.display_name}{provider.usable ? "" : " · 사용 불가"}
@@ -194,9 +194,9 @@ export default function SettingsPage() {
               ))}
             </select>
             {!defaultProvider && (
-              <span className="hint">
-                기본 Provider 를 지정하지 않았습니다. 실행 화면에서 매번 직접
-                선택해야 합니다.
+              <span className="hint" style={{ color: "var(--danger)" }}>
+                Provider 를 지정하지 않으면 분석을 실행할 수 없습니다. 실행
+                화면에는 Provider 선택란이 없으며 여기 설정을 그대로 사용합니다.
               </span>
             )}
             {selectedProvider && !selectedProvider.usable && (

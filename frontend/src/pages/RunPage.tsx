@@ -322,8 +322,8 @@ export default function RunPage() {
           <div style={{ marginTop: 4 }}>
             ARIA 는 Provider 를 자동으로 고르지 않습니다. 실험적 Provider 가
             기본값으로 끼어들면 위험을 확인하지 않은 채 실행하게 되기
-            때문입니다. <a href="#/settings">Settings</a> 에서 사용할 Provider 를
-            선택하십시오.
+            때문입니다. 이 화면에는 Provider 선택란이 없습니다.{" "}
+            <a href="#/settings">Settings</a> 에서 사용할 Provider 를 지정하십시오.
           </div>
         </div>
       )}
@@ -386,7 +386,8 @@ export default function RunPage() {
             <strong>Prompt</strong> {selectedPrompt ? `${selectedPrompt.name} (v${selectedPrompt.version})` : "설정 필요"}
           </span>
           <span>
-            <strong>Provider</strong> {selectedProvider?.display_name ?? providerId}
+            <strong>Provider</strong>{" "}
+            {selectedProvider?.display_name ?? (providerId || "설정 필요")}
           </span>
           <span>
             <strong>모델</strong> {model || "CLI 기본값"}

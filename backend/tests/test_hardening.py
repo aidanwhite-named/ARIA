@@ -352,7 +352,7 @@ def test_no_provider_and_no_default_refuses_instead_of_auto_selecting(client) ->
     ).json()
     response = client.post("/api/jobs", json={"prompt_id": prompt["id"]})
     assert response.status_code == 400
-    assert "직접 선택" in response.json()["detail"]
+    assert "Settings 에서 기본" in response.json()["detail"]
 
 
 def test_experimental_default_provider_still_requires_optin(client) -> None:
