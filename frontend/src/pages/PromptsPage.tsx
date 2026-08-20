@@ -102,20 +102,19 @@ export default function PromptsPage() {
   };
 
   return (
-    <div>
+    <div className="page page-prompts">
       <div className="page-head">
-        <h1>Prompt Library</h1>
+        <span className="eyebrow">02 / Analysis directives</span>
+        <h1>분석의 기준을 설계합니다</h1>
         <p>
-          프로젝트의 prompt 폴더에 있는 Markdown 또는 텍스트 파일이 Master Prompt의
-          유일한 출처입니다. 편집 내용과 버전 이력도 파일로 저장되며, 실행 시점의
-          원문은 작업 이력에 별도 스냅샷으로 남습니다.
+          발명을 읽는 규칙을 프롬프트로 관리하고, 모든 수정의 맥락과 실행 시점의 원문을 보존합니다.
         </p>
       </div>
 
       {message && <div className="notice ok">{message}</div>}
       {error && <div className="notice danger">{error}</div>}
 
-      <div className="card">
+      <div className="card prompt-toolbar">
         <div className="split">
           <div className="btn-row" style={{ flex: 1 }}>
             <input
@@ -150,7 +149,7 @@ export default function PromptsPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card prompt-library">
         {prompts.length === 0 ? (
           <div className="empty">프롬프트가 없습니다.</div>
         ) : (
