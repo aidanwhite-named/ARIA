@@ -85,6 +85,24 @@ export default function SettingsPage() {
     }
   };
 
+  const toggleExperimental = async (id: string, on: boolean) => {
+    if (!settings) return;
+    const current = settings.values.enabled_experimental_providers ?? [];
+    const next = on
+      ? Array.from(new Set([...current, id]))
+      : current.filter((x) => x !== id);
+    try {
+      const updated = await api.updateSettings({
+        enabled_experimental_providers: next,
+      });
+      setSettings(updated);
+      setProviders(await api.listProviders());
+      notify(on ? "활성화했습니다." : "비활성화했습니다.");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const runSmoke = async (id: string) => {
     if (
       !window.confirm(
@@ -168,15 +186,24 @@ export default function SettingsPage() {
               value={defaultProvider}
               onChange={(e) => setDefaultProvider(e.target.value)}
             >
+              <option value="">지정 안 함 (실행 시 직접 선택)</option>
               {providers.map((provider) => (
                 <option key={provider.provider} value={provider.provider}>
                   {provider.display_name}{provider.usable ? "" : " · 사용 불가"}
                 </option>
               ))}
             </select>
+            {!defaultProvider && (
+              <span className="hint">
+                기본 Provider 를 지정하지 않았습니다. 실행 화면에서 매번 직접
+                선택해야 합니다.
+              </span>
+            )}
             {selectedProvider && !selectedProvider.usable && (
               <span className="hint" style={{ color: "var(--danger)" }}>
-                설치 또는 로그인을 완료한 뒤 사용할 수 있습니다.
+                {selectedProvider.experimental && !selectedProvider.opted_in
+                  ? "실험적 Provider 입니다. 아래 상세에서 위험을 확인하고 활성화해야 사용할 수 있습니다."
+                  : "설치 또는 로그인을 완료한 뒤 사용할 수 있습니다."}
               </span>
             )}
           </div>
@@ -254,7 +281,9 @@ export default function SettingsPage() {
                     <td>{cap("stream_json")}</td>
                     <td>{cap("tools_disabled")}</td>
                     <td>
-                      {p.usable ? (
+                      {p.experimental && !p.opted_in ? (
+                        <span className="pill warn">실험적 · 비활성</span>
+                      ) : p.usable ? (
                         <span className="pill ok">사용 가능</span>
                       ) : (
                         <span className="pill danger">사용 불가</span>
@@ -274,6 +303,34 @@ export default function SettingsPage() {
                 {p.display_name} — 상세 및 설치/로그인 안내
               </summary>
               <div style={{ padding: "10px 0 4px" }}>
+                {p.experimental && (
+                  <div className="notice danger">
+                    <strong>
+                      실험적 Provider — ARIA 의 안전 원칙(도구 없는 실행)을
+                      충족하지 못합니다
+                    </strong>
+                    <ul>
+                      {p.risks.map((risk, i) => (
+                        <li key={i}>{risk}</li>
+                      ))}
+                    </ul>
+                    <label className="checkbox" style={{ marginTop: 10 }}>
+                      <input
+                        type="checkbox"
+                        checked={p.opted_in}
+                        onChange={(e) =>
+                          toggleExperimental(p.provider, e.target.checked)
+                        }
+                      />
+                      위 내용을 확인했으며 이 Provider 를 활성화합니다
+                    </label>
+                    {!p.runnable && (
+                      <div className="faint" style={{ marginTop: 6 }}>
+                        활성화해도 설치 또는 인증이 완료되어야 실행됩니다.
+                      </div>
+                    )}
+                  </div>
+                )}
                 {p.notes.length > 0 && (
                   <ul style={{ margin: "0 0 10px", paddingLeft: 18 }}>
                     {p.notes.map((n, i) => (

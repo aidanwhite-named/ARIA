@@ -93,10 +93,14 @@ DEFAULTS: dict[str, object] = {
     "runtime_context": DEFAULT_RUNTIME_CONTEXT,
     "runtime_context_enabled": True,
     "default_prompt_id": "",
-    "default_provider": "agy",
+    # 기본 Provider 를 지정하지 않는다. 실험적 Provider 가 자동으로
+    # 선택되면 사용자가 위험을 확인하지 않은 채 실행하게 된다.
+    "default_provider": "",
     "provider_paths": {},
     "default_models": {},
     "keep_raw_output": True,
     # 도구를 끌 수 없는 Provider 라도, 실제 도구 호출이 발생하면 실패로 본다.
     "fail_on_tool_use": True,
+    # 실험적 Provider 는 여기에 id 가 있어야만 실행된다. 기본은 비어 있다.
+    "enabled_experimental_providers": [],
 }

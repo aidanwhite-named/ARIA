@@ -26,7 +26,7 @@ ARIA 가 하는 일은 이것뿐입니다.
 | Provider | 상태 | 비고 |
 |---|---|---|
 | Claude (Claude Code) | 설치됨 · 로그인 필요 | `claude setup-token` 실행 후 사용 가능합니다. 도구를 완전히 끌 수 있는 유일한 Provider 입니다. |
-| agy | 설치됨 · 로그인됨 | `agy models` 결과를 모델 드롭다운에 표시합니다. |
+| agy | **실험적 · 기본 비활성** | 설치·로그인은 됐지만 도구를 끌 수 없습니다. Settings 에서 위험을 확인하고 명시적으로 켜야 실행됩니다. 실행 대화가 `~/.gemini/antigravity-cli/conversations` 에 영구 저장되며 이를 끄는 CLI 옵션이 없습니다. |
 | Codex | 실행 불가 | 감지·안내와 모델 선택을 제공하며 실행 경로는 미구현입니다. |
 
 ## 목차
@@ -219,6 +219,12 @@ claude auth status
 
 ### agy CLI
 
+> **agy 는 실험적 Provider 이며 기본적으로 꺼져 있습니다.**
+> Settings → Provider 상세에서 위험 고지를 읽고 체크박스를 켜야 실행됩니다.
+> 켜지 않으면 UI 는 물론 API 를 직접 호출해도 403 으로 거부됩니다.
+
+설치 경로(`~/.gemini/antigravity-cli/`)로 보아 Antigravity CLI 계열입니다.
+
 ARIA 의 Provider id와 실행 파일 이름은 모두 **`agy`** 입니다. 계약이 다른 구형
 `gemini` 명령으로 폴백하지 않습니다.
 
@@ -261,8 +267,24 @@ ARIA 는 도구 호출을 **탐지해서 실패로 기록할 뿐, 호출 자체�
 메시지 맨 앞에 붙으므로, 첨부 본문과 같은 층위라서 프롬프트 인젝션 방어가
 Claude 보다 약합니다.
 
+**`--mode plan` 을 쓰지 않는 이유**
+
+보안 기능이 아닙니다. 실측하면 agy 가 직접 경고합니다.
+
+```
+warning: --mode plan has no effect while slash command expansion is disabled.
+```
+
+ARIA 는 항상 `--disable-slash-commands` 로 실행하므로 plan 모드는 무효입니다.
+슬래시 명령/프롬프트 수준 기능이지 권한 경계가 아닙니다. plan 모드를 켠 같은
+실행에서도 `tools` 는 57개, `permission_mode` 는 `request-review` 그대로였습니다.
+
 **적용한 완화책**
 
+- **실험적 분류 + 명시적 opt-in.** 작업 생성 / smoke-test / 실행 직전 /
+  세마포어 대기 후 네 지점에서 각각 거부합니다.
+- **기본 Provider 로 자동 선택되지 않습니다.** `default_provider` 기본값은
+  비어 있고, 지정하지 않으면 실행이 400 으로 거절됩니다.
 - `--sandbox` 적용 (안전 경계로 취급하지 않는 방어 심화)
 - `--dangerously-skip-permissions` 절대 미사용
 - 도구 호출 시 항상 실패 처리 — `fail_on_tool_use` 설정으로도 완화 불가

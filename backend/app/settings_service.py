@@ -29,6 +29,7 @@ EDITABLE_KEYS = frozenset(
         "default_models",
         "keep_raw_output",
         "fail_on_tool_use",
+        "enabled_experimental_providers",
     }
 )
 
@@ -73,8 +74,11 @@ def get_all(session: Session) -> dict[str, Any]:
     values = dict(DEFAULTS)
     for row in session.query(AppSetting).all():
         values[row.key] = row.value
-    values["default_provider"] = _normalize_provider_id(
-        str(values.get("default_provider") or "agy")
+    # 빈 값을 특정 Provider 로 채우지 않는다. 실험적 Provider 가 자동으로
+    # 선택되면 사용자가 위험을 확인하지 않은 채 실행하게 된다.
+    raw_default = str(values.get("default_provider") or "").strip()
+    values["default_provider"] = (
+        _normalize_provider_id(raw_default) if raw_default else ""
     )
     values["provider_paths"] = _normalize_provider_map(values.get("provider_paths"))
     values["default_models"] = _normalize_provider_map(values.get("default_models"))
@@ -87,7 +91,12 @@ def get(session: Session, key: str) -> Any:
         return DEFAULTS.get(key)
     value = row.value
     if key == "default_provider":
-        return _normalize_provider_id(str(value))
+        text = str(value).strip()
+        return _normalize_provider_id(text) if text else ""
+    if key == "enabled_experimental_providers":
+        if not isinstance(value, list):
+            raise ValueError("enabled_experimental_providers 는 배열이어야 합니다.")
+        return [str(v) for v in value]
     if key in ("provider_paths", "default_models"):
         return _normalize_provider_map(value)
     return value
@@ -110,9 +119,16 @@ def _coerce(key: str, value: Any) -> Any:
     if key == "default_prompt_id":
         return str(value).strip()
     if key == "default_provider":
-        provider_id = _normalize_provider_id(str(value).strip())
+        text = str(value).strip()
+        if not text:
+            # 빈 값 = 기본 Provider 지정 안 함. 실행 시 직접 선택해야 한다.
+            return ""
+        provider_id = _normalize_provider_id(text)
         if provider_id not in _PROVIDER_IDS:
-            raise ValueError("default_provider 는 agy, claude, codex 중 하나여야 합니다.")
+            raise ValueError(
+                "default_provider 는 agy, claude, codex 중 하나이거나 "
+                "빈 값이어야 합니다."
+            )
         return provider_id
     if key in ("provider_paths", "default_models"):
         if not isinstance(value, dict):
@@ -147,6 +163,12 @@ def warnings_for(values: dict[str, Any]) -> list[str]:
         notes.append(
             "Provider 동시 실행이 2 이상입니다. 메모리 사용량이 늘고 계정 사용량 "
             "제한에 더 빨리 도달할 수 있습니다."
+        )
+    enabled = values.get("enabled_experimental_providers") or []
+    if enabled:
+        notes.append(
+            f"실험적 Provider 가 활성화되어 있습니다: {', '.join(enabled)}. "
+            "도구를 끌 수 없어 신뢰할 수 없는 문서 분석에는 권장하지 않습니다."
         )
     if not values.get("runtime_context_enabled", True):
         notes.append(

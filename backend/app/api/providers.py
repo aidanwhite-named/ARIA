@@ -13,7 +13,9 @@ from .. import settings_service
 from ..db import get_db
 from ..models import ProviderSnapshot
 from ..providers.registry import (
+    apply_optin,
     build_provider,
+    is_allowed,
     probe_all,
     probe_one,
     to_dict,
@@ -42,14 +44,16 @@ def _persist(session: Session, data: dict) -> None:
 @router.get("")
 async def list_providers(session: Session = Depends(get_db)) -> dict:
     overrides = settings_service.get(session, "provider_paths") or {}
-    results = await probe_all(overrides)
+    enabled = settings_service.get(session, "enabled_experimental_providers")
+    results = apply_optin(await probe_all(overrides), enabled)
     return {"providers": [to_dict(r) for r in results]}
 
 
 @router.post("/probe")
 async def reprobe(session: Session = Depends(get_db)) -> dict:
     overrides = settings_service.get(session, "provider_paths") or {}
-    results = await probe_all(overrides, force=True)
+    enabled = settings_service.get(session, "enabled_experimental_providers")
+    results = apply_optin(await probe_all(overrides, force=True), enabled)
     payload = [to_dict(r) for r in results]
     for item in payload:
         _persist(session, item)
@@ -59,9 +63,11 @@ async def reprobe(session: Session = Depends(get_db)) -> dict:
 @router.get("/{provider_id}")
 async def get_provider(provider_id: str, session: Session = Depends(get_db)) -> dict:
     overrides = settings_service.get(session, "provider_paths") or {}
+    enabled = settings_service.get(session, "enabled_experimental_providers")
     result = await probe_one(provider_id, overrides)
     if result is None:
         raise HTTPException(404, "알 수 없는 Provider 입니다.")
+    apply_optin([result], enabled)
     return to_dict(result)
 
 
@@ -69,6 +75,13 @@ async def get_provider(provider_id: str, session: Session = Depends(get_db)) -> 
 async def smoke_test(provider_id: str, session: Session = Depends(get_db)) -> dict:
     """실제 모델을 호출한다. 사용량이 발생할 수 있다."""
     overrides = settings_service.get(session, "provider_paths") or {}
+    enabled = settings_service.get(session, "enabled_experimental_providers")
+    if not is_allowed(provider_id, enabled):
+        raise HTTPException(
+            403,
+            f"{provider_id} 는 실험적 Provider 입니다. Settings 에서 위험을 "
+            "확인하고 명시적으로 활성화한 뒤 사용하십시오.",
+        )
     provider = build_provider(provider_id, overrides)
     if provider is None:
         raise HTTPException(404, "알 수 없는 Provider 입니다.")

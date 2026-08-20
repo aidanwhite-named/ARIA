@@ -25,6 +25,15 @@ Claude 와 다른 두 가지 제약이 있다.
 
    --sandbox 를 붙이지만 그것을 안전 경계로 취급하지 않는다.
    --dangerously-skip-permissions 는 절대 쓰지 않는다.
+
+   --mode plan 은 쓰지 않는다. 실측하면 agy 가 직접 이렇게 경고한다.
+
+     warning: --mode plan has no effect while slash command expansion
+              is disabled.
+
+   ARIA 는 항상 --disable-slash-commands 로 실행하므로 plan 모드는 무효다.
+   슬래시 명령/프롬프트 수준 기능이지 권한 경계가 아니다. 같은 실행에서
+   tools 는 여전히 57개, permission_mode 는 여전히 request-review 였다.
 """
 
 from __future__ import annotations
@@ -41,6 +50,25 @@ from .agy_stream import AgyStreamParser, build_stdin_message
 from .base import EmitFn, ExecutionOutcome, ExecutionRequest, ProbeResult, Provider
 from .env import build_child_env
 from .resolver import ExecutableKind, ResolvedExecutable, resolve_simple
+
+# 이 Provider 를 켜기 전에 사용자가 알아야 할 것. Settings 에 그대로 표시된다.
+RISKS = (
+    "도구를 끄는 플래그가 없습니다. run_command, write_to_file 을 포함해 수십 개 "
+    "도구가 활성 상태로 실행됩니다.",
+    "ARIA 는 도구 호출을 '탐지'해서 실패로 기록할 뿐, 호출 자체를 '차단'하지 "
+    "못합니다. 실패로 표시되는 시점에는 이미 파일 쓰기나 명령 실행이 끝난 뒤일 수 "
+    "있습니다. 이건 fail-closed 가 아니라 사후 탐지입니다.",
+    "실측(agy 1.1.15): 파일 쓰기와 셸 명령을 요청했을 때 도구 호출이 시도됐고 "
+    "ARIA 가 탐지해 실패 처리했으며 디스크에는 변화가 없었습니다. 다만 이는 세 "
+    "가지 시나리오를 확인한 것일 뿐이고, 차단은 agy 자신의 승인 정책에 의존하며 "
+    "ARIA 가 보장하는 경계가 아닙니다.",
+    "도구 호출 탐지는 이벤트 이름에 기반합니다. 관찰하지 못한 이름이 있으면 "
+    "놓칠 수 있습니다.",
+    "시스템 프롬프트를 분리할 수 없어 ARIA 런타임 컨텍스트가 사용자 메시지에 "
+    "포함됩니다. 첨부 문서와 같은 층위라 프롬프트 인젝션 방어가 약합니다.",
+    "신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.",
+)
+
 
 _KNOWN_INSTALL_DIRS = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin",
@@ -109,6 +137,8 @@ class AgyCliProvider(Provider):
             provider=self.id,
             display_name=self.display_name,
             install_hint=self.install_hint,
+            experimental=True,
+            risks=list(RISKS),
             capabilities={
                 "non_interactive": True,
                 "stream_json": True,

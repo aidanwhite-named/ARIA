@@ -70,9 +70,14 @@ export interface ProviderInfo {
   capabilities: Record<string, boolean | string[] | null>;
   notes: string[];
   install_hint: string;
+  /** 실행 허용 여부. 설치·인증에 더해 안전 정책까지 반영. */
   usable: boolean;
   /** 설치/실행/인증만 본 상태. 안전 정책은 반영하지 않음. */
   runnable: boolean;
+  /** ARIA 의 안전 원칙(도구 없는 실행)을 충족하지 못하는 Provider. */
+  experimental: boolean;
+  opted_in: boolean;
+  risks: string[];
 }
 
 export interface AttachmentAnalysis {
@@ -186,6 +191,7 @@ export interface AppSettings {
     default_models: Record<string, string>;
     keep_raw_output: boolean;
     fail_on_tool_use: boolean;
+    enabled_experimental_providers: string[];
   };
   warnings: string[];
   data_dir: string;

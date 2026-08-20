@@ -12,6 +12,13 @@ from .pending import CodexCliProvider
 
 PROVIDER_ORDER = ["agy", "claude", "codex"]
 
+# 기술적으로 동작하지만 ARIA 의 안전 원칙(도구 없는 실행)을 충족하지
+# 못하는 Provider. 사용자가 Settings 에서 명시적으로 켜야 실행된다.
+#
+# agy 에는 도구를 끄는 플래그가 없다. ARIA 는 도구 호출을 탐지해서
+# 실패로 기록할 뿐 호출 자체를 막지 못하므로, 기본값은 '꺼짐' 이다.
+EXPERIMENTAL_PROVIDERS = frozenset({"agy"})
+
 _cache: dict[str, ProbeResult] = {}
 _lock = asyncio.Lock()
 
@@ -82,6 +89,28 @@ def cached(provider_id: str) -> ProbeResult | None:
 
 def invalidate() -> None:
     _cache.clear()
+
+
+def apply_optin(
+    results: list[ProbeResult], enabled: list[str] | None
+) -> list[ProbeResult]:
+    """실험적 Provider 의 opt-in 여부를 probe 결과에 반영한다."""
+    allowed = set(enabled or [])
+    for item in results:
+        if item.provider in EXPERIMENTAL_PROVIDERS:
+            item.experimental = True
+            item.opted_in = item.provider in allowed
+    return results
+
+
+def is_allowed(provider_id: str, enabled: list[str] | None) -> bool:
+    """이 Provider 로 실행해도 되는가.
+
+    실험적 Provider 는 사용자가 Settings 에서 켜지 않으면 거부한다.
+    """
+    if provider_id not in EXPERIMENTAL_PROVIDERS:
+        return True
+    return provider_id in set(enabled or [])
 
 
 def to_dict(result: ProbeResult) -> dict:

@@ -66,7 +66,9 @@ export default function RunPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [promptId, setPromptId] = useState("");
-  const [providerId, setProviderId] = useState("agy");
+  // 빈 문자열 = 지정 안 함. 실험적 Provider 가 자동으로 선택되면
+  // 사용자가 위험을 확인하지 않은 채 실행하게 된다.
+  const [providerId, setProviderId] = useState("");
   const [model, setModel] = useState("");
   const [claimText, setClaimText] = useState("");
   const [lineage, setLineage] = useState<Lineage | null>(null);
@@ -100,12 +102,16 @@ export default function RunPage() {
         );
         setPromptId(configuredPrompt?.id || fallbackPrompt?.id || "");
 
+        // 설정에 없으면 비워 둔다. 백엔드도 자동 선택하지 않으므로
+        // 화면만 고른 척하면 실행 시 400 이 난다.
         const configuredProvider = appSettings.values.default_provider;
         const nextProvider = PROVIDER_IDS.has(configuredProvider)
           ? configuredProvider
-          : "agy";
+          : "";
         setProviderId(nextProvider);
-        setModel(appSettings.values.default_models?.[nextProvider] ?? "");
+        setModel(
+          nextProvider ? appSettings.values.default_models?.[nextProvider] ?? "" : "",
+        );
       })
       .catch((e) => setError(String(e.message)));
   }, []);
@@ -209,6 +215,11 @@ export default function RunPage() {
     try {
       const preparedUpload = upload ?? (await uploadSelectedFiles());
       const created = await api.createJob({
+        // 화면에서 고른 값을 그대로 보낸다. 생략하면 백엔드가 설정
+        // 기본값으로 되돌아가서, 화면 표시와 실제 실행이 어긋난다.
+        prompt_id: promptId || null,
+        provider: providerId || null,
+        model: model || null,
         claim_text: claimText,
         batch_id: preparedUpload?.batch_id ?? null,
         required_map: required,
@@ -304,6 +315,45 @@ export default function RunPage() {
       </div>
 
       {error && <div className="notice danger">{error}</div>}
+
+      {!providerId && (
+        <div className="notice danger">
+          <strong>실행할 Provider 가 지정되지 않았습니다</strong>
+          <div style={{ marginTop: 4 }}>
+            ARIA 는 Provider 를 자동으로 고르지 않습니다. 실험적 Provider 가
+            기본값으로 끼어들면 위험을 확인하지 않은 채 실행하게 되기
+            때문입니다. <a href="#/settings">Settings</a> 에서 사용할 Provider 를
+            선택하십시오.
+          </div>
+        </div>
+      )}
+
+      {selectedProvider?.experimental && !selectedProvider.opted_in && (
+        <div className="notice danger">
+          <strong>
+            {selectedProvider.display_name} 은(는) 실험적 Provider 이며 활성화되어
+            있지 않습니다
+          </strong>
+          <div style={{ marginTop: 4 }}>
+            도구를 끌 수 없어 ARIA 의 안전 원칙을 충족하지 못합니다.{" "}
+            <a href="#/settings">Settings</a> 에서 위험을 확인하고 명시적으로
+            활성화해야 실행할 수 있습니다.
+          </div>
+        </div>
+      )}
+
+      {selectedProvider?.experimental && selectedProvider.opted_in && (
+        <div className="notice warn">
+          <strong>
+            실험적 Provider 로 실행합니다 — {selectedProvider.display_name}
+          </strong>
+          <ul>
+            {selectedProvider.risks.map((risk, i) => (
+              <li key={i}>{risk}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="run-tabs no-print" role="tablist" aria-label="실행 화면">
         <button
@@ -659,6 +709,7 @@ export default function RunPage() {
               uploading ||
               submitting ||
               !promptId ||
+              !providerId ||
               !selectedProvider?.usable
             }
           >

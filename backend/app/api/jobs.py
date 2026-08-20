@@ -26,7 +26,7 @@ from ..ingestion.service import (
 )
 from ..models import Attachment, ExecutionJob
 from ..prompt_store import PROMPT_STORE, InvalidPromptFile, PromptNotFound
-from ..providers.registry import build_provider, cached, probe_one
+from ..providers.registry import build_provider, cached, is_allowed, probe_one
 from ..schemas import AttachmentAnalysis, JobCreate, JobOut, UploadResponse
 
 router = APIRouter(prefix="/api", tags=["jobs"])
@@ -327,10 +327,25 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         raise HTTPException(404, "프롬프트를 찾을 수 없습니다.")
     if not prompt.enabled:
         raise HTTPException(400, "비활성화된 프롬프트입니다.")
-    provider_id = payload.provider or str(values.get("default_provider") or "agy")
+    provider_id = payload.provider or str(values.get("default_provider") or "")
+    if not provider_id:
+        # 자동 선택하지 않는다. 실험적 Provider 가 기본값으로 끼어들면
+        # 사용자가 위험을 확인하지 않은 채 실행하게 된다.
+        raise HTTPException(
+            400,
+            "사용할 Provider 를 지정하지 않았고 기본 Provider 도 설정되어 "
+            "있지 않습니다. 실행 화면에서 Provider 를 직접 선택하십시오.",
+        )
     provider_paths = values.get("provider_paths") or {}
     if build_provider(provider_id, provider_paths) is None:
         raise HTTPException(400, f"알 수 없거나 제거된 Provider 입니다: {provider_id}")
+    if not is_allowed(provider_id, values.get("enabled_experimental_providers")):
+        raise HTTPException(
+            403,
+            f"{provider_id} 는 실험적 Provider 입니다. 도구를 끌 수 없어 "
+            "신뢰할 수 없는 문서 분석에 안전하지 않습니다. Settings 에서 위험을 "
+            "확인하고 명시적으로 활성화한 뒤 사용하십시오.",
+        )
     default_models = values.get("default_models") or {}
     selected_model = payload.model or default_models.get(provider_id) or None
     if selected_model and provider_id in {"agy", "claude", "codex"}:
