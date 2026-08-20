@@ -11,11 +11,17 @@
   TEST_AUTH      인증 필요
   TEST_RATELIMIT 사용량 제한
   TEST_SLOW      긴 실행 (취소 테스트용)
+
+문헌 매핑 블록은 기본적으로 첨부에 붙은 자료 번호를 그대로 되돌려준다.
+  TEST_BADMAP    깨진 매핑 블록
+  TEST_NOMAP     매핑 블록 없음
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 
 from app.enums import AuthState
 from app.providers.base import (
@@ -27,6 +33,46 @@ from app.providers.base import (
 )
 
 _STEP_DELAY = 0.12
+
+# 최종 프롬프트의 첨부 헤더에 ARIA 가 찍어 두는 자료 번호.
+_ALIAS_LINE = re.compile(r"^자료 번호: (ATT-\d+)$", re.MULTILINE)
+
+
+def _mapping_block(message: str) -> list[str]:
+    """실제 모델이 하듯 자료 번호를 읽어 매핑 블록을 만든다.
+
+    인용발명 문헌 절에 나온 자료 번호만 대상으로 삼는다. 출원발명 문서에는
+    인용발명 번호를 붙이지 않는다.
+    """
+    if "TEST_NOMAP" in message:
+        return []
+    if "TEST_BADMAP" in message:
+        return [
+            "\n[ARIA_CITATION_MAPPING_V1]\n",
+            '{"items": [{"citation_number": 1, "attachment": "ATT-99"}]}\n',
+            "[/ARIA_CITATION_MAPPING_V1]\n",
+        ]
+
+    parts = message.split("[인용발명 문헌]", 1)
+    if len(parts) < 2:
+        return []
+    tail = parts[1].split("[기타 첨부 자료]", 1)[0]
+    aliases = _ALIAS_LINE.findall(tail)
+    if not aliases:
+        return []
+    items = [
+        {
+            "citation_number": index,
+            "attachment": alias,
+            "document_number": f"KR10-{1000000 + index}",
+        }
+        for index, alias in enumerate(aliases, start=1)
+    ]
+    return [
+        "\n[ARIA_CITATION_MAPPING_V1]\n",
+        json.dumps({"items": items}, ensure_ascii=False) + "\n",
+        "[/ARIA_CITATION_MAPPING_V1]\n",
+    ]
 
 
 class DeterministicTestProvider(Provider):
@@ -185,4 +231,5 @@ class DeterministicTestProvider(Provider):
             "## 안내\n\n",
             "실제 분석 결과를 얻으려면 Settings 화면에서 사용 가능한 Provider 를 "
             "확인하고 선택하십시오.\n",
+            *_mapping_block(request.user_message),
         ]

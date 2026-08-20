@@ -6,6 +6,7 @@ import type {
   PromptVersion,
   ProviderInfo,
   AttachmentRole,
+  RelationType,
   UploadResponse,
 } from "./types";
 
@@ -97,6 +98,9 @@ export const api = {
     claim_text?: string;
     batch_id?: string | null;
     required_map?: Record<string, boolean>;
+    source_job_id?: string | null;
+    relation_type?: RelationType | null;
+    followup_instruction?: string;
   }) => request<Job>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
   getJob: (id: string) => request<Job>(`/api/jobs/${id}`),
   cancelJob: (id: string) =>
@@ -118,6 +122,13 @@ export const api = {
   historyItem: (id: string) => request<Job>(`/api/history/${id}`),
   deleteHistory: (id: string) =>
     request<void>(`/api/history/${id}`, { method: "DELETE" }),
+  /** 이 실행과 그로부터 이어진 후속 실행 전부. 일괄 삭제 전 확인용. */
+  historyThread: (id: string) =>
+    request<HistoryItem[]>(`/api/history/${id}/thread`),
+  deleteHistoryThread: (id: string) =>
+    request<{ deleted: number }>(`/api/history/${id}/thread`, {
+      method: "DELETE",
+    }),
 
   settings: () => request<AppSettings>("/api/settings"),
   updateSettings: (values: Record<string, unknown>) =>

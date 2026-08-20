@@ -68,6 +68,36 @@ class AttachmentRole(StrEnum):
     SUPPLEMENTAL = "SUPPLEMENTAL"
 
 
+class RelationType(StrEnum):
+    """후속 실행이 원본 실행에서 무엇을 물려받았는지.
+
+    자료 재사용과 맥락 이어받기는 서로 다른 선택이다. 하나의 컬럼에 두 의미를
+    섞으면 "보고서는 이어받았는데 자료는 안 받았다" 같은 표현 불가능한 조합이
+    스키마상 가능해진다.
+
+      MAPPED     : 첨부 + 이전 청구항 + 검증된 문헌 매핑. 이전 보고서는 넣지
+                   않는다. 종속항 추가 분석의 기본 경로다. 번호는 유지되고
+                   유사도·발췌문은 앵커링 없이 다시 판단된다.
+      CONTINUED  : 여기에 이전 보고서 전체를 더한다. 보고서 자체를 고치거나
+                   보완할 때만 쓴다.
+      REANALYZED : 첨부만 물려받는다. 번호도 이전 판단도 물려받지 않는다.
+
+    값이 없으면 독립 실행이다.
+    """
+
+    MAPPED = "MAPPED"
+    CONTINUED = "CONTINUED"
+    REANALYZED = "REANALYZED"
+
+    @property
+    def inherits_mapping(self) -> bool:
+        return self in (RelationType.MAPPED, RelationType.CONTINUED)
+
+    @property
+    def inherits_report(self) -> bool:
+        return self is RelationType.CONTINUED
+
+
 class ExtractionMethod(StrEnum):
     RAW_TEXT = "RAW_TEXT"
     PDF_TEXT_LAYER = "PDF_TEXT_LAYER"

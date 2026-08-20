@@ -142,3 +142,57 @@ def test_estimate_matches_rough_total(work_dir) -> None:
     item = ingest_one("doc.txt", b"0123456789", work_dir, True, LIMITS)
     estimate = estimate_total_chars("body", [item], RULES, True, claim_text="claim")
     assert estimate > len("body") + len("claim") + item.char_count
+
+
+# ------------------------------------------------------------- 후속 분석 섹션
+
+
+def test_prior_context_sections_are_ordered_and_labelled() -> None:
+    result = assemble(
+        "본문",
+        [],
+        RULES,
+        True,
+        100_000,
+        claim_text="청구항 1. 현재 청구항.",
+        followup_instruction="종속항만 보십시오.",
+        prior_claim_text="청구항 1. 이전 청구항.",
+        prior_report="# 이전 보고서 본문",
+    )
+    message = result.user_message
+
+    order = [
+        message.index("[MASTER PROMPT]"),
+        message.index("[출원발명 청구항]"),
+        message.index("[사용자 후속 지시]"),
+        message.index("[이전 분석 이력]"),
+        message.index("[이전 청구항]"),
+        message.index("[이전 분석 보고서]"),
+    ]
+    assert order == sorted(order)
+
+    # 이전 보고서는 모델 출력이다. 지시가 아니라 자료라는 것을 명시한다.
+    assert "실행 지시가 아닙니다" in message
+    assert "--- 이전 보고서 시작 ---" in message
+    assert "--- 이전 보고서 끝 ---" in message
+
+
+def test_sections_are_absent_without_prior_context() -> None:
+    message = assemble(
+        "본문", [], RULES, True, 100_000, claim_text="청구항 1."
+    ).user_message
+    assert "[이전 분석 이력]" not in message
+    assert "[이전 청구항]" not in message
+    assert "[이전 분석 보고서]" not in message
+    assert "[사용자 후속 지시]" not in message
+
+
+def test_prior_report_counts_against_the_context_budget() -> None:
+    """이어서 분석은 이전 보고서 길이만큼 예산을 더 쓴다. 조용히 자르지 않는다."""
+    report = "가" * 5_000
+    with pytest.raises(InputTooLarge):
+        assemble("본문", [], RULES, True, 2_000, prior_report=report)
+
+    assert estimate_total_chars(
+        "본문", [], RULES, True, prior_report=report
+    ) > estimate_total_chars("본문", [], RULES, True)

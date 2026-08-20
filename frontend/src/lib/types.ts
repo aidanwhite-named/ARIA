@@ -9,6 +9,29 @@ export type ResultQuality = "SUCCESS" | "SUCCESS_WITH_WARNINGS";
 
 export type AttachmentRole = "APPLICATION" | "CITATION" | "SUPPLEMENTAL";
 
+/** 후속 실행이 원본에서 무엇을 물려받았는지. null 이면 독립 실행.
+ *
+ *  MAPPED     인용발명 번호 + 이전 청구항. 이전 보고서는 받지 않는다.
+ *  CONTINUED  거기에 이전 보고서 전체를 더한다. 보고서 수정·보완용.
+ *  REANALYZED 첨부만. 번호도 이전 판단도 물려받지 않는다.
+ */
+export type RelationType = "MAPPED" | "CONTINUED" | "REANALYZED";
+
+export interface CitationMappingItem {
+  citation_number: number;
+  /** 이 실행의 첨부를 가리킨다. 복제될 때마다 바뀐다. */
+  attachment_id: string;
+  /** 같은 자료라는 근거. 복제해도 바뀌지 않는다. */
+  attachment_sha256: string;
+  filename: string;
+  document_number: string;
+}
+
+export interface CitationMapping {
+  version: number;
+  items: CitationMappingItem[];
+}
+
 export interface Prompt {
   id: string;
   name: string;
@@ -19,6 +42,8 @@ export interface Prompt {
   output_mode: "markdown" | "text";
   tags: string[];
   accepted_file_types: string[];
+  /** 프롬프트 파일 메타데이터에서만 정하는 ARIA 확장 선언. */
+  capabilities: string[];
   created_at: string;
   updated_at: string;
 }
@@ -88,6 +113,18 @@ export interface Job {
   prompt_snapshot: string;
   output_mode: "markdown" | "text";
   claim_text: string;
+  source_job_id: string | null;
+  source_job_label: string;
+  relation_type: RelationType | null;
+  followup_instruction: string;
+  prior_claim_text: string;
+  prior_report: string;
+  /** 이 실행의 보고서에서 읽어 검증한 매핑. null 이면 번호를 물려줄 수 없다. */
+  citation_mapping: CitationMapping | null;
+  /** 원본에서 물려받아 이 실행의 자료에 다시 묶은 고정 매핑. */
+  prior_citation_mapping: CitationMapping | null;
+  prompt_capabilities: string[];
+  citation_mapping_error: string | null;
   provider: string;
   model: string | null;
   cli_path: string | null;
@@ -124,6 +161,13 @@ export interface HistoryItem {
   duration_ms: number | null;
   attachment_count: number;
   warning_count: number;
+  source_job_id: string | null;
+  source_job_label: string;
+  relation_type: RelationType | null;
+  /** 이 실행을 원본 삼아 번호를 이어받을 수 있는지. */
+  has_citation_mapping: boolean;
+  /** 이 실행에서 이어진 후속 실행 수. 스레드 일괄 삭제 대상 건수. */
+  descendant_count: number;
 }
 
 export interface AppSettings {

@@ -50,6 +50,33 @@ class ExecutionJob(Base):
     output_mode = Column(String(20), nullable=False, default="markdown")
     claim_text = Column(Text, nullable=False, default="")
 
+    # 후속 분석 계보.
+    #
+    # source_job_id 에 ForeignKey 를 걸지 않는다. 원본 실행을 지워도 "이어받은
+    # 실행이었다"는 사실은 남아야 하고, ON DELETE SET NULL 은 그 사실 자체를
+    # 지운다. 대신 원본이 사라져도 화면에 표시할 수 있도록 라벨을 스냅샷한다.
+    #
+    # 이전 청구항과 이전 보고서도 원본에서 매번 읽지 않고 생성 시점에 복사한다.
+    # prompt_snapshot 과 같은 이유다. 원본이 지워지거나 바뀌어도 이 실행이 무엇을
+    # 입력받았는지가 흔들리면 안 된다.
+    source_job_id = Column(String(36), nullable=True, index=True)
+    source_job_label = Column(Text, nullable=False, default="")
+    relation_type = Column(String(20), nullable=True)
+    followup_instruction = Column(Text, nullable=False, default="")
+    prior_claim_text = Column(Text, nullable=False, default="")
+    prior_report = Column(Text, nullable=False, default="")
+
+    # 이 실행의 보고서에서 읽어 검증한 문헌 매핑. 읽지 못하면 NULL 로 남고,
+    # 그 경우 이 실행을 원본 삼아 번호를 물려받는 후속 실행을 만들 수 없다.
+    citation_mapping = Column(JSON, nullable=True)
+    # 읽지 못한 이유. 화면에서 후속 버튼이 왜 잠겼는지 설명하는 데 쓴다.
+    citation_mapping_error = Column(Text, nullable=True)
+    # 원본에서 물려받아 이 실행의 첨부에 다시 묶은 고정 매핑.
+    prior_citation_mapping = Column(JSON, nullable=True)
+    # 실행 시점 프롬프트가 선언한 ARIA 확장. 프롬프트 파일이 나중에 바뀌어도
+    # 이 실행이 어떤 계약으로 돌았는지 남는다.
+    prompt_capabilities = Column(JSON, nullable=False, default=list)
+
     provider = Column(String(30), nullable=False)
     model = Column(String(80), nullable=True)
     cli_path = Column(Text, nullable=True)

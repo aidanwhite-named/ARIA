@@ -11,14 +11,19 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from .. import settings_service
+from .. import citation_mapping, settings_service
 from ..config import PATHS
 from ..db import get_db
-from ..enums import AttachmentRole, JobStatus, derive_quality
+from ..enums import AttachmentRole, JobStatus, RelationType, derive_quality
 from ..execution.bus import BUS
-from ..execution.runner import RUNNER
+from ..execution.runner import RUNNER, row_to_ingested
 from ..ingestion.security import UnsafeFilename
-from ..ingestion.service import IngestionLimits, ingest_many
+from ..ingestion.service import (
+    AttachmentCloneError,
+    IngestionLimits,
+    clone_attachment,
+    ingest_many,
+)
 from ..models import Attachment, ExecutionJob
 from ..prompt_store import PROMPT_STORE, InvalidPromptFile, PromptNotFound
 from ..providers.registry import build_provider, cached, probe_one
@@ -186,6 +191,16 @@ def _job_out(job: ExecutionJob) -> JobOut:
         prompt_snapshot=job.prompt_snapshot,
         output_mode=job.output_mode,
         claim_text=job.claim_text or "",
+        source_job_id=job.source_job_id,
+        source_job_label=job.source_job_label or "",
+        relation_type=job.relation_type,
+        followup_instruction=job.followup_instruction or "",
+        prior_claim_text=job.prior_claim_text or "",
+        prior_report=job.prior_report or "",
+        citation_mapping=job.citation_mapping,
+        prior_citation_mapping=job.prior_citation_mapping,
+        prompt_capabilities=list(job.prompt_capabilities or []),
+        citation_mapping_error=job.citation_mapping_error,
         provider=job.provider,
         model=job.model,
         cli_path=job.cli_path,
@@ -225,6 +240,66 @@ def _job_out(job: ExecutionJob) -> JobOut:
         completed_at=job.completed_at,
         duration_ms=job.duration_ms,
     )
+
+
+def source_label(job: ExecutionJob) -> str:
+    """원본 실행이 삭제된 뒤에도 화면에 남길 표시용 라벨."""
+    stamp = job.created_at.strftime("%Y-%m-%d %H:%M") if job.created_at else ""
+    version = f" v{job.prompt_version}" if job.prompt_version else ""
+    return f"{stamp} · {job.prompt_name}{version}".strip().strip("·").strip()
+
+
+def _clone_parent_attachments(
+    session: Session,
+    source_job: ExecutionJob,
+    job: ExecutionJob,
+    work_dir: Path,
+) -> list:
+    """원본 실행의 첨부를 자식 작업 폴더로 복제하고 새 행을 만든다.
+
+    도중에 실패하면 이미 쓴 복제본을 지운다. DB 는 예외로 롤백되지만 파일은
+    남으므로, 부분 복제 상태의 폴더를 만들지 않는다.
+
+    복제본 목록을 돌려준다. 문헌 매핑을 새 attachment_id 에 다시 묶어야 한다.
+    """
+    written: list[Path] = []
+    cloned: list = []
+    try:
+        for row in source_job.attachments:
+            new_id = str(uuid.uuid4())
+            cloned_file = clone_attachment(row_to_ingested(row), work_dir, new_id)
+            written.append(Path(cloned_file.stored_path))
+            if cloned_file.normalized_text_path:
+                written.append(Path(cloned_file.normalized_text_path))
+            session.add(
+                Attachment(
+                    id=cloned_file.attachment_id,
+                    job_id=job.id,
+                    upload_batch=None,
+                    original_filename=cloned_file.original_filename,
+                    internal_filename=cloned_file.internal_filename,
+                    mime_type=cloned_file.mime_type,
+                    size_bytes=cloned_file.size_bytes,
+                    sha256=cloned_file.sha256,
+                    required=cloned_file.required,
+                    role=cloned_file.role,
+                    stored_path=cloned_file.stored_path,
+                    normalized_text_path=cloned_file.normalized_text_path,
+                    page_count=cloned_file.page_count,
+                    char_count=cloned_file.char_count,
+                    extraction_method=cloned_file.extraction_method,
+                    ocr_used=cloned_file.ocr_used,
+                    delivery_mode=cloned_file.delivery_mode,
+                    read_ok=cloned_file.read_ok,
+                    error=cloned_file.error,
+                )
+            )
+            cloned.append(cloned_file)
+    except AttachmentCloneError:
+        for path in written:
+            path.unlink(missing_ok=True)
+        raise
+    return cloned
 
 
 @router.post("/jobs", response_model=JobOut, status_code=201)
@@ -269,10 +344,44 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
                 f"{provider_id} 에서 사용할 수 없는 모델입니다: {selected_model}",
             )
 
+    # --- 후속 분석 계보 -------------------------------------------------
+    # source_job_id 와 relation_type 은 항상 함께 온다. 하나만 오면 어느 쪽을
+    # 의도한 것인지 알 수 없으므로 추측하지 않고 거절한다.
+    source_job: ExecutionJob | None = None
+    relation = payload.relation_type
+    if bool(payload.source_job_id) != bool(relation):
+        raise HTTPException(
+            400, "source_job_id 와 relation_type 은 함께 지정해야 합니다."
+        )
+    if payload.source_job_id:
+        source_job = session.get(ExecutionJob, payload.source_job_id)
+        if source_job is None:
+            raise HTTPException(404, "이어받을 원본 실행을 찾을 수 없습니다.")
+        if relation == RelationType.CONTINUED and not (
+            source_job.result_text or ""
+        ).strip():
+            raise HTTPException(
+                400,
+                "원본 실행에 이어받을 보고서가 없습니다. 자료만 재사용하려면 "
+                "새로 분석을 선택하십시오.",
+            )
+        if relation == RelationType.MAPPED and not (
+            source_job.citation_mapping or {}
+        ).get("items"):
+            # 조용히 보고서 전체 전달로 되돌아가지 않는다. 그렇게 하면 사용자가
+            # 모르는 사이에 이전 유사도와 발췌문이 다시 모델 앞에 놓인다.
+            detail = (
+                source_job.citation_mapping_error
+                or "원본 실행에 검증된 문헌 매핑이 없습니다."
+            )
+            raise HTTPException(400, f"번호를 이어받을 수 없습니다: {detail}")
+
     work_dir = (
         PATHS.run_dir(payload.batch_id) if payload.batch_id else None
     )
 
+    relation_kind = RelationType(relation) if relation else None
+    carries_claims = relation_kind is not None and relation_kind.inherits_mapping
     job = ExecutionJob(
         prompt_id=prompt.id,
         prompt_name=prompt.name,
@@ -280,6 +389,19 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         prompt_snapshot=prompt.body,
         output_mode=prompt.output_mode,
         claim_text=payload.claim_text or "",
+        source_job_id=source_job.id if source_job else None,
+        source_job_label=source_label(source_job) if source_job else "",
+        relation_type=relation,
+        followup_instruction=payload.followup_instruction or "",
+        # 원본이 나중에 지워져도 이 실행의 입력은 바뀌면 안 된다. prompt_snapshot
+        # 과 같은 이유로 생성 시점에 복사해 둔다.
+        prior_claim_text=(source_job.claim_text or "") if carries_claims else "",
+        prior_report=(
+            (source_job.result_text or "")
+            if relation_kind is not None and relation_kind.inherits_report
+            else ""
+        ),
+        prompt_capabilities=list(prompt.capabilities),
         provider=provider_id,
         model=selected_model,
         status=JobStatus.QUEUED,
@@ -292,6 +414,8 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
     work_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir = str(work_dir)
 
+    # 업로드 batch 를 먼저 처리한다. 여기서 거절당할 수 있는데, 복제를 먼저 하면
+    # 롤백된 작업의 파일 사본만 폴더에 남는다.
     if payload.batch_id:
         rows = (
             session.query(Attachment)
@@ -305,6 +429,31 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
                 raise HTTPException(400, "이미 다른 작업에 사용된 업로드입니다.")
             row.job_id = job.id
             row.required = bool(payload.required_map.get(row.id, True))
+
+    if source_job is not None:
+        # 두 실행이 같은 폴더를 쓰면 복제본이 원본의 증거 파일을 덮어쓴다.
+        # 지금은 위의 batch 재사용 검사에 먼저 걸려 도달하지 않지만, 그 규칙이
+        # 완화되면 곧바로 도달한다. 파일을 잃는 쪽이라 방어를 남겨 둔다.
+        if source_job.work_dir and Path(source_job.work_dir) == work_dir:
+            raise HTTPException(
+                400, "원본 실행과 같은 작업 폴더를 쓸 수 없습니다. 자료는 복제됩니다."
+            )
+        try:
+            cloned = _clone_parent_attachments(session, source_job, job, work_dir)
+        except AttachmentCloneError as exc:
+            raise HTTPException(409, f"원본 자료를 복제하지 못했습니다: {exc}") from exc
+
+        # 복제하면 attachment_id 가 바뀐다. 고정 매핑을 이 실행의 자료에 sha256
+        # 으로 다시 묶는다. 한 항목이라도 짝이 없으면 번호가 어긋나므로 실패시킨다.
+        if relation_kind.inherits_mapping and source_job.citation_mapping:
+            try:
+                job.prior_citation_mapping = citation_mapping.rebind(
+                    source_job.citation_mapping, cloned
+                )
+            except citation_mapping.MappingError as exc:
+                raise HTTPException(
+                    409, f"문헌 매핑을 이 실행의 자료에 묶지 못했습니다: {exc}"
+                ) from exc
 
     session.commit()
     session.refresh(job)

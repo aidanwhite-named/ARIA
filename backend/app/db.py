@@ -38,11 +38,34 @@ def init_engine(db_path=None):
     return _engine
 
 
+# 후속 분석 계보 컬럼. relation_type 만 NULL 을 허용한다 (독립 실행).
+_LINEAGE_COLUMNS = (
+    ("source_job_id", "source_job_id VARCHAR(36)"),
+    ("source_job_label", "source_job_label TEXT NOT NULL DEFAULT ''"),
+    ("relation_type", "relation_type VARCHAR(20)"),
+    ("followup_instruction", "followup_instruction TEXT NOT NULL DEFAULT ''"),
+    ("prior_claim_text", "prior_claim_text TEXT NOT NULL DEFAULT ''"),
+    ("prior_report", "prior_report TEXT NOT NULL DEFAULT ''"),
+    ("citation_mapping", "citation_mapping JSON"),
+    ("citation_mapping_error", "citation_mapping_error TEXT"),
+    ("prior_citation_mapping", "prior_citation_mapping JSON"),
+    ("prompt_capabilities", "prompt_capabilities JSON NOT NULL DEFAULT '[]'"),
+)
+
+
 def _add_compatible_columns(engine) -> None:
-    """기존 v0.1 SQLite 파일에 안전한 추가 컬럼만 보강한다.
+    """기존 v0.1 SQLite 파일을 현재 모델에 맞춘다.
 
     create_all 은 이미 존재하는 테이블을 변경하지 않으므로, 실행 스냅샷과
     첨부 역할 컬럼은 작은 호환 마이그레이션으로 추가한다.
+
+    v0.1 의 user_input 은 claim_text 로 대체됐다. 그런데 그 컬럼은 NOT NULL
+    이고 기본값이 없어서, 남겨두면 현재 모델이 만드는 INSERT 에 값이 빠져
+    작업 생성이 전부 IntegrityError 로 실패한다. 값을 claim_text 로 옮긴 뒤
+    제거한다.
+
+    후속 분석 계보 컬럼도 같은 방식으로 붙인다. 기존 실행은 독립 실행이므로
+    relation_type 이 NULL, 나머지는 빈 문자열이 맞는 기본값이다.
     """
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -62,11 +85,32 @@ def _add_compatible_columns(engine) -> None:
                 "ALTER TABLE execution_jobs "
                 "ADD COLUMN claim_text TEXT NOT NULL DEFAULT ''"
             )
+        if "user_input" in job_columns:
+            # 과거 실행 기록의 입력을 잃지 않도록 먼저 옮긴다.
+            connection.exec_driver_sql(
+                "UPDATE execution_jobs SET claim_text = user_input "
+                "WHERE claim_text = '' AND user_input IS NOT NULL "
+                "AND user_input != ''"
+            )
+            connection.exec_driver_sql(
+                "ALTER TABLE execution_jobs DROP COLUMN user_input"
+            )
         if "role" not in attachment_columns and attachment_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE attachments "
                 "ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'SUPPLEMENTAL'"
             )
+        if job_columns:
+            for name, ddl in _LINEAGE_COLUMNS:
+                if name not in job_columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE execution_jobs ADD COLUMN {ddl}"
+                    )
+            if "source_job_id" not in job_columns:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_execution_jobs_source_job_id "
+                    "ON execution_jobs (source_job_id)"
+                )
 
 
 def get_sessionmaker():

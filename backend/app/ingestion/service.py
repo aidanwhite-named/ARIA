@@ -288,6 +288,81 @@ def ingest_many(
     return result
 
 
+class AttachmentCloneError(Exception):
+    """첨부 복제 실패. 원본 누락 또는 sha256 불일치."""
+
+
+def clone_attachment(
+    source: IngestedFile,
+    dest_work_dir: Path,
+    new_attachment_id: str,
+) -> IngestedFile:
+    """첨부 원본과 정규화 텍스트를 다른 작업 폴더로 복제한다.
+
+    후속 실행이 원본 실행의 폴더를 가리키기만 하면, 원본 이력을 지우는 순간
+    후속 실행의 근거 자료가 사라진다. 각 실행이 자기 폴더 안에 자기 증거를
+    전부 갖게 해서 삭제를 서로 독립시킨다.
+
+    복제한 파일의 sha256 을 다시 계산해서 원본 기록과 대조한다. 어긋나면
+    복제본을 지우고 실패시킨다. 부모가 검증한 것과 다른 자료가 자식 실행에
+    조용히 들어가는 상황을 만들지 않는다.
+
+    정규화 텍스트는 다시 추출하지 않고 그대로 복사한다. pypdf 버전이 바뀌면
+    재추출 결과가 달라질 수 있고, 그러면 "같은 자료"라는 전제가 깨진다.
+    """
+    src_path = Path(source.stored_path)
+    if not src_path.is_file():
+        raise AttachmentCloneError(
+            f"원본 파일을 찾을 수 없습니다: {source.original_filename}"
+        )
+
+    extension = Path(source.internal_filename).suffix
+    internal_filename = f"{new_attachment_id}{extension}"
+    dest_path = dest_work_dir / "input" / internal_filename
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = src_path.read_bytes()
+    actual = _sha256(data)
+    if source.sha256 and actual != source.sha256:
+        raise AttachmentCloneError(
+            f"복제 중 해시가 어긋났습니다: {source.original_filename} "
+            f"(기록 {source.sha256[:12]}…, 실제 {actual[:12]}…)"
+        )
+    dest_path.write_bytes(data)
+
+    normalized_path: str | None = None
+    if source.normalized_text_path:
+        src_normalized = Path(source.normalized_text_path)
+        if not src_normalized.is_file():
+            dest_path.unlink(missing_ok=True)
+            raise AttachmentCloneError(
+                f"정규화 텍스트를 찾을 수 없습니다: {source.original_filename}"
+            )
+        normalized_path = _write_normalized(
+            dest_work_dir, new_attachment_id, src_normalized.read_text(encoding="utf-8")
+        )
+
+    return IngestedFile(
+        attachment_id=new_attachment_id,
+        original_filename=source.original_filename,
+        internal_filename=internal_filename,
+        mime_type=source.mime_type,
+        size_bytes=source.size_bytes,
+        sha256=actual,
+        required=source.required,
+        stored_path=str(dest_path),
+        role=source.role,
+        normalized_text_path=normalized_path,
+        page_count=source.page_count,
+        char_count=source.char_count,
+        extraction_method=source.extraction_method,
+        ocr_used=source.ocr_used,
+        delivery_mode=source.delivery_mode,
+        read_ok=source.read_ok,
+        error=source.error,
+    )
+
+
 def read_normalized(item: IngestedFile) -> str:
     if not item.normalized_text_path:
         return ""

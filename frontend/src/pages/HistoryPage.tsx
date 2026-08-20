@@ -1,13 +1,49 @@
 import { useCallback, useEffect, useState } from "react";
 
+import ReportCompare from "../components/ReportCompare";
 import ResultView from "../components/ResultView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
-import type { HistoryItem, Job } from "../lib/types";
+import type { CitationMapping, HistoryItem, Job, RelationType } from "../lib/types";
+
+function MappingTable({ mapping }: { mapping: CitationMapping }) {
+  return (
+    <div className="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>인용발명</th>
+            <th>고유 문헌번호</th>
+            <th>문헌</th>
+            <th>sha256</th>
+          </tr>
+        </thead>
+        <tbody>
+          {mapping.items.map((item) => (
+            <tr key={item.citation_number}>
+              <td>인용발명 {item.citation_number}</td>
+              <td>{item.document_number}</td>
+              <td>{item.filename}</td>
+              <td className="mono-text">{item.attachment_sha256.slice(0, 16)}…</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function relationLabel(relation: RelationType | null): string {
+  if (relation === "MAPPED") return "종속항 추가 — 번호 유지";
+  if (relation === "CONTINUED") return "보고서 수정·보완";
+  if (relation === "REANALYZED") return "자료만 물려받음";
+  return "";
+}
 
 export default function HistoryPage() {
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [detail, setDetail] = useState<Job | null>(null);
+  const [comparing, setComparing] = useState<Job | null>(null);
   const [finalPrompt, setFinalPrompt] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [providerFilter, setProviderFilter] = useState("");
@@ -34,11 +70,42 @@ export default function HistoryPage() {
     }
   };
 
-  const remove = async (id: string) => {
-    if (!window.confirm("이 실행 이력과 작업 폴더를 삭제합니다. 계속할까요?")) return;
+  const remove = async (item: HistoryItem) => {
+    // 후속 실행은 첨부와 이전 보고서를 자기 폴더/컬럼에 복제해 두므로 원본이
+    // 없어도 온전하다. 함께 지워지지 않는다는 것을 삭제 전에 알려 준다.
+    const note =
+      item.descendant_count > 0
+        ? `\n\n이 실행에서 이어진 후속 분석 ${item.descendant_count}건은 삭제되지 않고 그대로 남습니다.`
+        : "";
+    if (
+      !window.confirm(`이 실행 이력과 작업 폴더를 삭제합니다.${note}\n\n계속할까요?`)
+    ) {
+      return;
+    }
     try {
-      await api.deleteHistory(id);
-      if (detail?.id === id) setDetail(null);
+      await api.deleteHistory(item.id);
+      if (detail?.id === item.id) setDetail(null);
+      load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const removeThread = async (item: HistoryItem) => {
+    try {
+      const thread = await api.historyThread(item.id);
+      const lines = thread
+        .map(
+          (t, i) =>
+            `${i === 0 ? "원본" : "후속"} · ${new Date(t.created_at).toLocaleString()} · ${t.prompt_name}`,
+        )
+        .join("\n");
+      const ok = window.confirm(
+        `아래 ${thread.length}건의 실행 이력과 작업 폴더를 모두 삭제합니다.\n되돌릴 수 없습니다.\n\n${lines}\n\n계속할까요?`,
+      );
+      if (!ok) return;
+      await api.deleteHistoryThread(item.id);
+      if (detail && thread.some((t) => t.id === detail.id)) setDetail(null);
       load();
     } catch (e) {
       setError((e as Error).message);
@@ -46,18 +113,18 @@ export default function HistoryPage() {
   };
 
   return (
-    <div>
+    <div className="page page-history">
       <div className="page-head">
-        <h1>History</h1>
+        <span className="eyebrow">03 / Audit trail</span>
+        <h1>결과보다 먼저, 과정을 남깁니다</h1>
         <p>
-          각 실행을 다시 확인하는 데 필요한 정보를 보존합니다. 프롬프트 스냅샷, 최종
-          프롬프트 해시, CLI 경로와 버전, 첨부 전달 방식, 경고와 오류가 포함됩니다.
+          입력의 지문부터 프롬프트 스냅샷, 실행 환경과 결과까지 판단의 근거를 다시 확인합니다.
         </p>
       </div>
 
       {error && <div className="notice danger">{error}</div>}
 
-      <div className="card no-print">
+      <div className="card no-print history-filter">
         <div className="btn-row">
           <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ maxWidth: 180 }}>
             <option value="">모든 상태</option>
@@ -78,7 +145,7 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card history-list">
         {items.length === 0 ? (
           <div className="empty">실행 이력이 없습니다.</div>
         ) : (
@@ -89,6 +156,7 @@ export default function HistoryPage() {
                   <th>실행 시각</th>
                   <th>상태</th>
                   <th>Prompt</th>
+                  <th>계보</th>
                   <th>Provider</th>
                   <th>첨부</th>
                   <th>소요</th>
@@ -111,6 +179,25 @@ export default function HistoryPage() {
                       {item.prompt_version ? ` (v${item.prompt_version})` : ""}
                     </td>
                     <td>
+                      {item.relation_type ? (
+                        <>
+                          <span
+                            className={`pill ${item.relation_type === "CONTINUED" ? "accent" : "warn"}`}
+                          >
+                            {relationLabel(item.relation_type)}
+                          </span>
+                          <div className="faint">
+                            {item.source_job_label || "원본 미상"}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="faint">독립 실행</span>
+                      )}
+                      {item.descendant_count > 0 && (
+                        <div className="faint">후속 {item.descendant_count}건</div>
+                      )}
+                    </td>
+                    <td>
                       {item.provider}
                       {item.model ? ` / ${item.model}` : ""}
                     </td>
@@ -123,9 +210,18 @@ export default function HistoryPage() {
                         <button className="btn small" onClick={() => open(item.id)}>
                           상세
                         </button>
-                        <button className="btn small danger" onClick={() => remove(item.id)}>
+                        <button className="btn small danger" onClick={() => remove(item)}>
                           삭제
                         </button>
+                        {item.descendant_count > 0 && (
+                          <button
+                            className="btn small danger"
+                            onClick={() => removeThread(item)}
+                            title="이 실행과 그로부터 이어진 후속 분석을 모두 삭제합니다."
+                          >
+                            스레드 삭제 ({item.descendant_count + 1})
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -176,6 +272,31 @@ export default function HistoryPage() {
                     <th>실행 시각</th>
                     <td>{new Date(detail.created_at).toLocaleString()}</td>
                   </tr>
+                  {detail.relation_type && (
+                    <tr>
+                      <th>계보</th>
+                      <td>
+                        {relationLabel(detail.relation_type)} ·{" "}
+                        {detail.source_job_label || "원본 미상"}
+                        <div className="faint">
+                          원본 실행 id {detail.source_job_id ?? "-"}
+                          {detail.prior_claim_text &&
+                            ` · 이전 청구항 ${detail.prior_claim_text.length.toLocaleString()}자`}
+                          {detail.prior_report
+                            ? ` · 이전 보고서 ${detail.prior_report.length.toLocaleString()}자`
+                            : " · 이전 보고서 전달 안 함"}
+                        </div>
+                        <div className="btn-row" style={{ marginTop: 6 }}>
+                          <button
+                            className="btn small"
+                            onClick={() => setComparing(detail)}
+                          >
+                            원본과 비교
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
                   <tr>
                     <th>Provider / 모델</th>
                     <td>
@@ -229,6 +350,40 @@ export default function HistoryPage() {
                 </tbody>
               </table>
             </div>
+
+            {detail.prior_citation_mapping && (
+              <>
+                <h3>물려받은 고정 문헌 매핑</h3>
+                <MappingTable mapping={detail.prior_citation_mapping} />
+              </>
+            )}
+
+            {detail.citation_mapping ? (
+              <>
+                <h3>이 실행이 남긴 문헌 매핑</h3>
+                <MappingTable mapping={detail.citation_mapping} />
+              </>
+            ) : (
+              detail.citation_mapping_error && (
+                <div className="notice warn">
+                  <strong>문헌 매핑을 읽지 못했습니다</strong>
+                  <div>{detail.citation_mapping_error}</div>
+                  <div>
+                    보고서 자체는 정상입니다. 이 실행을 원본으로 삼는 번호 유지 후속
+                    분석만 쓸 수 없습니다.
+                  </div>
+                </div>
+              )
+            )}
+
+            {detail.followup_instruction && (
+              <>
+                <h3>사용자 후속 지시</h3>
+                <pre className="result-raw" style={{ maxHeight: 160 }}>
+                  {detail.followup_instruction}
+                </pre>
+              </>
+            )}
 
             {detail.attachments.length > 0 && (
               <>
@@ -311,6 +466,10 @@ export default function HistoryPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {comparing && (
+        <ReportCompare job={comparing} onClose={() => setComparing(null)} />
       )}
     </div>
   );

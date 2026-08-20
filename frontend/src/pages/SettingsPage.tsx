@@ -103,9 +103,10 @@ export default function SettingsPage() {
 
   if (!settings) {
     return (
-      <div>
+      <div className="page page-settings">
         <div className="page-head">
-          <h1>Settings</h1>
+          <span className="eyebrow">04 / Runtime control</span>
+          <h1>실행 환경을 조율합니다</h1>
         </div>
         {error ? <div className="notice danger">{error}</div> : <p className="faint">불러오는 중…</p>}
       </div>
@@ -122,12 +123,12 @@ export default function SettingsPage() {
     : "";
 
   return (
-    <div>
+    <div className="page page-settings">
       <div className="page-head">
-        <h1>Settings</h1>
+        <span className="eyebrow">04 / Runtime control</span>
+        <h1>실행 환경을 조율합니다</h1>
         <p>
-          ARIA 는 API Key 를 입력받거나 저장하지 않습니다. 각 CLI 에 이미 저장된 로컬
-          로그인 세션만 사용합니다.
+          로컬 실행의 안전 경계와 분석 기본값을 한곳에서 관리합니다. ARIA는 API Key를 수집하거나 저장하지 않습니다.
         </p>
       </div>
 
@@ -139,7 +140,7 @@ export default function SettingsPage() {
         </div>
       ))}
 
-      <div className="card">
+      <div className="card settings-defaults">
         <h2>실행 기본 설정</h2>
         <p className="faint" style={{ marginTop: -6 }}>
           실행 화면은 아래 설정을 그대로 사용합니다.
@@ -210,7 +211,7 @@ export default function SettingsPage() {
         </button>
       </div>
 
-      <div className="card">
+      <div className="card settings-provider">
         <div className="split" style={{ marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>Provider Capability Matrix</h2>
           <button className="btn small" onClick={probe} disabled={probing}>
@@ -323,7 +324,7 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <div className="card">
+      <div className="card settings-limits">
         <h2>실행 한도</h2>
         <div className="card-row">
           <NumberField
@@ -383,7 +384,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card settings-context">
         <h2>런타임 컨텍스트</h2>
         <p className="faint" style={{ marginTop: 0 }}>
           시스템 프롬프트로 전달되는 실행 안전 규칙입니다. 특허 분석 같은 업무 지시가
@@ -414,7 +415,7 @@ export default function SettingsPage() {
         />
       </div>
 
-      <div className="card">
+      <div className="card settings-storage">
         <h2>저장 위치와 실행 환경</h2>
         <div className="table-scroll">
           <table>

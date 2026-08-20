@@ -15,7 +15,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from .. import settings_service
+from .. import citation_mapping, settings_service
 from ..config import PATHS
 from ..db import session_scope
 from ..enums import ErrorCode, JobStatus
@@ -141,6 +141,12 @@ class JobRunner:
             model = job.model
             master_prompt = job.prompt_snapshot
             claim_text = job.claim_text
+            followup_instruction = job.followup_instruction or ""
+            # 생성 시점에 복사해 둔 값이다. 원본 실행을 여기서 다시 읽지 않는다.
+            prior_claim_text = job.prior_claim_text or ""
+            prior_report = job.prior_report or ""
+            prior_mapping = job.prior_citation_mapping
+            capabilities = list(job.prompt_capabilities or [])
             output_mode = job.output_mode
             work_dir = Path(job.work_dir) if job.work_dir else PATHS.run_dir(job_id)
             attachments = [row_to_ingested(a) for a in job.attachments]
@@ -195,6 +201,10 @@ class JobRunner:
                     runtime_context_enabled=runtime_enabled,
                     max_chars=max_chars,
                     claim_text=claim_text,
+                    followup_instruction=followup_instruction,
+                    prior_claim_text=prior_claim_text,
+                    prior_report=prior_report,
+                    prior_citation_mapping=prior_mapping,
                 )
             except InputTooLarge as exc:
                 await self._fail(job_id, ErrorCode.INPUT_TOO_LARGE, str(exc))
@@ -252,6 +262,27 @@ class JobRunner:
                 outcome, attachments, output_mode, fail_on_tool_use=fail_on_tool_use
             )
 
+            # --- 문헌 매핑 -------------------------------------------------
+            # 프롬프트가 선언했을 때만 기대한다. 읽지 못해도 실행은 실패시키지
+            # 않는다. 매핑은 후속 기능이지 분석 요건이 아니다. 대신 경고로
+            # 남겨서, 후속 버튼이 왜 잠겼는지 화면이 설명할 수 있게 한다.
+            mapping: dict | None = None
+            mapping_error: str | None = None
+            if citation_mapping.CAPABILITY in capabilities:
+                try:
+                    mapping = citation_mapping.parse(
+                        outcome.result_text, assembled.aliases
+                    )
+                except citation_mapping.MappingError as exc:
+                    mapping_error = str(exc)
+                    verdict.warnings.append(
+                        f"문헌 매핑을 읽지 못했습니다: {exc} "
+                        "이 실행을 원본으로 삼는 번호 유지 후속 분석을 쓸 수 없습니다."
+                    )
+                # 사람이 받아 갈 보고서에는 프로토콜 블록을 남기지 않는다.
+                # 원문은 stdout.log 에 그대로 있다.
+                outcome.result_text = citation_mapping.strip_block(outcome.result_text)
+
             # --- 저장 -----------------------------------------------------
             completed = _utcnow()
             artifacts: list[tuple[str, Path]] = []
@@ -282,6 +313,8 @@ class JobRunner:
                 job.permission_denials = outcome.permission_denials
                 job.usage = outcome.usage
                 job.result_text = outcome.result_text
+                job.citation_mapping = mapping
+                job.citation_mapping_error = mapping_error
                 job.exit_code = outcome.exit_code
                 job.terminal_reason = outcome.terminal_reason
                 job.cli_path = outcome.cli_path

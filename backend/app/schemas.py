@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .enums import AttachmentRole, OutputMode
+from .enums import AttachmentRole, OutputMode, RelationType
 
 
 class PromptBase(BaseModel):
@@ -55,6 +55,9 @@ class PromptOut(PromptBase):
     id: str
     version: int
     enabled: bool
+    # 프롬프트 파일 메타데이터에서만 정한다. 본문과 출력 계약이 함께 움직여야
+    # 해서 API 로는 바꿀 수 없다.
+    capabilities: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -115,6 +118,22 @@ class JobCreate(BaseModel):
     batch_id: str | None = None
     required_map: dict[str, bool] = Field(default_factory=dict)
 
+    # 후속 분석. source_job_id 와 relation_type 은 항상 함께 온다.
+    # batch_id 와 같이 보내면 물려받은 첨부에 새 업로드가 더해진다.
+    source_job_id: str | None = None
+    relation_type: str | None = None
+    followup_instruction: str = ""
+
+    @field_validator("relation_type")
+    @classmethod
+    def _check_relation(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        allowed = {item.value for item in RelationType}
+        if value not in allowed:
+            raise ValueError(f"relation_type 은 {sorted(allowed)} 중 하나여야 합니다.")
+        return value
+
 
 class JobAttachmentOut(BaseModel):
     attachment_id: str
@@ -143,6 +162,16 @@ class JobOut(BaseModel):
     prompt_snapshot: str
     output_mode: str
     claim_text: str = ""
+    source_job_id: str | None = None
+    source_job_label: str = ""
+    relation_type: str | None = None
+    followup_instruction: str = ""
+    prior_claim_text: str = ""
+    prior_report: str = ""
+    citation_mapping: dict[str, Any] | None = None
+    prior_citation_mapping: dict[str, Any] | None = None
+    prompt_capabilities: list[str] = Field(default_factory=list)
+    citation_mapping_error: str | None = None
     provider: str
     model: str | None = None
     cli_path: str | None = None
@@ -179,6 +208,12 @@ class HistoryItem(BaseModel):
     duration_ms: int | None = None
     attachment_count: int = 0
     warning_count: int = 0
+    source_job_id: str | None = None
+    source_job_label: str = ""
+    relation_type: str | None = None
+    has_citation_mapping: bool = False
+    # 이 실행에서 이어진 후속 실행 수. 스레드 일괄 삭제 대상 건수와 같다.
+    descendant_count: int = 0
 
 
 class SettingsOut(BaseModel):

@@ -1,20 +1,47 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import ReportCompare from "../components/ReportCompare";
 import ResultView from "../components/ResultView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
 import type {
   AttachmentAnalysis,
   AttachmentRole,
+  CitationMapping,
   Job,
+  JobAttachment,
   Prompt,
   ProviderInfo,
+  RelationType,
   UploadResponse,
 } from "../lib/types";
 import { useJobStream } from "../lib/useJobStream";
 
 type RunTab = "input" | "result";
 const PROVIDER_IDS = new Set(["agy", "claude", "codex"]);
+
+/** 원본 실행에서 물려받는 것. 화면 표시와 실행 요청에 함께 쓴다. */
+type Lineage = {
+  sourceJobId: string;
+  sourceLabel: string;
+  relationType: RelationType;
+  inheritedAttachments: JobAttachment[];
+  priorMapping: CitationMapping | null;
+  priorClaimChars: number;
+  priorReportChars: number;
+};
+
+const RELATION_TITLE: Record<RelationType, string> = {
+  MAPPED: "종속항 추가 분석 — 인용발명 번호 유지",
+  CONTINUED: "보고서 수정·보완 — 이전 보고서까지 전달",
+  REANALYZED: "자료만 물려받고 처음부터 다시 분석",
+};
+
+function jobLabel(job: Job): string {
+  const stamp = new Date(job.created_at).toLocaleString();
+  const version = job.prompt_version ? ` v${job.prompt_version}` : "";
+  return `${stamp} · ${job.prompt_name}${version}`;
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -42,6 +69,8 @@ export default function RunPage() {
   const [providerId, setProviderId] = useState("agy");
   const [model, setModel] = useState("");
   const [claimText, setClaimText] = useState("");
+  const [lineage, setLineage] = useState<Lineage | null>(null);
+  const [followupInstruction, setFollowupInstruction] = useState("");
   const [applicationFile, setApplicationFile] = useState<File | null>(null);
   const [citationFiles, setCitationFiles] = useState<File[]>([]);
   const [upload, setUpload] = useState<UploadResponse | null>(null);
@@ -49,6 +78,7 @@ export default function RunPage() {
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
+  const [comparing, setComparing] = useState(false);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<RunTab>("input");
   const applicationFileInput = useRef<HTMLInputElement>(null);
@@ -109,17 +139,27 @@ export default function RunPage() {
   );
 
   const totalChars = useMemo(() => {
-    const attachmentChars =
+    const newAttachmentChars =
       upload?.files.reduce(
         (sum, f) => sum + (f.read_ok ? f.char_count + 200 : 0),
         0,
       ) ?? 0;
+    // 물려받는 첨부도 자식 실행의 프롬프트에 그대로 다시 들어간다.
+    const inheritedChars =
+      lineage?.inheritedAttachments.reduce(
+        (sum, f) => sum + (f.read_ok ? f.char_count + 200 : 0),
+        0,
+      ) ?? 0;
     return (
-      attachmentChars +
+      newAttachmentChars +
+      inheritedChars +
       claimText.length +
+      followupInstruction.length +
+      (lineage?.priorClaimChars ?? 0) +
+      (lineage?.priorReportChars ?? 0) +
       (selectedPrompt?.body.length ?? 0)
     );
-  }, [upload, claimText, selectedPrompt]);
+  }, [upload, lineage, claimText, followupInstruction, selectedPrompt]);
 
   const budget = upload?.max_inline_chars ?? 300000;
   const overBudget = totalChars > budget;
@@ -172,8 +212,16 @@ export default function RunPage() {
         claim_text: claimText,
         batch_id: preparedUpload?.batch_id ?? null,
         required_map: required,
+        source_job_id: lineage?.sourceJobId ?? null,
+        relation_type: lineage?.relationType ?? null,
+        followup_instruction: lineage ? followupInstruction : "",
       });
       setJob(created);
+      // 이 batch 는 방금 만든 작업에 귀속됐다. 그대로 다시 보내면 백엔드가
+      // "이미 다른 작업에 사용된 업로드입니다" 로 거절한다. 고른 File 자체는
+      // 남겨 두므로, 청구항만 고쳐 다시 실행하면 새 batch 로 다시 올라간다.
+      setUpload(null);
+      setRequired({});
       setActiveTab("result");
     } catch (e) {
       setError((e as Error).message);
@@ -191,16 +239,55 @@ export default function RunPage() {
     }
   };
 
-  const reset = () => {
-    setJob(null);
+  const clearSelectedFiles = () => {
     setUpload(null);
     setRequired({});
-    setClaimText("");
     setApplicationFile(null);
     setCitationFiles([]);
-    setActiveTab("input");
     if (applicationFileInput.current) applicationFileInput.current.value = "";
     if (citationFileInput.current) citationFileInput.current.value = "";
+  };
+
+  const reset = () => {
+    setJob(null);
+    setLineage(null);
+    setFollowupInstruction("");
+    setClaimText("");
+    clearSelectedFiles();
+    setActiveTab("input");
+  };
+
+  /** 방금 본 실행을 원본으로 삼아 다음 실행을 준비한다.
+   *
+   *  CONTINUED  : 첨부 + 이전 청구항 + 이전 보고서를 물려받는다.
+   *  REANALYZED : 첨부만 물려받는다. 이전 보고서는 전달하지 않는다.
+   *
+   *  이미 소비한 업로드 batch 를 그대로 다시 보내면 백엔드가 400 으로 거절한다.
+   *  첨부는 원본에서 복제해 오므로 선택 상태를 비우고, 새로 고른 PDF 만 batch 로
+   *  나가게 한다.
+   */
+  const startFollowUp = (relationType: RelationType) => {
+    if (!job) return;
+    const carriesClaims = relationType !== "REANALYZED";
+    setLineage({
+      sourceJobId: job.id,
+      sourceLabel: jobLabel(job),
+      relationType,
+      inheritedAttachments: job.attachments,
+      priorMapping: carriesClaims ? job.citation_mapping : null,
+      priorClaimChars: carriesClaims ? job.claim_text.length : 0,
+      priorReportChars:
+        relationType === "CONTINUED" ? (job.result_text ?? "").length : 0,
+    });
+    setClaimText(job.claim_text);
+    setFollowupInstruction("");
+    clearSelectedFiles();
+    setActiveTab("input");
+  };
+
+  const clearLineage = () => {
+    setLineage(null);
+    setFollowupInstruction("");
   };
 
   const displayText = job?.result_text ?? stream.streamText;
@@ -208,11 +295,11 @@ export default function RunPage() {
   const errors = job?.errors ?? stream.errors;
 
   return (
-    <div>
-      <div className="page-head">
-        <h1>실행</h1>
+    <div className="page page-run">
+      <div className="page-head run-page-head">
+        <span className="eyebrow">01 / Invention analysis</span>
         <p>
-          Settings 에 저장된 Master Prompt, Provider, 모델로 특허 분석을 실행합니다.
+          청구항과 선행 문헌을 온전히 전달하고, 선택한 분석 기준으로 검증 가능한 실행을 시작합니다.
         </p>
       </div>
 
@@ -242,7 +329,7 @@ export default function RunPage() {
 
       {activeTab === "input" && (
         <>
-      <div className="card no-print">
+      <div className="card no-print run-input-card">
         <h2>1. 특허 분석 전용 입력</h2>
         <div className="run-config-summary">
           <span>
@@ -256,19 +343,99 @@ export default function RunPage() {
           </span>
           <a href="#/settings">Settings에서 변경</a>
         </div>
+
+        {providerId === "agy" && (
+          <div className="notice warn">
+            <strong>agy 는 실행 대화를 이 PC 에 영구 저장합니다</strong>
+            <div>
+              입력한 청구항과 인용발명 본문이{" "}
+              <code>~/.gemini/antigravity-cli/conversations</code> 에 남습니다. agy CLI
+              에는 이 저장을 끄는 옵션이 없어 ARIA 가 막을 수 없습니다. 저장을 원하지
+              않으면 Settings 에서 Claude Provider 를 선택하십시오. Claude 는{" "}
+              <code>--no-session-persistence</code> 로 실행합니다.
+            </div>
+          </div>
+        )}
+
+        {lineage && (
+          <div className="notice info lineage-banner">
+            <div className="split">
+              <strong>{RELATION_TITLE[lineage.relationType]}</strong>
+              <button type="button" className="btn small" onClick={clearLineage}>
+                연결 해제
+              </button>
+            </div>
+            <div className="faint">원본 실행: {lineage.sourceLabel}</div>
+            <ul className="lineage-inherits">
+              <li>
+                첨부 {lineage.inheritedAttachments.length}건을 이 실행 폴더로 복제합니다
+                {lineage.inheritedAttachments.length > 0 && (
+                  <span className="faint">
+                    {" — "}
+                    {lineage.inheritedAttachments
+                      .map((a) => a.original_filename)
+                      .join(", ")}
+                  </span>
+                )}
+              </li>
+              {lineage.priorClaimChars > 0 && (
+                <li>이전 청구항 {lineage.priorClaimChars.toLocaleString()}자</li>
+              )}
+              {lineage.relationType === "CONTINUED" && (
+                <li>
+                  이전 보고서 {lineage.priorReportChars.toLocaleString()}자 —{" "}
+                  <strong>이전 유사도와 발췌문이 모델 앞에 함께 놓입니다.</strong> 보고서
+                  자체를 고칠 때만 쓰십시오.
+                </li>
+              )}
+              {lineage.relationType === "REANALYZED" && (
+                <li>
+                  번호도 이전 판단도 물려받지 않습니다.
+                  <strong> 인용발명 번호가 원본 보고서와 달라질 수 있습니다.</strong>
+                </li>
+              )}
+              {lineage.priorMapping && lineage.priorMapping.items.length > 0 && (
+                <li>
+                  고정 문헌 매핑 {lineage.priorMapping.items.length}건 — 이 번호를 그대로
+                  씁니다
+                  <ul className="lineage-mapping">
+                    {lineage.priorMapping.items.map((item) => (
+                      <li key={item.citation_number}>
+                        <strong>인용발명 {item.citation_number}</strong> ={" "}
+                        {item.document_number}
+                        <span className="faint"> · {item.filename}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              )}
+              {lineage.relationType !== "REANALYZED" && (
+                <li>
+                  유사도, 발췌문, 대응 이유는 물려받지 않습니다. 첨부 자료에서 다시
+                  판단합니다.
+                </li>
+              )}
+            </ul>
+            <div className="faint">
+              아래 청구항 칸에는 원본 실행의 청구항이 채워져 있습니다. 종속항을 덧붙이거나
+              수정한 뒤 실행하십시오. 인용발명 PDF 를 더 추가할 수도 있습니다.
+            </div>
+          </div>
+        )}
+
         <div className="patent-input-grid">
           <section className="input-panel application claim-panel">
             <div className="input-panel-head">
               <span className="input-step">A</span>
               <div>
-                <strong>출원발명 청구항</strong>
+                <strong>출원발명의 청구항</strong>
                 <div className="hint">분석할 청구항을 그대로 붙여넣으십시오.</div>
               </div>
             </div>
             <textarea
               id="claimText"
               className="claim-input"
-              aria-label="출원발명 청구항"
+              aria-label="출원발명의 청구항"
               value={claimText}
               onChange={(e) => setClaimText(e.target.value)}
               placeholder={
@@ -278,6 +445,7 @@ export default function RunPage() {
             />
           </section>
 
+          <div className="supporting-inputs">
           <section className="input-panel citation">
             <div className="input-panel-head">
               <span className="input-step">B</span>
@@ -342,7 +510,34 @@ export default function RunPage() {
               </div>
             )}
           </section>
+          </div>
         </div>
+
+        {lineage && (
+          <section className="input-panel followup-panel">
+            <div className="input-panel-head">
+              <span className="input-step">D</span>
+              <div>
+                <strong>후속 지시 (선택)</strong>
+                <div className="hint">
+                  이번 실행에서 무엇을 해야 하는지 직접 쓰십시오. ARIA 는 이 문장을
+                  만들거나 보태지 않고 그대로 전달합니다. 비워 두면 Master Prompt 의
+                  「후속 처리 규칙」만 적용됩니다.
+                </div>
+              </div>
+            </div>
+            <textarea
+              className="claim-input followup-input"
+              aria-label="후속 지시"
+              value={followupInstruction}
+              onChange={(e) => setFollowupInstruction(e.target.value)}
+              placeholder={
+                "예: 추가한 종속항 3~7 을 중심으로 분석하고, 인용발명 번호는 이전 보고서와 동일하게 유지하십시오."
+              }
+              disabled={running}
+            />
+          </section>
+        )}
 
         <div className="btn-row file-prepare-row">
           <button
@@ -453,7 +648,7 @@ export default function RunPage() {
         )}
       </div>
 
-      <div className="card no-print">
+      <div className="card no-print run-action-card">
         <h2>2. 분석 실행</h2>
         <div className="btn-row">
           <button
@@ -472,9 +667,9 @@ export default function RunPage() {
           <button className="btn danger" onClick={cancel} disabled={!running}>
             중단
           </button>
-          {job && !running && (
+          {(job || lineage) && !running && (
             <button className="btn" onClick={reset}>
-              새 실행
+              모두 비우고 새 분석
             </button>
           )}
           {running && (
@@ -496,7 +691,7 @@ export default function RunPage() {
       )}
 
       {activeTab === "result" && job && (
-        <div className="card">
+        <div className="card result-card">
           <div className="split" style={{ marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>분석 결과</h2>
             <div className="btn-row no-print">
@@ -508,10 +703,55 @@ export default function RunPage() {
               <button className="btn small danger" onClick={cancel} disabled={!running}>
                 중단
               </button>
-              {job && !running && (
-                <button className="btn small" onClick={reset}>
-                  새 분석
+              {!running && job.source_job_id && (
+                <button
+                  className="btn small"
+                  onClick={() => setComparing(true)}
+                  title="원본 보고서와 이번 보고서에서 줄이 다른 곳을 나란히 봅니다."
+                >
+                  원본과 비교
                 </button>
+              )}
+              {!running && !lineage && (
+                <>
+                  <button
+                    className="btn small primary"
+                    onClick={() => startFollowUp("MAPPED")}
+                    disabled={!job.citation_mapping}
+                    title={
+                      job.citation_mapping
+                        ? "인용발명 번호와 이전 청구항만 물려받습니다. 이전 보고서는 전달하지 않으므로 유사도와 발췌문은 자료에서 다시 판단합니다."
+                        : job.citation_mapping_error
+                          ? `문헌 매핑을 읽지 못했습니다: ${job.citation_mapping_error}`
+                          : "이 프롬프트는 문헌 매핑을 출력하지 않습니다."
+                    }
+                  >
+                    종속항 추가 분석
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => startFollowUp("CONTINUED")}
+                    disabled={!(job.result_text ?? "").trim()}
+                    title="이전 보고서 전체를 전달합니다. 보고서 자체를 고치거나 보완할 때만 쓰십시오."
+                  >
+                    보고서 수정·보완
+                  </button>
+                  <button
+                    className="btn small"
+                    onClick={() => startFollowUp("REANALYZED")}
+                    title="같은 자료로 처음부터 다시 판단합니다. 인용발명 번호가 이 보고서와 달라질 수 있습니다."
+                  >
+                    자료만 물려받기
+                  </button>
+                  <button className="btn small" onClick={reset}>
+                    모두 비우고 새 분석
+                  </button>
+                </>
+              )}
+              {!running && lineage && (
+                <span className="faint">
+                  전용 입력 탭에서 다음 실행을 준비 중입니다.
+                </span>
               )}
             </div>
           </div>
@@ -625,6 +865,10 @@ export default function RunPage() {
             </div>
           </details>
         </div>
+      )}
+
+      {comparing && job && (
+        <ReportCompare job={job} onClose={() => setComparing(false)} />
       )}
     </div>
   );

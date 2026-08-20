@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
@@ -60,6 +60,10 @@ class PromptFile:
     enabled: bool
     created_at: datetime
     updated_at: datetime
+    # 이 프롬프트가 지원한다고 선언한 ARIA 확장. 파일 메타데이터에서만 설정한다.
+    # API 로는 바꿀 수 없다. 프롬프트 본문과 출력 계약이 함께 움직여야 하는데,
+    # 화면에서 선언만 켜면 본문은 그대로라 계약이 어긋난다.
+    capabilities: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -191,6 +195,7 @@ class PromptStore:
             output_mode=output_mode,
             tags=_string_list(metadata.get("tags")),
             accepted_file_types=_string_list(metadata.get("accepted_file_types")),
+            capabilities=_string_list(metadata.get("capabilities")),
             version=version,
             enabled=bool(metadata.get("enabled", True)),
             created_at=_parse_datetime(metadata.get("created_at"), created_fallback),
@@ -204,6 +209,7 @@ class PromptStore:
             "output_mode": prompt.output_mode,
             "tags": prompt.tags,
             "accepted_file_types": prompt.accepted_file_types,
+            "capabilities": prompt.capabilities,
             "enabled": prompt.enabled,
             "version": prompt.version,
             "created_at": prompt.created_at.isoformat(),
