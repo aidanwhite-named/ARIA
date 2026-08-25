@@ -15,8 +15,10 @@ export interface JobStreamState {
   status: JobStatus | null;
   stage: string;
   finished: boolean;
-  warnings: string[];
   errors: string[];
+  /** 검색 실행에서 관측한 도구 호출 수. 진행 표시에만 쓴다. */
+  searchCount: number;
+  fetchCount: number;
 }
 
 const EMPTY: JobStreamState = {
@@ -25,8 +27,9 @@ const EMPTY: JobStreamState = {
   status: null,
   stage: "",
   finished: false,
-  warnings: [],
   errors: [],
+  searchCount: 0,
+  fetchCount: 0,
 };
 
 export function useJobStream(jobId: string | null): JobStreamState {
@@ -87,11 +90,16 @@ export function useJobStream(jobId: string | null): JobStreamState {
           case "analyzing":
             next.stage = String(payload.message ?? "분석 중");
             break;
+          case "search_progress":
+            next.searchCount = Number(payload.searches ?? prev.searchCount);
+            next.fetchCount = Number(payload.fetches ?? prev.fetchCount);
+            next.stage = String(payload.message ?? "검색 중");
+            break;
+          case "tool_budget_exceeded":
+            next.stage = String(payload.message ?? "도구 호출 상한 초과");
+            break;
           case "provider_done":
             next.stage = "결과 수신 완료";
-            break;
-          case "warning":
-            next.warnings = [...prev.warnings, String(payload.message ?? "")];
             break;
           case "error":
             next.errors = [...prev.errors, String(payload.message ?? "")];

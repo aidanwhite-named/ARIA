@@ -50,6 +50,20 @@ _LINEAGE_COLUMNS = (
     ("citation_mapping_error", "citation_mapping_error TEXT"),
     ("prior_citation_mapping", "prior_citation_mapping JSON"),
     ("prompt_capabilities", "prompt_capabilities JSON NOT NULL DEFAULT '[]'"),
+    ("analysis_manifest", "analysis_manifest JSON"),
+    ("analysis_manifest_error", "analysis_manifest_error TEXT"),
+)
+
+# 유사 문헌 검색 컬럼. 기존 실행은 전부 PDF 구성대비 분석이므로 job_kind 의
+# 기본값이 patent_analysis 다. 검색 기록은 NULL 이 맞는 기본값이다.
+_SEARCH_COLUMNS = (
+    (
+        "job_kind",
+        "job_kind VARCHAR(30) NOT NULL DEFAULT 'patent_analysis'",
+    ),
+    ("search_manifest", "search_manifest JSON"),
+    ("search_manifest_error", "search_manifest_error TEXT"),
+    ("search_focus", "search_focus JSON"),
 )
 
 
@@ -64,8 +78,17 @@ def _add_compatible_columns(engine) -> None:
     작업 생성이 전부 IntegrityError 로 실패한다. 값을 claim_text 로 옮긴 뒤
     제거한다.
 
+    warnings 도 같다. 성공한 실행에 덧붙이던 경고를 없앴으므로 모델에서
+    빠졌는데, NOT NULL 컬럼이 그대로 남아 있으면 같은 이유로 INSERT 가
+    깨진다. 지난 실행에 적혀 있던 경고 문구는 이 시점에 사라진다 — 보고서
+    본문과 첨부 기록은 건드리지 않는다.
+
     후속 분석 계보 컬럼도 같은 방식으로 붙인다. 기존 실행은 독립 실행이므로
     relation_type 이 NULL, 나머지는 빈 문자열이 맞는 기본값이다.
+
+    작업 종류(job_kind)와 검색 감사 기록도 같다. 기존 실행은 전부 PDF 구성대비
+    분석이므로 job_kind 기본값이 patent_analysis 이고, 그 실행들의 도구 정책은
+    예전과 똑같이 '도구 없음'으로 남는다.
     """
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
@@ -95,13 +118,17 @@ def _add_compatible_columns(engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE execution_jobs DROP COLUMN user_input"
             )
+        if "warnings" in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE execution_jobs DROP COLUMN warnings"
+            )
         if "role" not in attachment_columns and attachment_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE attachments "
                 "ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'SUPPLEMENTAL'"
             )
         if job_columns:
-            for name, ddl in _LINEAGE_COLUMNS:
+            for name, ddl in (*_LINEAGE_COLUMNS, *_SEARCH_COLUMNS):
                 if name not in job_columns:
                     connection.exec_driver_sql(
                         f"ALTER TABLE execution_jobs ADD COLUMN {ddl}"

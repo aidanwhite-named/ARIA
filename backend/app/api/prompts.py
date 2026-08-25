@@ -11,13 +11,16 @@ from fastapi.responses import Response
 
 from ..prompt_store import (
     PROMPT_STORE,
+    RESERVED_PROMPT_IDS,
     InvalidPromptFile,
     PromptFile,
     PromptFileVersion,
     PromptNotFound,
     PromptStoreError,
 )
+from ..search_prompt import SEARCH_PROMPT_ID, SearchPromptError, validate_body
 from ..schemas import (
+    PromptCatalogOut,
     PromptCreate,
     PromptImportRequest,
     PromptOut,
@@ -26,6 +29,17 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"])
+
+
+def _catalog_item(prompt: PromptFile) -> PromptCatalogOut:
+    reserved = prompt.id in RESERVED_PROMPT_IDS
+    base = PromptOut.model_validate(prompt)
+    return PromptCatalogOut(
+        **base.model_dump(),
+        kind="search" if prompt.id == SEARCH_PROMPT_ID else "analysis",
+        editable=True,
+        deletable=not reserved,
+    )
 
 
 def _raise_http(exc: PromptStoreError) -> None:
@@ -44,6 +58,26 @@ def list_prompts(
         return PROMPT_STORE.list(search=search, tag=tag)
     except PromptStoreError as exc:
         _raise_http(exc)
+
+
+@router.get("/catalog", response_model=list[PromptCatalogOut])
+def list_prompt_catalog(
+    search: str = Query(default=""), tag: str = Query(default="")
+) -> list[PromptCatalogOut]:
+    """두 작업 모드의 프롬프트를 관리 화면에 함께 보여 준다.
+
+    일반 ``/api/prompts`` 목록은 분석 실행의 선택지이므로 예약된 검색
+    프롬프트를 계속 제외한다. 두 목록을 섞으면 검색 프롬프트가 구성대비 분석의
+    기본값으로 선택될 수 있다.
+    """
+    try:
+        rows = PROMPT_STORE.list(
+            search=search, tag=tag, include_reserved=True
+        )
+    except PromptStoreError as exc:
+        _raise_http(exc)
+    items = [_catalog_item(row) for row in rows]
+    return sorted(items, key=lambda item: (item.kind != "analysis", item.name))
 
 
 @router.post("", response_model=PromptOut, status_code=201)
@@ -117,6 +151,24 @@ def update_prompt(prompt_id: str, payload: PromptUpdate) -> PromptFile:
         _raise_http(exc)
 
 
+@router.put("/reserved/{prompt_id}", response_model=PromptCatalogOut)
+def update_reserved_prompt(
+    prompt_id: str, payload: PromptUpdate
+) -> PromptCatalogOut:
+    """검색 프롬프트를 실행 계약 검증 후 갱신한다."""
+    if prompt_id != SEARCH_PROMPT_ID:
+        raise HTTPException(404, "예약된 프롬프트를 찾을 수 없습니다.")
+    changes = payload.model_dump(exclude_unset=True, exclude_none=True)
+    try:
+        current = PROMPT_STORE.get_reserved(prompt_id)
+        validate_body(str(changes.get("body", current.body)))
+        return _catalog_item(PROMPT_STORE.update_reserved(prompt_id, changes))
+    except SearchPromptError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except PromptStoreError as exc:
+        _raise_http(exc)
+
+
 @router.delete(
     "/{prompt_id}", status_code=204, response_class=Response, response_model=None
 )
@@ -131,5 +183,17 @@ def delete_prompt(prompt_id: str) -> None:
 def list_versions(prompt_id: str) -> list[PromptFileVersion]:
     try:
         return PROMPT_STORE.versions(prompt_id)
+    except PromptStoreError as exc:
+        _raise_http(exc)
+
+
+@router.get(
+    "/reserved/{prompt_id}/versions", response_model=list[PromptVersionOut]
+)
+def list_reserved_versions(prompt_id: str) -> list[PromptFileVersion]:
+    if prompt_id != SEARCH_PROMPT_ID:
+        raise HTTPException(404, "예약된 프롬프트를 찾을 수 없습니다.")
+    try:
+        return PROMPT_STORE.versions_reserved(prompt_id)
     except PromptStoreError as exc:
         _raise_http(exc)

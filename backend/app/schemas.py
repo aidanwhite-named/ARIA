@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .enums import AttachmentRole, OutputMode, RelationType
+from .enums import AttachmentRole, JobKind, OutputMode, RelationType
 
 
 class PromptBase(BaseModel):
@@ -64,6 +64,14 @@ class PromptOut(PromptBase):
     model_config = {"from_attributes": True}
 
 
+class PromptCatalogOut(PromptOut):
+    """프롬프트 관리 화면에 표시하는 작업별 카탈로그 항목."""
+
+    kind: str
+    editable: bool = True
+    deletable: bool = True
+
+
 class PromptVersionOut(BaseModel):
     id: str
     version: int
@@ -109,6 +117,9 @@ class UploadResponse(BaseModel):
 
 
 class JobCreate(BaseModel):
+    # 작업 종류. 생략하면 기존 PDF 구성대비 분석이다. 기존 API 클라이언트가
+    # 이 필드를 모르고 보내도 동작이 바뀌지 않아야 한다.
+    job_kind: str = JobKind.PATENT_ANALYSIS
     # 실행 화면은 이 값을 보내지 않고 Settings 의 기본값을 사용한다.
     # 선택적 override 는 기존 API 클라이언트와 테스트 호환을 위해 유지한다.
     prompt_id: str | None = None
@@ -123,6 +134,9 @@ class JobCreate(BaseModel):
     source_job_id: str | None = None
     relation_type: str | None = None
     followup_instruction: str = ""
+    # 구성대비 결과에서 시작하는 미대응 구성 검색. source_job_id 와 함께 쓰며,
+    # 일반 유사문헌 검색과 후속 분석에서는 비워 둔다.
+    search_component_ids: list[str] = Field(default_factory=list)
 
     @field_validator("relation_type")
     @classmethod
@@ -132,6 +146,14 @@ class JobCreate(BaseModel):
         allowed = {item.value for item in RelationType}
         if value not in allowed:
             raise ValueError(f"relation_type 은 {sorted(allowed)} 중 하나여야 합니다.")
+        return value
+
+    @field_validator("job_kind")
+    @classmethod
+    def _check_job_kind(cls, value: str) -> str:
+        allowed = {item.value for item in JobKind}
+        if value not in allowed:
+            raise ValueError(f"job_kind 는 {sorted(allowed)} 중 하나여야 합니다.")
         return value
 
 
@@ -154,8 +176,8 @@ class JobAttachmentOut(BaseModel):
 class JobOut(BaseModel):
     id: str
     status: str
-    result_quality: str | None = None
     error_code: str | None = None
+    job_kind: str = JobKind.PATENT_ANALYSIS
     prompt_id: str | None = None
     prompt_name: str
     prompt_version: int | None = None
@@ -172,6 +194,11 @@ class JobOut(BaseModel):
     prior_citation_mapping: dict[str, Any] | None = None
     prompt_capabilities: list[str] = Field(default_factory=list)
     citation_mapping_error: str | None = None
+    analysis_manifest: dict[str, Any] | None = None
+    analysis_manifest_error: str | None = None
+    search_manifest: dict[str, Any] | None = None
+    search_manifest_error: str | None = None
+    search_focus: dict[str, Any] | None = None
     provider: str
     model: str | None = None
     cli_path: str | None = None
@@ -182,7 +209,6 @@ class JobOut(BaseModel):
     final_prompt_chars: int = 0
     terminal_reason: str | None = None
     exit_code: int | None = None
-    warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     permission_denials: list[Any] = Field(default_factory=list)
     usage: dict[str, Any] | None = None
@@ -198,8 +224,8 @@ class JobOut(BaseModel):
 class HistoryItem(BaseModel):
     id: str
     status: str
-    result_quality: str | None = None
     error_code: str | None = None
+    job_kind: str = JobKind.PATENT_ANALYSIS
     prompt_name: str
     prompt_version: int | None = None
     provider: str
@@ -207,7 +233,6 @@ class HistoryItem(BaseModel):
     created_at: datetime
     duration_ms: int | None = None
     attachment_count: int = 0
-    warning_count: int = 0
     source_job_id: str | None = None
     source_job_label: str = ""
     relation_type: str | None = None

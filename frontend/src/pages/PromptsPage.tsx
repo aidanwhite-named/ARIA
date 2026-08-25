@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import type { Prompt, PromptVersion } from "../lib/types";
+import type {
+  PromptCatalogItem,
+  PromptKind,
+  PromptVersion,
+} from "../lib/types";
 
 const BLANK = {
   name: "",
@@ -11,10 +15,10 @@ const BLANK = {
   tags: [] as string[],
 };
 
-type Draft = typeof BLANK & { id?: string };
+type Draft = typeof BLANK & { id?: string; kind: PromptKind };
 
 export default function PromptsPage() {
-  const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [prompts, setPrompts] = useState<PromptCatalogItem[]>([]);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [versions, setVersions] = useState<PromptVersion[] | null>(null);
@@ -24,7 +28,7 @@ export default function PromptsPage() {
 
   const load = useCallback(() => {
     api
-      .listPrompts({ search })
+      .listPromptCatalog({ search })
       .then(setPrompts)
       .catch((e) => setError(e.message));
   }, [search]);
@@ -42,17 +46,22 @@ export default function PromptsPage() {
   const save = async () => {
     if (!draft) return;
     try {
+      const payload = {
+        name: draft.name,
+        description: draft.description,
+        body: draft.body,
+        output_mode: draft.output_mode,
+        tags: draft.tags,
+      };
       if (draft.id) {
-        await api.updatePrompt(draft.id, {
-          name: draft.name,
-          description: draft.description,
-          body: draft.body,
-          output_mode: draft.output_mode,
-          tags: draft.tags,
-        });
-        notify("prompt 폴더에 저장했습니다. 본문이 바뀌었으면 버전이 올라갑니다.");
+        if (draft.kind === "search") {
+          await api.updateReservedPrompt(draft.id, payload);
+        } else {
+          await api.updatePrompt(draft.id, payload);
+        }
+        notify("프롬프트를 저장했습니다. 내용이 바뀌었으면 버전이 올라갑니다.");
       } else {
-        await api.createPrompt(draft);
+        await api.createPrompt(payload);
         notify("prompt 폴더에 새 프롬프트 파일을 만들었습니다.");
       }
       setDraft(null);
@@ -104,10 +113,11 @@ export default function PromptsPage() {
   return (
     <div className="page page-prompts">
       <div className="page-head">
-        <span className="eyebrow">02 / Analysis directives</span>
-        <h1>분석의 기준을 설계합니다</h1>
+        <span className="eyebrow">03 / 프롬프트</span>
+        <h1>프롬프트를 관리합니다</h1>
         <p>
-          발명을 읽는 규칙을 프롬프트로 관리하고, 모든 수정의 맥락과 실행 시점의 원문을 보존합니다.
+          분석과 검색이 각자의 전용 프롬프트를 사용합니다. 모든 수정의 맥락과
+          실행 시점의 원문을 보존합니다.
         </p>
       </div>
 
@@ -119,6 +129,7 @@ export default function PromptsPage() {
           <div className="btn-row" style={{ flex: 1 }}>
             <input
               type="text"
+              aria-label="프롬프트 검색"
               placeholder="이름, 설명, 본문 검색"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -142,8 +153,11 @@ export default function PromptsPage() {
               hidden
               onChange={(e) => importFile(e.target.files?.[0])}
             />
-            <button className="btn primary small" onClick={() => setDraft({ ...BLANK })}>
-              새 프롬프트
+            <button
+              className="btn primary small"
+              onClick={() => setDraft({ ...BLANK, kind: "analysis" })}
+            >
+              새 분석 프롬프트
             </button>
           </div>
         </div>
@@ -154,12 +168,13 @@ export default function PromptsPage() {
           <div className="empty">프롬프트가 없습니다.</div>
         ) : (
           <div className="table-scroll">
-            <table>
+            <table className="prompt-table">
               <thead>
                 <tr>
+                  <th>용도</th>
                   <th>이름</th>
-                  <th>버전</th>
-                  <th>출력</th>
+                  <th>현재 버전</th>
+                  <th>결과 형식</th>
                   <th>태그</th>
                   <th>상태</th>
                   <th style={{ width: 260 }}>작업</th>
@@ -169,11 +184,16 @@ export default function PromptsPage() {
                 {prompts.map((p) => (
                   <tr key={p.id}>
                     <td>
+                      <span className={`pill ${p.kind === "search" ? "danger" : "accent"}`}>
+                        {p.kind === "search" ? "검색" : "분석"}
+                      </span>
+                    </td>
+                    <td>
                       <div style={{ fontWeight: 600 }}>{p.name}</div>
                       <div className="faint">{p.description || "설명 없음"}</div>
                     </td>
                     <td>v{p.version}</td>
-                    <td>{p.output_mode}</td>
+                    <td>{p.output_mode === "markdown" ? "서식 포함" : "일반 텍스트"}</td>
                     <td>
                       {(p.tags ?? []).map((t) => (
                         <span className="pill neutral" key={t} style={{ marginRight: 4 }}>
@@ -200,6 +220,7 @@ export default function PromptsPage() {
                               body: p.body,
                               output_mode: p.output_mode,
                               tags: p.tags ?? [],
+                              kind: p.kind,
                             })
                           }
                         >
@@ -209,7 +230,12 @@ export default function PromptsPage() {
                           className="btn small"
                           onClick={() =>
                             act(
-                              () => api.updatePrompt(p.id, { enabled: !p.enabled }),
+                              () =>
+                                p.kind === "search"
+                                  ? api.updateReservedPrompt(p.id, {
+                                      enabled: !p.enabled,
+                                    })
+                                  : api.updatePrompt(p.id, { enabled: !p.enabled }),
                               p.enabled ? "비활성화했습니다." : "활성화했습니다.",
                             )
                           }
@@ -219,25 +245,34 @@ export default function PromptsPage() {
                         <button
                           className="btn small"
                           onClick={() =>
-                            api.promptVersions(p.id).then(setVersions).catch((e) => setError(e.message))
+                            (p.kind === "search"
+                              ? api.reservedPromptVersions(p.id)
+                              : api.promptVersions(p.id)
+                            )
+                              .then(setVersions)
+                              .catch((e) => setError(e.message))
                           }
                         >
-                          이력
+                          버전 이력
                         </button>
-                        <button
-                          className="btn small danger"
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                `"${p.name}" 을(를) 삭제합니다. 과거 실행 이력의 스냅샷은 남습니다. 계속할까요?`,
-                              )
-                            ) {
-                              act(() => api.deletePrompt(p.id), "삭제했습니다.");
-                            }
-                          }}
-                        >
-                          삭제
-                        </button>
+                        {p.deletable ? (
+                          <button
+                            className="btn small danger"
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `"${p.name}" 을(를) 삭제합니다. 과거 실행 이력의 스냅샷은 남습니다. 계속할까요?`,
+                                )
+                              ) {
+                                act(() => api.deletePrompt(p.id), "삭제했습니다.");
+                              }
+                            }}
+                          >
+                            삭제
+                          </button>
+                        ) : (
+                          <span className="pill neutral">기본 제공</span>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -252,7 +287,11 @@ export default function PromptsPage() {
         <div className="modal-backdrop" onClick={() => setDraft(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h2 style={{ marginTop: 0 }}>
-              {draft.id ? "프롬프트 편집" : "새 프롬프트"}
+              {draft.id
+                ? draft.kind === "search"
+                  ? "검색 프롬프트 편집"
+                  : "분석 프롬프트 편집"
+                : "새 분석 프롬프트"}
             </h2>
             <div className="field">
               <label>이름</label>
@@ -312,9 +351,9 @@ export default function PromptsPage() {
                 onChange={(e) => setDraft({ ...draft, body: e.target.value })}
               />
               <span className="hint">
-                저장하면 prompt 폴더의 파일이 즉시 갱신됩니다. ARIA 는 이 본문 앞뒤에
-                어떤 업무 지시도 추가하지 않습니다. 첨부 자료의 신뢰 경계에 관한
-                규칙만 시스템 프롬프트로 별도 전달됩니다.
+                {draft.kind === "search"
+                  ? "검색 프롬프트는 청구항·명세서 placeholder와 경계 표시가 온전한지 검사한 뒤 저장합니다."
+                  : "저장하면 prompt 폴더의 파일이 즉시 갱신됩니다. ARIA는 이 본문 앞뒤에 업무 지시를 추가하지 않습니다."}
               </span>
             </div>
             <div className="btn-row">

@@ -11,7 +11,8 @@ import pytest
 
 from app.enums import AuthState
 from app.execution import process as proc
-from app.providers.base import ExecutionRequest
+from app.providers.base import ExecutionRequest, ProbeResult
+from app.providers.agy_cli import AgyCliProvider
 from app.providers.claude_cli import ClaudeCliProvider
 from app.providers.env import build_child_env, describe_filtering, is_blocked
 from app.providers.registry import PROVIDER_ORDER, build_provider, probe_all
@@ -208,6 +209,56 @@ async def test_probe_all_covers_every_provider() -> None:
     assert {r.provider for r in results} == set(PROVIDER_ORDER)
 
 
+async def test_probe_cache_expires_so_external_logout_is_noticed(monkeypatch) -> None:
+    """캐시가 무기한이면 ARIA 밖에서 로그아웃했을 때 화면이 계속 거짓말한다.
+
+    실측 사고: 터미널에서 agy /logout 을 마쳐 `agy models` 가 실패하는데도
+    Settings 표는 "로그인됨. 사용 가능한 모델 14개" 를 계속 보여줬다.
+    """
+    from app.providers import registry
+
+    calls = {"n": 0}
+    states = iter([AuthState.OK, AuthState.NOT_LOGGED_IN])
+
+    class FakeProvider:
+        id = "agy"
+        display_name = "agy"
+        install_hint = ""
+
+        async def probe(self):
+            calls["n"] += 1
+            return ProbeResult(
+                provider="agy",
+                display_name="agy",
+                installed=True,
+                executable_ok=True,
+                auth_state=next(states),
+            )
+
+    now = {"t": 1000.0}
+    monkeypatch.setattr(registry, "PROVIDER_ORDER", ["agy"])
+    monkeypatch.setattr(registry, "all_providers", lambda overrides=None: [FakeProvider()])
+    monkeypatch.setattr(registry.time, "monotonic", lambda: now["t"])
+    registry.invalidate()
+
+    first = await registry.probe_all()
+    assert first[0].auth_state == AuthState.OK
+    assert calls["n"] == 1
+
+    # TTL 안에서는 캐시를 그대로 쓴다. CLI 를 매번 띄우지 않는다.
+    now["t"] += registry._CACHE_TTL_SECONDS / 2
+    again = await registry.probe_all()
+    assert again[0].auth_state == AuthState.OK
+    assert calls["n"] == 1
+
+    # TTL 이 지나면 다시 검사해서 바깥에서 일어난 로그아웃을 반영한다.
+    now["t"] += registry._CACHE_TTL_SECONDS
+    fresh = await registry.probe_all()
+    assert fresh[0].auth_state == AuthState.NOT_LOGGED_IN
+    assert calls["n"] == 2
+    registry.invalidate()
+
+
 async def test_claude_probe_reports_auth_honestly() -> None:
     """설치돼 있어도 로그인 안 됐으면 usable 이 아니어야 한다."""
     result = await ClaudeCliProvider().probe()
@@ -310,3 +361,15 @@ def test_data_dir_is_outside_project_tree() -> None:
     project_root = Path(__file__).resolve().parents[2]
     assert project_root not in Path(os.environ["ARIA_DATA_DIR"]).resolve().parents
     assert PATHS.runs_dir.name == "runs"
+
+
+def test_agy_declares_input_byte_budget() -> None:
+    """agy 는 큰 입력을 조용히 자르므로 바이트 한도를 선언해야 한다.
+
+    실측(run c7a0ab27): 745 KB 입력 중 앞 ~196 KB 만 모델에 전달됐다. runner 가
+    이 값으로 실행 전에 막는다. 값이 사라지면 방어가 무력화되므로 고정한다.
+    """
+    budget = AgyCliProvider.max_input_bytes
+    assert isinstance(budget, int)
+    # 실측 잘림 지점(~196 KB) 아래의 안전한 값이어야 한다.
+    assert 0 < budget < 196_000

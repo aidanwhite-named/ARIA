@@ -42,7 +42,16 @@ def _upload(client, filename: str = "citation.txt", body: bytes = b"prior art bo
 
 def _run(client, prompt, **extra) -> dict:
     created = client.post(
-        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "test", **extra}
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            # 구성대비 분석은 청구항이 필수다. 청구항 자체를 검증하지 않는
+            # 테스트도 실행을 만들려면 한 줄은 넣어야 한다. 청구항을 다루는
+            # 테스트는 extra 로 덮어쓴다.
+            "claim_text": "청구항 1. 테스트 청구항",
+            **extra,
+        },
     )
     assert created.status_code == 201, created.text
     return wait_for_job(client, created.json()["id"])
@@ -119,7 +128,7 @@ def test_reanalyzed_reuses_files_without_the_report(client, prompt) -> None:
 
 
 def test_followup_instruction_is_passed_through_verbatim(client, prompt) -> None:
-    parent = _run(client, prompt, claim_text="청구항 1.")
+    parent = _run(client, prompt, claim_text="청구항 1.", batch_id=_upload(client))
     instruction = "종속항 2~5 만 집중해서 보고, 인용발명 번호는 그대로 유지하십시오."
 
     child = _run(
@@ -175,6 +184,7 @@ def test_tampered_source_file_blocks_the_follow_up(client, prompt) -> None:
         json={
             "prompt_id": prompt["id"],
             "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
             "source_job_id": parent["id"],
             "relation_type": "REANALYZED",
         },
@@ -187,7 +197,7 @@ def test_tampered_source_file_blocks_the_follow_up(client, prompt) -> None:
 
 
 def test_lineage_fields_must_come_together(client, prompt) -> None:
-    parent = _run(client, prompt)
+    parent = _run(client, prompt, batch_id=_upload(client))
 
     only_source = client.post(
         "/api/jobs",
@@ -225,7 +235,7 @@ def test_lineage_fields_must_come_together(client, prompt) -> None:
 
 
 def test_cannot_continue_from_a_run_without_a_report(client, prompt) -> None:
-    failed = _run(client, prompt, claim_text="TEST_FAIL")
+    failed = _run(client, prompt, claim_text="TEST_FAIL", batch_id=_upload(client))
     assert failed["status"] == "FAILED"
 
     response = client.post(
@@ -245,6 +255,7 @@ def test_cannot_continue_from_a_run_without_a_report(client, prompt) -> None:
         json={
             "prompt_id": prompt["id"],
             "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
             "source_job_id": failed["id"],
             "relation_type": "REANALYZED",
         },

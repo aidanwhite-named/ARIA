@@ -47,7 +47,14 @@ from pathlib import Path
 from ..enums import AuthState
 from ..execution import process as proc
 from .agy_stream import AgyStreamParser, build_stdin_message
-from .base import EmitFn, ExecutionOutcome, ExecutionRequest, ProbeResult, Provider
+from .base import (
+    AGY_WEB_SEARCH,
+    EmitFn,
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProbeResult,
+    Provider,
+)
 from .env import build_child_env
 from .resolver import ExecutableKind, ResolvedExecutable, resolve_simple
 
@@ -116,6 +123,16 @@ def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
 class AgyCliProvider(Provider):
     id = "agy"
     display_name = "agy"
+    # agy 는 도구 노출 목록을 제한하지 못한다. 이 정책은 search_web 와
+    # read_url_content 이외의 *실제 호출*을 사후 탐지하는 제한된 안전성 정책이다.
+    supported_tool_policies = frozenset({AGY_WEB_SEARCH.name})
+    search_tool_policy = AGY_WEB_SEARCH
+    # agy 1.1.19 는 stream-json 메시지 content 를 약 192 KiB(≈196,608 bytes)에서
+    # 조용히 자르고 뒷부분을 `<truncated N bytes>` 로 대체한다. 실측(run
+    # c7a0ab27): 745 KB 입력 중 앞 ~196 KB 만 모델에 전달돼 첨부 절반이 통째로
+    # 빠진 채 종료 코드 0 으로 "성공"했다. 여유(약 16 KB)를 둔 값으로 실행 전에
+    # 막아 그 낭비를 없앤다. 실제 한도가 바뀌면 이 값만 조정하면 된다.
+    max_input_bytes = 180_000
     install_hint = (
         "agy CLI 를 설치하고 로그인하십시오. 설치되어 있으면 `agy models` 가 "
         "모델 목록을 반환합니다. ARIA 는 API Key 를 입력받지 않고 CLI 에 저장된 "
@@ -147,8 +164,14 @@ class AgyCliProvider(Provider):
                 "system_prompt_override": False,
                 # 도구를 끄는 플래그가 없다.
                 "tools_disabled": False,
+                # 실측(1.1.17): search_web 는 request-review 모드의 비대화형
+                # 실행에서도 정상 완료된다. 다른 도구 노출은 제한할 수 없다.
+                "web_search": True,
+                "search_tool_control": "detect_only",
                 "model_select": True,
                 "cancellable": True,
+                # 전용 login 명령이 없어 Windows 별도 도우미 창을 사용한다.
+                "guided_login": sys.platform == "win32",
                 "native_pdf": False,
             },
         )
@@ -248,10 +271,34 @@ class AgyCliProvider(Provider):
             outcome.cli_version = version_run.stdout.strip().splitlines()[0]
 
         parser = AgyStreamParser()
+        policy = request.tool_policy
+        search_policy = (
+            policy if policy is not None and policy.name == AGY_WEB_SEARCH.name else None
+        )
+        budget_exceeded = False
 
         async def on_stdout(line: str) -> None:
+            nonlocal budget_exceeded
             for event_type, payload in parser.feed(line):
                 await emit(event_type, payload)
+            if (
+                search_policy is not None
+                and search_policy.max_tool_calls
+                and not budget_exceeded
+                and len(parser.state.tool_uses) > search_policy.max_tool_calls
+            ):
+                budget_exceeded = True
+                await emit(
+                    "tool_budget_exceeded",
+                    {
+                        "limit": search_policy.max_tool_calls,
+                        "message": (
+                            f"도구 호출이 상한({search_policy.max_tool_calls}회)을 넘어 "
+                            "실행을 중단합니다."
+                        ),
+                    },
+                )
+                await proc.cancel_job(request.job_id)
 
         async def on_stderr(line: str) -> None:
             if line.strip():
@@ -292,11 +339,12 @@ class AgyCliProvider(Provider):
         # 완화할 수 없게 항상 실패 처리한다.
         outcome.tools_uncontrollable = True
         outcome.tool_uses = list(state.tool_uses)
-        if state.tools_advertised:
-            outcome.warnings.append(
-                f"agy 는 도구를 끌 수 없어 {len(state.tools_advertised)}개 도구가 "
-                f"활성 상태로 실행됐습니다 (permission_mode: {state.permission_mode})."
-            )
+        outcome.tools_advertised = list(state.tools_advertised)
+        outcome.tool_calls = list(state.tool_calls)
+        outcome.tool_budget_exceeded = budget_exceeded
+        # 기존 분석은 예전과 같은 사후 탐지 경로(None)를 유지한다. 검색에만 agy
+        # 전용 정책을 붙여 search_web/read_url_content 호출을 정상 처리한다.
+        outcome.tool_policy = search_policy
 
         if run.launch_error:
             outcome.is_error = True
@@ -306,16 +354,6 @@ class AgyCliProvider(Provider):
         if state.error_message:
             outcome.error_message = state.error_message[:500]
             outcome.errors.append(state.error_message[:500])
-
-        if not state.saw_result and not run.cancelled and not run.timed_out:
-            outcome.warnings.append(
-                "최종 result 이벤트를 받지 못했습니다. 스트림이 중간에 끊겼을 수 있습니다."
-            )
-
-        if state.parse_errors:
-            outcome.warnings.append(
-                f"스트림 {len(state.parse_errors)}줄을 해석하지 못했습니다. 원문은 보존됩니다."
-            )
 
         return outcome
 

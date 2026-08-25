@@ -3,9 +3,6 @@
 생명주기(status)와 실패 원인(error_code)을 분리한다. 두 축을 하나의 enum 에
 섞으면 Provider 를 추가할 때마다 계속 커지고, UI 와 재시도 정책이 같은 값을
 다르게 해석하게 된다.
-
-SUCCESS_WITH_WARNINGS 는 저장하지 않고 status/warnings 에서 파생한다.
-저장하면 두 필드가 어긋날 수 있다.
 """
 
 from __future__ import annotations
@@ -37,18 +34,37 @@ class ErrorCode(StrEnum):
     ATTACHMENT_ERROR = "ATTACHMENT_ERROR"
     TOOL_POLICY_VIOLATION = "TOOL_POLICY_VIOLATION"
     CANCELLED = "CANCELLED"
+    # 검색 작업 전용.
+    # 검색 도구를 한 번도 부르지 않고 기억만으로 답한 실행. 결과가 그럴듯해도
+    # 그것은 검색 결과가 아니므로 성공으로 두지 않는다.
+    SEARCH_NOT_PERFORMED = "SEARCH_NOT_PERFORMED"
+    # 허용된 도구 호출 횟수를 넘겨서 ARIA 가 프로세스를 끊었다.
+    SEARCH_BUDGET_EXCEEDED = "SEARCH_BUDGET_EXCEEDED"
+    # 검색 프롬프트 파일을 읽지 못했거나 placeholder 가 없다.
+    SEARCH_PROMPT_ERROR = "SEARCH_PROMPT_ERROR"
 
 
-class ResultQuality(StrEnum):
-    SUCCESS = "SUCCESS"
-    SUCCESS_WITH_WARNINGS = "SUCCESS_WITH_WARNINGS"
+class JobKind(StrEnum):
+    """이 실행이 무슨 종류의 작업인가.
 
+    작업 종류는 도구 정책을 결정한다. 두 종류는 입력도 출력도 실행 계약도
+    다르므로 하나의 경로에 플래그로 섞지 않는다.
 
-def derive_quality(status: str, warnings: list | None) -> str | None:
-    """status 와 warnings 로부터 결과 품질을 계산한다 (저장하지 않는다)."""
-    if status != JobStatus.SUCCEEDED:
-        return None
-    return ResultQuality.SUCCESS_WITH_WARNINGS if warnings else ResultQuality.SUCCESS
+      PATENT_ANALYSIS   : 첨부한 PDF 를 인라인으로 넣고 도구를 전부 끈 채
+                          청구항과 인용발명을 구성별로 대비한다.
+      SIMILARITY_SEARCH : 청구항을 기준으로 WebSearch/WebFetch 만 허용해서
+                          유사 문헌 검토 후보를 탐색한다. 선택 명세서는 격리된
+                          보조 검색에만 사용한다.
+
+    값이 비어 있는 과거 실행은 PATENT_ANALYSIS 로 읽는다.
+    """
+
+    PATENT_ANALYSIS = "patent_analysis"
+    SIMILARITY_SEARCH = "similarity_search"
+
+    @property
+    def accepts_attachments(self) -> bool:
+        return self is JobKind.PATENT_ANALYSIS
 
 
 class DeliveryMode(StrEnum):

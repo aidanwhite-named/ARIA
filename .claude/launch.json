@@ -16,6 +16,12 @@
         "8765"
       ],
       "port": 8765
+    },
+    {
+      "name": "aria-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "port": 5173
     }
   ]
 }

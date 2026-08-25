@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 # 정상 진행 단계. 이 외의 step_type 은 기록해 두고, 도구성으로 보이면
 # tool_uses 에 넣는다.
@@ -60,6 +61,35 @@ _RATE_MARKERS = (
     "usage limit",
 )
 
+_TOOL_INPUT_KEYS = {
+    "search_web": ("query",),
+    "read_url_content": ("url",),
+}
+_MAX_INPUT_VALUE = 500
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _summarize_input(name: str, raw) -> dict:
+    """검색 감사에 필요한 agy 도구 인수만 보존한다."""
+    if not isinstance(raw, dict):
+        return {}
+    keys = _TOOL_INPUT_KEYS.get(name)
+    if keys is None:
+        return {"keys": sorted(str(key) for key in raw)[:10]}
+    # agy 1.1.17은 read_url_content에서 `Url`, search_web에서는 `query`를
+    # 내보낸다. 버전/도구마다 대소문자가 달라도 감사 필드는 canonical 이름으로
+    # 남겨야 URL 대조가 빠지지 않는다.
+    casefolded = {str(key).casefold(): value for key, value in raw.items()}
+    summary: dict = {}
+    for key in keys:
+        value = casefolded.get(key.casefold())
+        if isinstance(value, str):
+            summary[key] = value[:_MAX_INPUT_VALUE]
+    return summary
+
 
 @dataclass
 class AgyStreamState:
@@ -78,6 +108,9 @@ class AgyStreamState:
 
     step_types: list[str] = field(default_factory=list)
     tool_uses: list[str] = field(default_factory=list)
+    # ACTIVE/DONE 이 같은 step_index 로 두 번 오므로 호출 하나로 합친다.
+    tool_calls: list[dict] = field(default_factory=list)
+    tool_calls_by_step: dict[str, dict] = field(default_factory=dict, repr=False)
     unparsed_lines: list[str] = field(default_factory=list)
     parse_errors: list[str] = field(default_factory=list)
 
@@ -174,8 +207,53 @@ class AgyStreamParser:
             if lowered in _KNOWN_TOOL_STEPS or any(
                 hint in lowered for hint in _TOOL_HINTS
             ):
-                state.tool_uses.append(step_type)
-                events.append(("tool_use", {"name": step_type}))
+                # agy 의 step_type 은 단순히 "tool" 이고 실제 이름은 tool_name 에
+                # 있다. 같은 호출이 ACTIVE 와 DONE 으로 반복되므로 step_index 로
+                # 합치지 않으면 검색 횟수와 상한이 두 배로 계산된다.
+                tool_name = str(body.get("tool_name") or step_type or "unknown")
+                step_index = body.get("step_index")
+                call_key = str(step_index) if step_index is not None else f"auto-{len(state.tool_calls)}"
+                call = state.tool_calls_by_step.get(call_key)
+                tool_info = body.get("tool_info")
+                if not isinstance(tool_info, dict):
+                    tool_info = {}
+                if call is None:
+                    call = {
+                        "id": f"agy-step-{call_key}",
+                        "name": tool_name,
+                        "ts": _utcnow_iso(),
+                        "input": _summarize_input(tool_name, tool_info.get("parameters")),
+                        "ok": None,
+                        "error": None,
+                    }
+                    state.tool_calls_by_step[call_key] = call
+                    state.tool_calls.append(call)
+                    state.tool_uses.append(tool_name)
+                    events.append(
+                        (
+                            "tool_use",
+                            {
+                                "name": tool_name,
+                                "id": call["id"],
+                                "input": call["input"],
+                                "index": len(state.tool_uses),
+                            },
+                        )
+                    )
+
+                step_state = str(body.get("state") or "").upper()
+                if step_state == "DONE":
+                    call["ok"] = True
+                elif step_state in {"ERROR", "FAILED", "CANCELLED"}:
+                    detail = str(
+                        body.get("error")
+                        or tool_info.get("error")
+                        or body.get("message")
+                        or step_state
+                    )[:300]
+                    call["ok"] = False
+                    call["error"] = detail
+                    events.append(("tool_error", {"detail": detail, "name": tool_name}))
             else:
                 events.append(("stage", {"stage": step_type, "message": step_type}))
 

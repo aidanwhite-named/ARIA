@@ -138,6 +138,91 @@ def test_tool_like_step_recorded_as_tool_use() -> None:
     assert any(t == "tool_use" for t, _ in events)
 
 
+def test_real_search_tool_events_are_deduplicated_and_audited() -> None:
+    """실측한 ACTIVE/DONE 쌍은 검색 한 번으로 기록되어야 한다."""
+    parser = AgyStreamParser()
+    active = {
+        "event": "step_update",
+        "step_update": {
+            "step_index": 3,
+            "state": "ACTIVE",
+            "step_type": "tool",
+            "tool_name": "search_web",
+            "tool_info": {"parameters": {"query": "claim similar patent"}},
+        },
+    }
+    done = {
+        "event": "step_update",
+        "step_update": {
+            **active["step_update"],
+            "state": "DONE",
+            "tool_info": {
+                "parameters": {"query": "claim similar patent"},
+                "result": "results returned",
+            },
+        },
+    }
+
+    events = feed(parser, [INIT, active, done])
+    assert parser.state.tool_uses == ["search_web"]
+    assert len(parser.state.tool_calls) == 1
+    call = parser.state.tool_calls[0]
+    assert call["name"] == "search_web"
+    assert call["input"] == {"query": "claim similar patent"}
+    assert call["ok"] is True
+    assert call["ts"]
+    assert len([event for event in events if event[0] == "tool_use"]) == 1
+
+
+def test_read_url_content_accepts_agys_capitalized_url_parameter() -> None:
+    parser = AgyStreamParser()
+    feed(
+        parser,
+        [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_index": 7,
+                    "state": "DONE",
+                    "step_type": "tool",
+                    "tool_name": "read_url_content",
+                    "tool_info": {
+                        "parameters": {
+                            "Url": "https://patents.google.com/patent/US6318965B1/en"
+                        }
+                    },
+                },
+            }
+        ],
+    )
+    assert parser.state.tool_calls[0]["input"] == {
+        "url": "https://patents.google.com/patent/US6318965B1/en"
+    }
+
+
+def test_unexpected_agy_tool_records_only_argument_keys() -> None:
+    parser = AgyStreamParser()
+    feed(
+        parser,
+        [
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_index": 4,
+                    "state": "DONE",
+                    "step_type": "tool",
+                    "tool_name": "run_command",
+                    "tool_info": {"parameters": {"command": "sensitive command"}},
+                },
+            }
+        ],
+    )
+    assert parser.state.tool_uses == ["run_command"]
+    call = parser.state.tool_calls[0]
+    assert call["input"] == {"keys": ["command"]}
+    assert "sensitive command" not in json.dumps(call)
+
+
 def test_benign_steps_are_not_tool_uses() -> None:
     parser = AgyStreamParser()
     feed(parser, [INIT, STEP_USER, STEP_CHECKPOINT, STEP_RESPONSE])

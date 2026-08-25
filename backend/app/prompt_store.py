@@ -1,4 +1,4 @@
-"""File-backed Master Prompt storage.
+"""File-backed analysis and search prompt storage.
 
 The files in ``prompt/`` are the only current prompt source. SQLite keeps job
 snapshots and settings, but prompt bodies are never read from or written to the
@@ -21,6 +21,15 @@ from typing import Any
 from .config import PROMPT_DIR
 
 _ALLOWED_SUFFIXES = frozenset({".md", ".txt"})
+
+# 작업 종류가 고정된 예약 프롬프트. 같은 파일 형식·같은 로더를 쓰지만 분석
+# 실행의 프롬프트 선택 목록에는 넣지 않는다.
+#
+# 목록에 두면 PDF 구성대비 분석의 분석 기준으로 고를 수 있게 되는데, 그 본문은
+# 웹 검색 실행 계약이라 첨부 분석에 쓰면 계약이 어긋난다. create_job 의
+# "첫 번째 활성 프롬프트" 폴백에 걸릴 위험도 있다. API 로 편집·삭제되는 것도
+# 막는다 — 실행 계약과 본문이 함께 움직여야 한다.
+RESERVED_PROMPT_IDS = frozenset({"search_prompt.md"})
 _METADATA_START = "<!-- ARIA_PROMPT_METADATA\n"
 _METADATA_END = "\n-->\n"
 _MAX_PROMPT_BYTES = 2 * 1024 * 1024
@@ -125,10 +134,12 @@ class PromptStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.history_root.mkdir(parents=True, exist_ok=True)
 
-    def _path_for_id(self, prompt_id: str) -> Path:
+    def _path_for_id(self, prompt_id: str, *, allow_reserved: bool = False) -> Path:
         if not prompt_id or Path(prompt_id).name != prompt_id:
             raise PromptNotFound("프롬프트를 찾을 수 없습니다.")
         if Path(prompt_id).suffix.lower() not in _ALLOWED_SUFFIXES:
+            raise PromptNotFound("프롬프트를 찾을 수 없습니다.")
+        if not allow_reserved and prompt_id in RESERVED_PROMPT_IDS:
             raise PromptNotFound("프롬프트를 찾을 수 없습니다.")
         candidate = self.root / prompt_id
         resolved = candidate.resolve(strict=False)
@@ -270,13 +281,16 @@ class PromptStore:
                 + "\n",
             )
 
-    def list(self, search: str = "", tag: str = "") -> list[PromptFile]:
+    def list(
+        self, search: str = "", tag: str = "", *, include_reserved: bool = False
+    ) -> list[PromptFile]:
         self.ensure()
         lowered = search.casefold().strip()
         rows: list[PromptFile] = []
         for path in self.root.iterdir():
             if (
                 path.name.startswith(".")
+                or (not include_reserved and path.name in RESERVED_PROMPT_IDS)
                 or path.suffix.lower() not in _ALLOWED_SUFFIXES
                 or not path.is_file()
                 or path.is_symlink()
@@ -297,6 +311,17 @@ class PromptStore:
         self.ensure()
         return self._read_path(self._path_for_id(prompt_id))
 
+    def get_reserved(self, prompt_id: str) -> PromptFile:
+        """예약 프롬프트를 읽는다. 목록/편집 API 는 이 경로를 쓰지 않는다.
+
+        일반 프롬프트와 같은 파일 형식·같은 검증(UTF-8, 메타데이터, 빈 본문)을
+        거친다. 다른 로더를 따로 만들면 두 경로의 검증이 갈라진다.
+        """
+        if prompt_id not in RESERVED_PROMPT_IDS:
+            raise PromptNotFound("예약된 프롬프트가 아닙니다.")
+        self.ensure()
+        return self._read_path(self._path_for_id(prompt_id, allow_reserved=True))
+
     def create(
         self,
         *,
@@ -314,7 +339,9 @@ class PromptStore:
         with self._lock:
             candidate = self.root / f"{base}{suffix}"
             counter = 2
-            while candidate.exists():
+            # 예약 이름과 겹치면 비켜난다. 사용자가 만든 프롬프트가 검색
+            # 프롬프트 파일을 덮어쓰면 검색 실행 계약이 통째로 바뀐다.
+            while candidate.exists() or candidate.name in RESERVED_PROMPT_IDS:
                 candidate = self.root / f"{base}-{counter}{suffix}"
                 counter += 1
             prompt = PromptFile(
@@ -334,9 +361,13 @@ class PromptStore:
             self._write_snapshot(prompt)
             return prompt
 
-    def update(self, prompt_id: str, changes: dict[str, Any]) -> PromptFile:
+    def _update(
+        self, prompt_id: str, changes: dict[str, Any], *, allow_reserved: bool
+    ) -> PromptFile:
         with self._lock:
-            current = self.get(prompt_id)
+            current = (
+                self.get_reserved(prompt_id) if allow_reserved else self.get(prompt_id)
+            )
             values = {
                 "name": current.name,
                 "description": current.description,
@@ -368,9 +399,20 @@ class PromptStore:
                 version=current.version + 1 if version_changed else current.version,
                 updated_at=datetime.now(timezone.utc),
             )
-            self._atomic_write(self._path_for_id(prompt_id), self._serialize(updated))
+            self._atomic_write(
+                self._path_for_id(prompt_id, allow_reserved=allow_reserved),
+                self._serialize(updated),
+            )
             self._write_snapshot(updated)
             return updated
+
+    def update(self, prompt_id: str, changes: dict[str, Any]) -> PromptFile:
+        return self._update(prompt_id, changes, allow_reserved=False)
+
+    def update_reserved(self, prompt_id: str, changes: dict[str, Any]) -> PromptFile:
+        if prompt_id not in RESERVED_PROMPT_IDS:
+            raise PromptNotFound("예약된 프롬프트가 아닙니다.")
+        return self._update(prompt_id, changes, allow_reserved=True)
 
     def delete(self, prompt_id: str) -> None:
         with self._lock:
@@ -385,8 +427,12 @@ class PromptStore:
                         child.unlink()
                 history_dir.rmdir()
 
-    def versions(self, prompt_id: str) -> list[PromptFileVersion]:
-        current = self.get(prompt_id)
+    def _versions(
+        self, prompt_id: str, *, allow_reserved: bool
+    ) -> list[PromptFileVersion]:
+        current = (
+            self.get_reserved(prompt_id) if allow_reserved else self.get(prompt_id)
+        )
         history_dir = self._history_dir(prompt_id)
         rows: dict[int, PromptFileVersion] = {}
         if history_dir.exists():
@@ -417,6 +463,14 @@ class PromptStore:
             created_at=current.updated_at,
         )
         return [rows[key] for key in sorted(rows, reverse=True)]
+
+    def versions(self, prompt_id: str) -> list[PromptFileVersion]:
+        return self._versions(prompt_id, allow_reserved=False)
+
+    def versions_reserved(self, prompt_id: str) -> list[PromptFileVersion]:
+        if prompt_id not in RESERVED_PROMPT_IDS:
+            raise PromptNotFound("예약된 프롬프트가 아닙니다.")
+        return self._versions(prompt_id, allow_reserved=True)
 
 
 PROMPT_STORE = PromptStore()

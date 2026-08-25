@@ -1,6 +1,6 @@
 """Claude Code CLI Provider.
 
-v0.1 정책: 도구를 전부 끈다.
+기본 정책: 도구를 전부 끈다.
 
 에이전트에게 로컬 파일을 Read 시키면 (1) 모델이 파일을 얼마나 읽을지
 보장할 수 없어 실행마다 입력이 달라지고, (2) 파일시스템 접근이라는 보안
@@ -10,8 +10,23 @@ ARIA 는 대신 첨부 자료를 미리 텍스트로 정규화해서 메시지 �
 넣은 것은 반드시 들어간 것이므로 "필수 첨부를 못 읽었다"는 실패가 아예
 발생하지 않는다.
 
+예외는 유사 문헌 검색 작업 하나뿐이다. 그 작업은 ToolPolicy.WEB_SEARCH 로
+실행되어 WebSearch/WebFetch 만 열린다. 정책은 실행 요청이 들고 오며, 요청이
+정책을 지정하지 않으면 도구 없음이 적용된다(fail-closed).
+
+도메인 제한에 대해: `--allowedTools "WebFetch(domain:...)"` 로 어떤 페이지를
+열 수 있는지는 제한할 수 있지만, WebSearch 권한 규칙은 지정자를 받지 않는다.
+즉 ARIA 는 "무엇을 검색할지"를 기술적으로 제한하지 못한다. 그래서 여기서
+도메인 allowlist 를 구성하지 않는다. 강제하지 못하는 것을 강제하는 것처럼
+보이는 인수를 남기면 그게 더 위험하다.
+
 플래그는 설치된 버전의 --help 로 검증한 것만 쓴다. 2.1.156 기준으로
 아래 조합을 확인했다. CLI 옵션이 바뀌면 여기만 고치면 된다.
+
+  --tools ""                       도구 전면 차단 (분석 작업)
+  --tools "WebSearch,WebFetch"     검색 도구만 노출 (검색 작업)
+  --allowedTools WebSearch WebFetch  권한 프롬프트 없이 호출 허용
+  --permission-mode dontAsk        비대화형 실행에서 되묻지 않음
 """
 
 from __future__ import annotations
@@ -22,7 +37,15 @@ from pathlib import Path
 
 from ..enums import AuthState
 from ..execution import process as proc
-from .base import EmitFn, ExecutionOutcome, ExecutionRequest, ProbeResult, Provider
+from .base import (
+    NO_TOOLS,
+    WEB_SEARCH,
+    EmitFn,
+    ExecutionOutcome,
+    ExecutionRequest,
+    ProbeResult,
+    Provider,
+)
 from .claude_stream import ClaudeStreamParser
 from .env import build_child_env
 from .resolver import ResolvedExecutable, resolve_claude
@@ -41,6 +64,9 @@ _CHILD_ENV_EXTRA = {
 class ClaudeCliProvider(Provider):
     id = "claude"
     display_name = "Claude"
+    # 이 Provider 만 --tools 로 내장 도구 목록을 강제할 수 있다.
+    supported_tool_policies = frozenset({NO_TOOLS.name, WEB_SEARCH.name})
+    search_tool_policy = WEB_SEARCH
     install_hint = (
         "npm install -g @anthropic-ai/claude-code 로 설치한 뒤, 별도 터미널에서 "
         "claude setup-token 또는 claude auth login 으로 로그인하십시오. "
@@ -68,8 +94,13 @@ class ClaudeCliProvider(Provider):
                 "stdin_prompt": True,
                 "system_prompt_override": True,
                 "tools_disabled": True,
+                # --tools 로 내장 도구를 목록으로 제한할 수 있다. 유사 문헌
+                # 검색 작업은 이 능력이 있는 Provider 에서만 실행된다.
+                "tool_allowlist": True,
+                "web_search": True,
                 "model_select": True,
                 "cancellable": True,
+                "browser_login": True,
                 "native_pdf": False,
                 # Claude Code 는 계정별 모델 목록 명령을 제공하지 않는다.
                 # 설치된 CLI 가 공식적으로 해석하는 최신 모델 alias 만 노출한다.
@@ -139,6 +170,7 @@ class ClaudeCliProvider(Provider):
     # ---------------------------------------------------------------- execute
 
     def build_args(self, request: ExecutionRequest) -> list[str]:
+        policy = request.tool_policy or NO_TOOLS
         args = [
             "-p",
             "--input-format",
@@ -147,9 +179,18 @@ class ClaudeCliProvider(Provider):
             "stream-json",
             "--verbose",
             "--include-partial-messages",
-            # 도구를 전부 제거한다. 파일 접근/셸/네트워크 표면이 사라진다.
+            # 정책이 허용한 내장 도구만 노출한다. 목록이 비면 "" 가 되어 도구가
+            # 전부 사라진다(파일 접근/셸/네트워크 표면이 없어진다).
             "--tools",
-            "",
+            ",".join(policy.allowed_tools),
+        ]
+        if policy.allowed_tools:
+            # 비대화형 실행이라 권한 프롬프트에 답할 사람이 없다. 허용한 도구는
+            # 되묻지 않고 통과시키고, 목록 밖 도구는 애초에 --tools 로 없앤다.
+            # 여기서 --dangerously-skip-permissions 는 쓰지 않는다.
+            args += ["--allowedTools", *policy.allowed_tools]
+            args += ["--permission-mode", "dontAsk"]
+        args += [
             # 코딩 에이전트 기본 시스템 프롬프트를 ARIA 규칙으로 교체한다.
             # append 가 아니라 replace 인 이유: 도구가 없는데 코딩 에이전트
             # 지침을 남겨둘 이유가 없다.
@@ -193,10 +234,32 @@ class ClaudeCliProvider(Provider):
             outcome.cli_version = version_run.stdout.strip().splitlines()[0]
 
         parser = ClaudeStreamParser()
+        policy = request.tool_policy or NO_TOOLS
+        budget_exceeded = False
 
         async def on_stdout(line: str) -> None:
+            nonlocal budget_exceeded
             for event_type, payload in parser.feed(line):
                 await emit(event_type, payload)
+            # 도구 호출 상한. 프롬프트로 "최대 2라운드"를 요구하는 것과 별개로,
+            # 실제로 멈추는 것은 여기다. 상한을 넘으면 프로세스 트리를 끊는다.
+            if (
+                policy.max_tool_calls
+                and not budget_exceeded
+                and len(parser.state.tool_uses) > policy.max_tool_calls
+            ):
+                budget_exceeded = True
+                await emit(
+                    "tool_budget_exceeded",
+                    {
+                        "limit": policy.max_tool_calls,
+                        "message": (
+                            f"도구 호출이 상한({policy.max_tool_calls}회)을 넘어 "
+                            "실행을 중단합니다."
+                        ),
+                    },
+                )
+                await proc.cancel_job(request.job_id)
 
         async def on_stderr(line: str) -> None:
             if line.strip():
@@ -230,11 +293,15 @@ class ClaudeCliProvider(Provider):
         outcome.is_error = state.is_error
         outcome.auth_required = state.auth_required
         outcome.rate_limited = state.rate_limited
-        # 이 Provider 는 --tools "" 로 도구를 완전히 끄고 실행한다.
-        # 따라서 도구가 하나라도 보이면 정책이 깨진 것이다.
-        outcome.tools_must_be_disabled = True
+        # 이 실행에 적용한 정책을 그대로 넘긴다. 판정은 evaluator 가 이 정책에
+        # 대해서만 한다. 도구 없음 정책이면 도구가 하나라도 보이는 순간 위반이고,
+        # 검색 정책이면 허용 목록 밖의 도구가 보이는 순간 위반이다.
+        outcome.tool_policy = policy
+        outcome.tools_must_be_disabled = policy.tools_disabled
         outcome.tools_advertised = list(state.tool_names)
         outcome.tool_uses = list(state.tool_uses)
+        outcome.tool_calls = list(state.tool_calls)
+        outcome.tool_budget_exceeded = budget_exceeded
 
         if run.launch_error:
             outcome.is_error = True
@@ -244,18 +311,6 @@ class ClaudeCliProvider(Provider):
         if state.is_error and state.result_text:
             outcome.error_message = state.result_text[:500]
             outcome.errors.append(state.result_text[:500])
-
-        if not state.saw_result and not run.cancelled and not run.timed_out:
-            outcome.warnings.append(
-                "최종 result 이벤트를 받지 못했습니다. 스트림이 중간에 끊겼을 수 있습니다."
-            )
-
-        if state.parse_errors:
-            outcome.warnings.append(
-                f"스트림 {len(state.parse_errors)}줄을 해석하지 못했습니다. 원문은 보존됩니다."
-            )
-        for detail in state.tool_errors:
-            outcome.warnings.append(f"도구 오류: {detail}")
 
         return outcome
 

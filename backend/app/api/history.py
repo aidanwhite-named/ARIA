@@ -11,12 +11,24 @@ from sqlalchemy.orm import Session
 
 from ..config import PATHS
 from ..db import get_db
-from ..enums import derive_quality
-from ..models import ExecutionJob
+from ..enums import JobKind
+from ..models import Attachment, ExecutionJob
+from ..patent_search import retention
+from ..patent_search.artifacts import ArtifactStore
 from ..schemas import HistoryItem, JobOut
 from .jobs import _job_out
 
 router = APIRouter(prefix="/api/history", tags=["history"])
+
+
+def _clear_directory_contents(root: Path) -> None:
+    """ARIA가 소유한 저장 폴더는 남기고 그 안의 기록만 모두 지운다."""
+    root.mkdir(parents=True, exist_ok=True)
+    for child in root.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink(missing_ok=True)
+        elif child.is_dir():
+            shutil.rmtree(child)
 
 
 def _child_map(session: Session) -> dict[str, list[str]]:
@@ -60,8 +72,8 @@ def _history_item(row: ExecutionJob, descendant_count: int = 0) -> HistoryItem:
     return HistoryItem(
         id=row.id,
         status=row.status,
-        result_quality=derive_quality(row.status, row.warnings or []),
         error_code=row.error_code,
+        job_kind=row.job_kind or JobKind.PATENT_ANALYSIS,
         prompt_name=row.prompt_name,
         prompt_version=row.prompt_version,
         provider=row.provider,
@@ -69,7 +81,6 @@ def _history_item(row: ExecutionJob, descendant_count: int = 0) -> HistoryItem:
         created_at=row.created_at,
         duration_ms=row.duration_ms,
         attachment_count=len(row.attachments),
-        warning_count=len(row.warnings or []),
         source_job_id=row.source_job_id,
         source_job_label=row.source_job_label or "",
         relation_type=row.relation_type,
@@ -96,6 +107,29 @@ def list_history(
     )
     children = _child_map(session)
     return [_history_item(r, len(_descendants(children, r.id))) for r in rows]
+
+
+@router.delete("")
+def delete_all_history(session: Session = Depends(get_db)) -> dict:
+    """모든 실행 이력과 ARIA 실행 저장소의 파일을 함께 지운다.
+
+    DB 행과 연결되지 않은 미사용 업로드 폴더나 이전 버전의 산출물도 남기지
+    않는다. 데이터 폴더 자체와 설정·프롬프트·애플리케이션 로그는 보존한다.
+    """
+    jobs = session.query(ExecutionJob).all()
+    deleted = _purge(session, jobs) if jobs else 0
+
+    # 아직 작업에 귀속되지 않은 업로드 메타데이터도 실행 폴더와 함께 정리한다.
+    session.query(Attachment).filter(Attachment.job_id.is_(None)).delete(
+        synchronize_session=False
+    )
+    session.commit()
+
+    _clear_directory_contents(PATHS.runs_dir.resolve())
+    _clear_directory_contents(PATHS.artifacts_dir.resolve())
+    # 증거도 남기지 않는다. 여기까지 왔으면 참조하는 작업이 하나도 없다.
+    _clear_directory_contents(PATHS.evidence_dir.resolve())
+    return {"deleted": deleted}
 
 
 @router.get("/{job_id}", response_model=JobOut)
@@ -160,6 +194,12 @@ def _purge(session: Session, jobs: list[ExecutionJob]) -> int:
         if still_used is not None:
             continue
         shutil.rmtree(path, ignore_errors=True)
+
+    # 작업이 사라지면 참조도 CASCADE 로 사라진다. 이제 아무도 참조하지 않는
+    # 증거 아티팩트를 지운다. 증거는 작업에 딸린 것이지 영구 보관물이 아니다.
+    retention.collect_unreferenced(
+        session, ArtifactStore(PATHS.evidence_dir.resolve())
+    )
     return len(jobs)
 
 

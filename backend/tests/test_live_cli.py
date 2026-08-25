@@ -23,7 +23,12 @@ import pytest
 from app.enums import AuthState, ErrorCode, JobStatus
 from app.evaluation.evaluator import evaluate
 from app.providers.agy_cli import AgyCliProvider
-from app.providers.base import ExecutionRequest
+from app.providers.base import (
+    NO_TOOLS,
+    WEB_SEARCH,
+    ExecutionRequest,
+    ToolPolicy,
+)
 from app.providers.claude_cli import ClaudeCliProvider
 
 pytestmark = pytest.mark.live_cli
@@ -51,7 +56,13 @@ def _assert_ran_successfully(outcome, label: str) -> None:
     assert outcome.cli_version, f"{label}: CLI 버전을 확인하지 못했습니다."
 
 
-async def _run(provider, system_prompt: str, user_message: str, timeout: int = 240):
+async def _run(
+    provider,
+    system_prompt: str,
+    user_message: str,
+    timeout: int = 240,
+    tool_policy: ToolPolicy = NO_TOOLS,
+):
     events: list[tuple[str, dict]] = []
 
     async def emit(event_type: str, payload: dict) -> None:
@@ -64,6 +75,7 @@ async def _run(provider, system_prompt: str, user_message: str, timeout: int = 2
             system_prompt=system_prompt,
             user_message=user_message,
             timeout_seconds=timeout,
+            tool_policy=tool_policy,
         )
         outcome = await provider.execute(request, emit)
     return outcome, events
@@ -108,6 +120,84 @@ async def test_claude_reports_no_tools_and_reaches_result() -> None:
 
     verdict = evaluate(outcome)
     assert verdict.status == JobStatus.SUCCEEDED, verdict.errors
+
+
+async def test_claude_search_policy_opens_only_web_tools_live() -> None:
+    """검색 정책으로 실행하면 WebSearch/WebFetch 만 광고되고 실제로 검색된다.
+
+    이 테스트만이 "웹 검색이 이 PC 에서 실제로 동작하는가"를 확인한다.
+    Anthropic 의 WebSearch 백엔드는 지역 제한이 있을 수 있으므로, 검색이
+    한 번도 일어나지 않으면 실패가 아니라 skip 으로 남긴다 — 그건 ARIA 의
+    결함이 아니라 계정/지역 조건이다.
+    """
+    provider = await _usable(
+        ClaudeCliProvider(), "Claude", "별도 터미널에서 `claude setup-token` 을 실행하십시오."
+    )
+    outcome, events = await _run(
+        provider,
+        "You are a search probe. Use WebSearch exactly once, then reply DONE.",
+        "Search the web for: patent claim similarity search",
+        timeout=300,
+        tool_policy=WEB_SEARCH,
+    )
+    _assert_ran_successfully(outcome, "claude search")
+
+    starts = [p for t, p in events if t == "provider_start" and "tools" in p]
+    assert starts, "init 이벤트를 받지 못했습니다."
+    assert sorted(starts[0]["tools"]) == ["WebFetch", "WebSearch"], starts[0]["tools"]
+
+    assert sorted(outcome.tools_advertised) == ["WebFetch", "WebSearch"]
+    assert outcome.tools_must_be_disabled is False
+    assert outcome.tool_policy is WEB_SEARCH
+    # 허용 목록 밖의 도구는 어떤 경우에도 나오면 안 된다.
+    assert WEB_SEARCH.unexpected(outcome.tool_uses) == [], outcome.tool_uses
+
+    if not outcome.tool_uses:
+        pytest.skip(
+            "이 계정/지역에서 WebSearch 가 실행되지 않았습니다. "
+            "도구 목록 제한은 확인했지만 실제 검색은 확인하지 못했습니다."
+        )
+
+    calls = [c for c in outcome.tool_calls if c["name"] == "WebSearch"]
+    assert calls, "WebSearch 호출 기록이 없습니다."
+    assert calls[0]["input"].get("query"), "검색어를 감사 기록에 남기지 못했습니다."
+    assert calls[0]["ts"], "호출 시각을 남기지 못했습니다."
+    assert evaluate(outcome).status == JobStatus.SUCCEEDED
+
+
+async def test_claude_search_policy_still_blocks_shell_and_file_tools_live() -> None:
+    """검색 정책에서도 Bash/Read 는 존재하지 않아야 한다."""
+    provider = await _usable(
+        ClaudeCliProvider(), "Claude", "별도 터미널에서 `claude setup-token` 을 실행하십시오."
+    )
+    outcome, _ = await _run(
+        provider,
+        "You are a test harness.",
+        "List the files in the current directory using your tools, then say what you found.",
+        timeout=180,
+        tool_policy=WEB_SEARCH,
+    )
+    for forbidden in ("Bash", "Read", "Write", "Edit", "Task"):
+        assert forbidden not in outcome.tools_advertised, outcome.tools_advertised
+        assert forbidden not in outcome.tool_uses, outcome.tool_uses
+
+
+async def test_claude_analysis_policy_is_unchanged_live() -> None:
+    """검색 기능을 붙인 뒤에도 분석 실행의 도구는 여전히 0개다."""
+    provider = await _usable(
+        ClaudeCliProvider(), "Claude", "별도 터미널에서 `claude setup-token` 을 실행하십시오."
+    )
+    outcome, events = await _run(
+        provider,
+        "You are a test harness. Answer in one short line.",
+        "Reply with exactly: NO_TOOLS_OK",
+        tool_policy=NO_TOOLS,
+    )
+    _assert_ran_successfully(outcome, "claude analysis")
+    starts = [p for t, p in events if t == "provider_start" and "tools" in p]
+    assert starts[0]["tools"] == [], starts[0]["tools"]
+    assert outcome.tools_must_be_disabled is True
+    assert evaluate(outcome).status == JobStatus.SUCCEEDED
 
 
 async def test_claude_cannot_read_local_files() -> None:
@@ -190,10 +280,10 @@ async def test_agy_tool_use_is_detected_and_fails_closed() -> None:
         assert verdict.status == JobStatus.SUCCEEDED
 
 
-async def test_agy_advertises_tools_and_warns() -> None:
+async def test_agy_advertises_tools() -> None:
     """도구를 끌 수 없다는 사실이 결과에 드러나야 한다."""
     provider = await _usable(AgyCliProvider(), "agy", "`agy` 로 로그인하십시오.")
     outcome = await provider.smoke_test()
     _assert_ran_successfully(outcome, "agy")
     assert outcome.tools_must_be_disabled is False
-    assert any("도구를 끌 수 없어" in w for w in outcome.warnings), outcome.warnings
+    assert outcome.tools_uncontrollable is True

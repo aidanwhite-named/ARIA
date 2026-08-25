@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from app.enums import ErrorCode, JobStatus
+from app.enums import AuthState, ErrorCode, JobStatus
 from app.evaluation.evaluator import evaluate
-from app.providers.base import ExecutionOutcome
+from app.providers.base import ExecutionOutcome, ProbeResult
 
 
 # ------------------------------------------------------------------- CSRF
@@ -101,13 +103,17 @@ def test_tool_use_fails_by_default_for_providers_without_tool_flag() -> None:
     assert verdict.error_code == ErrorCode.TOOL_POLICY_VIOLATION
 
 
-def test_tool_use_downgraded_to_warning_when_opted_out() -> None:
+def test_tool_use_is_accepted_when_opted_out() -> None:
+    """fail_on_tool_use 를 끄면 도구 호출이 실행을 세우지 않는다.
+
+    설정으로 완화할 수 있는 것은 이 경로뿐이다. 도구를 꺼야 하는 Provider 나
+    끌 수단이 없는 Provider 는 위 테스트대로 설정과 무관하게 실패한다.
+    """
     outcome = _ok()
     outcome.tools_must_be_disabled = False
     outcome.tool_uses = ["run_command"]
     verdict = evaluate(outcome, fail_on_tool_use=False)
     assert verdict.status == JobStatus.SUCCEEDED
-    assert any("도구가 호출" in w for w in verdict.warnings)
 
 
 def test_no_tools_is_clean_success() -> None:
@@ -233,24 +239,6 @@ def test_agy_uses_its_cli_name(client) -> None:
     assert data["display_name"] == "agy"
 
 
-def test_agy_is_experimental_and_off_by_default(client) -> None:
-    """agy 는 도구를 끌 수 없으므로 기본적으로 꺼져 있어야 한다."""
-    data = client.get("/api/providers/agy").json()
-    assert data["experimental"] is True
-    assert data["opted_in"] is False
-    assert data["usable"] is False
-    assert data["risks"], "위험 고지가 비어 있습니다."
-    # 설치·인증 자체는 별도로 보고한다.
-    assert "runnable" in data
-
-
-def test_non_experimental_providers_are_never_gated(client) -> None:
-    for pid in ("claude", "codex"):
-        data = client.get(f"/api/providers/{pid}").json()
-        assert data["experimental"] is False
-        assert data["opted_in"] is True
-
-
 def test_execution_defaults_are_editable(client) -> None:
     prompt = client.post(
         "/api/prompts", json={"name": "기본 설정", "body": "요약"}
@@ -273,7 +261,7 @@ def test_execution_defaults_are_editable(client) -> None:
         json={
             "values": {
                 "default_prompt_id": "",
-                # 기본값은 빈 문자열이다. 실험적 Provider 를 기본으로 남겨두면
+                # 기본값은 빈 문자열이다. 제한된 안전성 Provider 를 기본으로 남겨두면
                 # 다른 테스트가 그것을 자동 선택하게 된다.
                 "default_provider": "",
                 "default_models": {},
@@ -323,25 +311,7 @@ def test_agy_resolver_does_not_fall_back_to_gemini(monkeypatch) -> None:
     assert calls == ["agy"], f"gemini 로 폴백했습니다: {calls}"
 
 
-# ------------------------------------------- 실험적 Provider opt-in 게이트
-
-
-def test_job_creation_refused_for_experimental_provider_without_optin(client) -> None:
-    """UI 를 우회한 직접 호출도 막혀야 한다."""
-    prompt = client.post(
-        "/api/prompts", json={"name": "게이트 확인", "body": "요약하십시오."}
-    ).json()
-    response = client.post(
-        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "agy"}
-    )
-    assert response.status_code == 403
-    assert "실험적" in response.json()["detail"]
-
-
-def test_smoke_test_refused_for_experimental_provider_without_optin(client) -> None:
-    response = client.post("/api/providers/agy/smoke-test")
-    assert response.status_code == 403
-    assert "실험적" in response.json()["detail"]
+# ------------------------------------- 도구를 끄지 못하는 Provider 의 취급
 
 
 def test_no_provider_and_no_default_refuses_instead_of_auto_selecting(client) -> None:
@@ -355,177 +325,127 @@ def test_no_provider_and_no_default_refuses_instead_of_auto_selecting(client) ->
     assert "Settings 에서 기본" in response.json()["detail"]
 
 
-def test_experimental_default_provider_still_requires_optin(client) -> None:
-    """기본 Provider 로 지정돼 있어도 opt-in 없이는 실행되지 않는다."""
-    client.put("/api/settings", json={"values": {"default_provider": "agy"}})
-    try:
-        prompt = client.post(
-            "/api/prompts", json={"name": "기본값 게이트", "body": "요약하십시오."}
-        ).json()
-        response = client.post("/api/jobs", json={"prompt_id": prompt["id"]})
-        assert response.status_code == 403
-        assert "실험적" in response.json()["detail"]
-    finally:
-        client.put("/api/settings", json={"values": {"default_provider": ""}})
-
-
-def test_optin_makes_experimental_provider_usable(client) -> None:
-    try:
-        client.put(
-            "/api/settings",
-            json={"values": {"enabled_experimental_providers": ["agy"]}},
-        )
-        data = client.get("/api/providers/agy").json()
-        assert data["opted_in"] is True
-        # usable 은 이제 설치·인증 상태에만 달려 있다.
-        assert data["usable"] == data["runnable"]
-    finally:
-        client.put(
-            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-        )
-
-
-def test_optin_surfaces_a_settings_warning(client) -> None:
-    try:
-        data = client.put(
-            "/api/settings",
-            json={"values": {"enabled_experimental_providers": ["agy"]}},
-        ).json()
-        assert any("실험적 Provider" in w for w in data["warnings"])
-    finally:
-        client.put(
-            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-        )
-
-
-async def test_queued_job_blocked_when_optin_revoked_before_execution(client) -> None:
-    """이미 큐에 들어간 작업도 opt-in 이 해제되면 실행되지 않아야 한다.
-
-    작업 생성 시점의 검사만으로는 부족하다. 사용자가 생성 직후 Provider 를
-    다시 끄면, 대기 중이던 작업이 그대로 실행돼 opt-in 해제가 의미를 잃는다.
-    """
-    from app.db import session_scope
-    from app.execution.runner import RUNNER
-    from app.models import ExecutionJob
-
-    # opt-in 이 켜진 상태에서 작업이 큐에 들어갔다고 본다.
-    client.put(
-        "/api/settings", json={"values": {"enabled_experimental_providers": ["agy"]}}
-    )
-    with session_scope() as session:
-        job = ExecutionJob(
-            prompt_name="큐 대기 작업",
-            prompt_snapshot="요약하십시오.",
-            provider="agy",
-            status=JobStatus.QUEUED,
-        )
-        session.add(job)
-        session.flush()
-        job_id = job.id
-
-    # 실행 전에 사용자가 다시 껐다.
-    client.put(
-        "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-    )
-
-    await RUNNER._run_inner(job_id)
-
-    with session_scope() as session:
-        stored = session.get(ExecutionJob, job_id)
-        assert stored.status == JobStatus.FAILED
-        assert stored.error_code == ErrorCode.PROVIDER_UNAVAILABLE
-        assert any("활성화되어 있지 않" in e for e in (stored.errors or []))
-
-
 def test_default_provider_default_value_is_empty(client) -> None:
-    """기본값이 실험적 Provider 면 사용자가 위험을 확인하지 않고 실행하게 된다."""
+    """기본값이 제한된 안전성 Provider 면 위험을 확인하지 않고 실행하게 된다."""
     from app.config import DEFAULTS
 
     assert DEFAULTS["default_provider"] == ""
-    assert DEFAULTS["enabled_experimental_providers"] == []
 
 
-async def test_waiting_job_blocked_when_optin_revoked_during_semaphore_wait(
+def test_logged_out_agy_is_rejected_before_search_job_submission(
     client, monkeypatch
 ) -> None:
-    """세마포어에서 대기하던 작업도 opt-in 해제를 따라야 한다.
+    """Settings 캐시가 OK여도 fresh probe가 로그아웃이면 작업을 만들지 않는다."""
+    from app.api import jobs as jobs_api
+    from app.providers import registry
 
-    작업 시작 시점의 검사만으로는 부족하다. Provider 당 동시 실행이 1이면
-    두 번째 작업은 앞 작업이 끝날 때까지 세마포어에서 기다리는데, 그동안
-    사용자가 Provider 를 꺼도 대기가 풀리는 순간 그대로 실행돼 버린다.
-
-    여기서는 테스트가 직접 세마포어를 점유해 그 상황을 만든 뒤, 대기가
-    풀렸을 때 Provider 가 아예 호출되지 않는지 확인한다.
-    """
-    import asyncio
-
-    from app.db import session_scope
-    from app.execution import runner as runner_module
-    from app.execution.runner import RUNNER
-    from app.models import ExecutionJob
-
-    executed: list[str] = []
-
-    class SpyProvider:
-        id = "agy"
-
-        async def execute(self, request, emit):  # pragma: no cover - 호출되면 실패
-            executed.append(request.job_id)
-            raise AssertionError("차단됐어야 할 작업에서 Provider 가 호출되었습니다.")
-
-        async def cancel(self, job_id: str) -> bool:
-            return False
-
-    monkeypatch.setattr(
-        runner_module, "build_provider", lambda pid, overrides=None: SpyProvider()
+    stale = ProbeResult(
+        provider="agy",
+        display_name="agy",
+        installed=True,
+        executable_ok=True,
+        auth_state=AuthState.OK,
+        capabilities={"models": ["gemini-3.7-flash-high"]},
     )
+    logged_out = ProbeResult(
+        provider="agy",
+        display_name="agy",
+        installed=True,
+        executable_ok=True,
+        auth_state=AuthState.NOT_LOGGED_IN,
+    )
+    probe_calls: list[str] = []
+    submitted: list[str] = []
 
-    client.put(
-        "/api/settings",
+    async def fresh_probe(provider_id, overrides=None):
+        del overrides
+        probe_calls.append(provider_id)
+        return logged_out
+
+    async def forbidden_submit(job_id):
+        submitted.append(job_id)
+
+    monkeypatch.setitem(registry._cache, "agy", stale)
+    monkeypatch.setattr(jobs_api, "probe_one", fresh_probe)
+    monkeypatch.setattr(jobs_api.RUNNER, "submit", forbidden_submit)
+
+    response = client.post(
+        "/api/jobs",
         json={
-            "values": {
-                "enabled_experimental_providers": ["agy"],
-                "max_concurrency_per_provider": 1,
-            }
+            "job_kind": "similarity_search",
+            "provider": "agy",
+            "model": "gemini-3.7-flash-high",
+            "claim_text": "청구항 1. 제1 센서를 포함하는 장치.",
         },
     )
 
+    assert response.status_code == 400
+    assert "agy 로그인이 필요합니다" in response.json()["detail"]
+    assert probe_calls == ["agy"]
+    assert submitted == []
+
+
+
+
+def test_tool_uncontrollable_providers_no_longer_need_approval(client) -> None:
+    """사전 동의 관문을 걷어냈다. 설치·로그인만 끝나면 바로 쓸 수 있다.
+
+    예전에는 Settings 의 체크박스를 켜야만 usable 이 되었다. 매번 같은 화면을
+    넘기게 만들 뿐이라 없앴다. 위험 고지는 Provider 상세에 그대로 남는다.
+    """
+    for pid in ("agy", "codex"):
+        data = client.get(f"/api/providers/{pid}").json()
+        assert data["experimental"] is True, pid
+        assert data["risks"], f"{pid} 위험 고지가 비어 있습니다."
+        # 관문이 사라졌으므로 usable 은 설치·인증 상태와 같아야 한다.
+        assert data["usable"] == data["runnable"], pid
+        assert "opted_in" not in data, f"{pid} 에 폐기한 필드가 남아 있습니다."
+
+
+def test_the_execution_gate_is_gone_from_the_code() -> None:
+    """관문 함수가 남아 있으면 어딘가에서 다시 불릴 수 있다.
+
+    실제 작업을 만들어 확인하지 않는다. agy 로 작업을 만들면 진짜 CLI 가
+    돌면서 사용자 계정의 사용량을 쓴다. 여기서 지키려는 것은 '관문이
+    없다'는 사실이고, 그건 코드에서 직접 확인하는 편이 정확하다.
+    """
+    from app.providers import registry
+
+    assert not hasattr(registry, "is_allowed")
+    assert not hasattr(registry, "apply_optin")
+    # 화면 문구용 목록은 남는다. 실행을 막는 데 쓰지 않을 뿐이다.
+    assert registry.TOOL_UNCONTROLLABLE_PROVIDERS == frozenset({"agy", "codex"})
+
+
+def test_retired_optin_setting_is_rejected_and_hidden(client) -> None:
+    """폐기한 설정 키는 쓸 수도 없고 응답에도 나오지 않는다."""
+    from app.db import session_scope
+    from app.models import AppSetting
+
+    response = client.put(
+        "/api/settings",
+        json={"values": {"enabled_experimental_providers": ["agy"]}},
+    )
+    assert response.status_code == 400
+
+    # 옛 버전이 저장해 둔 행이 남아 있어도 응답에 새지 않는다. 행 자체는
+    # 지우지 않는다 — 사용자 데이터를 조용히 삭제하지 않는다.
     with session_scope() as session:
-        job = ExecutionJob(
-            prompt_name="세마포어 대기 작업",
-            prompt_snapshot="요약하십시오.",
-            provider="agy",
-            status=JobStatus.QUEUED,
+        session.add(
+            AppSetting(key="enabled_experimental_providers", value=["agy"])
         )
-        session.add(job)
-        session.flush()
-        job_id = job.id
+    values = client.get("/api/settings").json()["values"]
+    assert "enabled_experimental_providers" not in values
 
-    # 앞선 작업이 실행 중인 것처럼 세마포어를 점유한다. 러너가 쓰는 것과
-    # 같은 객체여야 하므로 동일한 limit 으로 가져온다.
-    semaphore = RUNNER._semaphore("agy", 1)
-    await semaphore.acquire()
-    try:
-        task = asyncio.create_task(RUNNER._run_inner(job_id))
-        # 세마포어 앞 검사를 통과해 대기 상태에 들어갈 시간을 준다.
-        # 이 구간의 작업은 로컬 sqlite 읽기뿐이다.
-        for _ in range(20):
-            await asyncio.sleep(0.02)
-        assert not task.done(), "작업이 세마포어에서 대기하지 않았습니다."
 
-        # 대기하는 동안 사용자가 Provider 를 껐다.
-        client.put(
-            "/api/settings", json={"values": {"enabled_experimental_providers": []}}
-        )
-    finally:
-        semaphore.release()
+def test_warning_follows_the_selected_provider_not_a_gate(client) -> None:
+    """경고는 '켜 두었는가'가 아니라 '지금 무엇으로 실행하는가'를 본다."""
+    data = client.put(
+        "/api/settings", json={"values": {"default_provider": "agy"}}
+    ).json()
+    assert any("셸·파일 도구를 끄는 수단이 없습니다" in note for note in data["warnings"])
 
-    await asyncio.wait_for(task, timeout=30)
-
-    assert executed == [], "Provider 가 호출되었습니다."
-    with session_scope() as session:
-        stored = session.get(ExecutionJob, job_id)
-        assert stored.status == JobStatus.FAILED
-        assert stored.error_code == ErrorCode.PROVIDER_UNAVAILABLE
-        # 세마포어 앞 검사가 아니라 대기 후 재확인이 걸렸는지 구분한다.
-        assert any("대기 중 비활성화" in e for e in (stored.errors or [])), stored.errors
+    data = client.put(
+        "/api/settings", json={"values": {"default_provider": "claude"}}
+    ).json()
+    assert not any("끄는 수단이 없습니다" in note for note in data["warnings"])

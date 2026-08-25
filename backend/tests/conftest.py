@@ -14,11 +14,32 @@ _TEST_PROMPT_DIR = tempfile.mkdtemp(prefix="aria-prompts-test-")
 os.environ["ARIA_DATA_DIR"] = _TEST_DATA_DIR
 os.environ["ARIA_PROMPT_DIR"] = _TEST_PROMPT_DIR
 
+import shutil  # noqa: E402
+from pathlib import Path  # noqa: E402
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import PATHS  # noqa: E402
+from app.config import PATHS, PROJECT_ROOT  # noqa: E402
 from app.db import init_engine  # noqa: E402
+from app.prompt_store import RESERVED_PROMPT_IDS  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reserved_prompts() -> list[str]:
+    """예약 프롬프트를 테스트용 prompt 폴더에 설치한다.
+
+    배포되는 파일을 그대로 복사한다. 테스트 전용 사본을 따로 만들면 실제
+    prompt/search_prompt.md 가 실행 계약(placeholder, 청구항 경계)을 깨도
+    테스트가 통과해 버린다.
+    """
+    installed: list[str] = []
+    for name in sorted(RESERVED_PROMPT_IDS):
+        source = PROJECT_ROOT / "prompt" / name
+        if source.exists():
+            shutil.copy2(source, Path(_TEST_PROMPT_DIR) / name)
+            installed.append(name)
+    return installed
 
 
 @pytest.fixture(scope="session")
@@ -40,11 +61,13 @@ def client():
     from app.execution import runner as runner_module
     from app.providers.registry import build_provider as build_production_provider
 
-    from .fake_provider import DeterministicTestProvider
+    from .fake_provider import DeterministicSearchProvider, DeterministicTestProvider
 
     def build_test_provider(provider_id: str, overrides=None):
         if provider_id == "test":
             return DeterministicTestProvider()
+        if provider_id == "test-search":
+            return DeterministicSearchProvider()
         return build_production_provider(provider_id, overrides)
 
     patcher = pytest.MonkeyPatch()

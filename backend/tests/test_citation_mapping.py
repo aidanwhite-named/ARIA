@@ -84,7 +84,16 @@ def _upload(client, *names: str) -> str:
 
 def _run(client, prompt, **extra) -> dict:
     created = client.post(
-        "/api/jobs", json={"prompt_id": prompt["id"], "provider": "test", **extra}
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            # 구성대비 분석은 청구항이 필수다. 청구항 자체를 검증하지 않는
+            # 테스트도 실행을 만들려면 한 줄은 넣어야 한다. 청구항을 다루는
+            # 테스트는 extra 로 덮어쓴다.
+            "claim_text": "청구항 1. 테스트 청구항",
+            **extra,
+        },
     )
     assert created.status_code == 201, created.text
     return wait_for_job(client, created.json()["id"])
@@ -265,12 +274,11 @@ def test_mapping_is_not_expected_when_the_prompt_does_not_declare_it(
     assert job["status"] == "SUCCEEDED"
     assert job["citation_mapping"] is None
     assert job["citation_mapping_error"] is None
-    assert job["warnings"] == []
     # 선언하지 않은 프롬프트의 출력은 손대지 않는다.
     assert "ARIA_CITATION_MAPPING" in (job["result_text"] or "")
 
 
-def test_unreadable_mapping_warns_but_keeps_the_run_successful(
+def test_unreadable_mapping_keeps_the_run_successful(
     client, capable_prompt
 ) -> None:
     job = _run(
@@ -282,7 +290,6 @@ def test_unreadable_mapping_warns_but_keeps_the_run_successful(
     assert job["status"] == "SUCCEEDED"
     assert job["citation_mapping"] is None
     assert job["citation_mapping_error"]
-    assert any("문헌 매핑을 읽지 못했습니다" in w for w in job["warnings"])
 
     # 번호 유지 후속 실행만 막는다. 보고서 전체 전달로 폴백하지 않는다.
     refused = client.post(

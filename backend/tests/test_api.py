@@ -8,7 +8,7 @@ import pytest
 
 from .conftest import wait_for_job
 from .pdf_fixture import build_pdf, build_scanned_like_pdf
-from app.config import PROMPT_DIR
+from app.config import PATHS, PROMPT_DIR
 
 
 @pytest.fixture()
@@ -17,6 +17,20 @@ def prompt(client):
         "/api/prompts",
         json={"name": "테스트 프롬프트", "body": "자료를 요약하십시오.", "output_mode": "markdown"},
     ).json()
+
+
+def citation_batch(client, filename: str = "citation.txt") -> str:
+    """분석 실행을 만들기 위한 최소 첨부.
+
+    구성대비 분석은 인용발명 문헌 없이는 시작할 수 없다. 문헌 내용을 보지 않는
+    테스트도 실행을 만들려면 한 건은 올려야 한다.
+    """
+    response = client.post(
+        "/api/uploads",
+        files=[("files", (filename, b"citation document", "text/plain"))],
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["batch_id"]
 
 
 # ---------------------------------------------------------------- prompts
@@ -64,6 +78,49 @@ def test_prompt_search(client) -> None:
     client.post("/api/prompts", json={"name": "고유검색어ABC", "body": "본문"})
     found = client.get("/api/prompts?search=고유검색어ABC").json()
     assert len(found) == 1
+
+
+def test_prompt_catalog_contains_analysis_and_search_prompts(client) -> None:
+    analysis = client.post(
+        "/api/prompts", json={"name": "분석 카탈로그 확인", "body": "분석 본문"}
+    ).json()
+    try:
+        regular_ids = {item["id"] for item in client.get("/api/prompts").json()}
+        assert "search_prompt.md" not in regular_ids
+
+        catalog = client.get("/api/prompts/catalog").json()
+        by_id = {item["id"]: item for item in catalog}
+        assert by_id[analysis["id"]]["kind"] == "analysis"
+        assert by_id[analysis["id"]]["deletable"] is True
+        assert by_id["search_prompt.md"]["kind"] == "search"
+        assert by_id["search_prompt.md"]["name"] == "검색 프롬프트"
+        assert by_id["search_prompt.md"]["deletable"] is False
+    finally:
+        client.delete(f"/api/prompts/{analysis['id']}")
+
+
+def test_search_prompt_catalog_edit_validates_execution_contract(client) -> None:
+    current = next(
+        item
+        for item in client.get("/api/prompts/catalog").json()
+        if item["id"] == "search_prompt.md"
+    )
+    unchanged = client.put(
+        "/api/prompts/reserved/search_prompt.md", json={"name": current["name"]}
+    )
+    assert unchanged.status_code == 200
+
+    invalid = client.put(
+        "/api/prompts/reserved/search_prompt.md",
+        json={"body": "청구항 placeholder와 경계가 없는 잘못된 검색 프롬프트"},
+    )
+    assert invalid.status_code == 422
+    assert "{{CLAIM_TEXT}}" in invalid.json()["detail"]
+
+    versions = client.get(
+        "/api/prompts/reserved/search_prompt.md/versions"
+    ).json()
+    assert versions[0]["name"] == "검색 프롬프트"
 
 
 def test_prompt_file_is_the_live_source(client) -> None:
@@ -176,12 +233,16 @@ def test_upload_rejects_mismatched_roles(client) -> None:
 def test_job_success_flow(client, prompt) -> None:
     job = client.post(
         "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "test"},
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
     ).json()
     final = wait_for_job(client, job["id"])
 
     assert final["status"] == "SUCCEEDED"
-    assert final["result_quality"] == "SUCCESS"
     assert final["result_text"]
     assert final["final_prompt_sha256"]
     assert final["prompt_snapshot"] == prompt["body"]
@@ -224,7 +285,15 @@ def test_claim_and_document_roles_reach_final_prompt(client, prompt) -> None:
 
 def test_job_snapshot_survives_prompt_deletion(client) -> None:
     p = client.post("/api/prompts", json={"name": "삭제될 프롬프트", "body": "원본 본문"}).json()
-    job = client.post("/api/jobs", json={"prompt_id": p["id"], "provider": "test"}).json()
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": p["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
     wait_for_job(client, job["id"])
     client.delete(f"/api/prompts/{p['id']}")
 
@@ -240,27 +309,21 @@ def test_job_snapshot_survives_prompt_deletion(client) -> None:
         ("TEST_EMPTY", "FAILED", "EMPTY_RESULT"),
         ("TEST_AUTH", "FAILED", "AUTH_REQUIRED"),
         ("TEST_RATELIMIT", "FAILED", "RATE_LIMITED"),
-        ("TEST_WARN", "SUCCEEDED", None),
     ],
 )
 def test_job_failure_paths(client, prompt, keyword, status, code) -> None:
     job = client.post(
         "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "test", "claim_text": keyword},
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": keyword,
+            "batch_id": citation_batch(client),
+        },
     ).json()
     final = wait_for_job(client, job["id"])
     assert final["status"] == status
     assert final["error_code"] == code
-
-
-def test_deterministic_warning_is_success_with_warnings(client, prompt) -> None:
-    job = client.post(
-        "/api/jobs",
-        json={"prompt_id": prompt["id"], "provider": "test", "claim_text": "TEST_WARN"},
-    ).json()
-    final = wait_for_job(client, job["id"])
-    assert final["result_quality"] == "SUCCESS_WITH_WARNINGS"
-    assert final["warnings"]
 
 
 def test_required_attachment_failure_fails_job(client, prompt) -> None:
@@ -274,6 +337,7 @@ def test_required_attachment_failure_fails_job(client, prompt) -> None:
         json={
             "prompt_id": prompt["id"],
             "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
             "batch_id": upload["batch_id"],
             "required_map": {attachment_id: True},
         },
@@ -283,7 +347,7 @@ def test_required_attachment_failure_fails_job(client, prompt) -> None:
     assert final["error_code"] == "ATTACHMENT_ERROR"
 
 
-def test_optional_attachment_failure_only_warns(client, prompt) -> None:
+def test_optional_attachment_failure_does_not_fail_job(client, prompt) -> None:
     upload = client.post(
         "/api/uploads",
         files=[
@@ -299,13 +363,14 @@ def test_optional_attachment_failure_only_warns(client, prompt) -> None:
         json={
             "prompt_id": prompt["id"],
             "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
             "batch_id": upload["batch_id"],
             "required_map": required,
         },
     ).json()
     final = wait_for_job(client, job["id"])
     assert final["status"] == "SUCCEEDED"
-    assert final["result_quality"] == "SUCCESS_WITH_WARNINGS"
+    assert final["error_code"] is None
 
 
 def test_attachment_content_reaches_final_prompt(client, prompt) -> None:
@@ -318,6 +383,7 @@ def test_attachment_content_reaches_final_prompt(client, prompt) -> None:
         json={
             "prompt_id": prompt["id"],
             "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
             "batch_id": upload["batch_id"],
         },
     ).json()
@@ -338,6 +404,7 @@ def test_input_too_large(client, prompt) -> None:
             json={
                 "prompt_id": prompt["id"],
                 "provider": "test",
+                "claim_text": "청구항 1.",
                 "batch_id": upload["batch_id"],
             },
         ).json()
@@ -345,7 +412,39 @@ def test_input_too_large(client, prompt) -> None:
         assert final["status"] == "FAILED"
         assert final["error_code"] == "INPUT_TOO_LARGE"
     finally:
-        client.put("/api/settings", json={"values": {"max_inline_chars": 300000}})
+        client.put("/api/settings", json={"values": {"max_inline_chars": 800000}})
+
+
+def test_provider_byte_budget_blocks_oversized_input(client, prompt, monkeypatch) -> None:
+    """문자수 한도는 통과해도 Provider 의 바이트 한도를 넘으면 실행 전에 막는다.
+
+    agy 처럼 큰 입력을 조용히 자르는 Provider 를 위한 방어다. 자르기 전에 실패로
+    끝내, 앞부분만 분석하고 '성공'으로 남는 낭비를 없앤다. max_inline_chars
+    (문자수)는 통과하는 크기로도 UTF-8 바이트 한도는 넘길 수 있음을 고정한다.
+    """
+    from .fake_provider import DeterministicTestProvider
+
+    # 테스트 대역에 작은 바이트 예산을 심는다. 기본 프롬프트는 이보다 작아
+    # 통과하고, 아래의 거대한 청구항만 이를 넘긴다.
+    monkeypatch.setattr(DeterministicTestProvider, "max_input_bytes", 100_000)
+
+    # 200,000 자는 max_inline_chars(기본 800,000 자) 아래라 문자 검사는 통과한다.
+    # 그러나 한글은 UTF-8 로 3 bytes 라서 ~600 KB, 100 KB 예산을 크게 넘는다.
+    huge_claim = "청구항 1. " + "가" * 200_000
+
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": huge_claim,
+            "batch_id": citation_batch(client),
+        },
+    ).json()
+    final = wait_for_job(client, job["id"])
+
+    assert final["status"] == "FAILED"
+    assert final["error_code"] == "INPUT_TOO_LARGE"
 
 
 def test_job_with_unknown_prompt_404(client) -> None:
@@ -355,6 +454,67 @@ def test_job_with_unknown_prompt_404(client) -> None:
     assert response.status_code == 404
 
 
+def test_analysis_without_documents_is_rejected(client, prompt) -> None:
+    """대비할 문헌이 없는 구성대비 분석은 실행을 만들지 않는다.
+
+    문헌 없이 시작하면 모델이 없는 자료를 찾으러 파일 도구를 부르고, 도구를 끌
+    수단이 없는 Provider 에서는 그 호출 하나로 실행이 죽는다. 살아남아도 내용은
+    "인용발명 문헌 미제공" 뿐이다. 어느 쪽이든 사용량만 쓴다.
+    """
+    before_runs = set(PATHS.runs_dir.iterdir())
+    before_history = len(client.get("/api/history").json())
+
+    response = client.post(
+        "/api/jobs",
+        json={"prompt_id": prompt["id"], "provider": "test", "claim_text": "청구항 1."},
+    )
+    assert response.status_code == 400
+    assert "인용발명 문헌" in response.json()["detail"]
+
+    # 거절된 요청은 이력에도 실행 폴더에도 흔적을 남기지 않는다.
+    assert len(client.get("/api/history").json()) == before_history
+    assert set(PATHS.runs_dir.iterdir()) == before_runs
+
+
+def test_analysis_without_claims_is_rejected(client, prompt) -> None:
+    """청구항이 빈 구성대비 분석은 실행을 만들지 않는다.
+
+    [출원발명 청구항]이 이번 실행의 분석 대상이다. 비어 있으면 대비할 기준이
+    없어 사용량만 쓰고 끝난다. 문헌 첨부가 있어도 청구항이 없으면 거절한다.
+    """
+    before_history = len(client.get("/api/history").json())
+    # 거절은 batch 를 소비하지 않으므로(청구항 검사가 앞선다) 하나를 재사용한다.
+    batch = citation_batch(client)
+
+    for empty in ("", "   ", "\n"):
+        response = client.post(
+            "/api/jobs",
+            json={
+                "prompt_id": prompt["id"],
+                "provider": "test",
+                "claim_text": empty,
+                "batch_id": batch,
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert "청구항" in response.json()["detail"]
+
+    # 아예 청구항 필드를 생략해도 마찬가지다.
+    omitted = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "batch_id": batch,
+        },
+    )
+    assert omitted.status_code == 400
+    assert "청구항" in omitted.json()["detail"]
+
+    # 거절된 요청은 이력에 흔적을 남기지 않는다.
+    assert len(client.get("/api/history").json()) == before_history
+
+
 def test_batch_cannot_be_reused(client, prompt) -> None:
     upload = client.post(
         "/api/uploads", files=[("files", ("a.txt", b"content", "text/plain"))]
@@ -362,6 +522,7 @@ def test_batch_cannot_be_reused(client, prompt) -> None:
     body = {
         "prompt_id": prompt["id"],
         "provider": "test",
+        "claim_text": "청구항 1. 테스트 청구항",
         "batch_id": upload["batch_id"],
     }
     first = client.post("/api/jobs", json=body)
@@ -370,20 +531,32 @@ def test_batch_cannot_be_reused(client, prompt) -> None:
     assert client.post("/api/jobs", json=body).status_code == 400
 
 
-def test_result_download_formats(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
+def test_result_download_endpoint_is_removed(client, prompt) -> None:
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
     wait_for_job(client, job["id"])
 
-    md = client.get(f"/api/jobs/{job['id']}/result?fmt=md")
-    assert md.status_code == 200
-    assert "attachment" in md.headers["content-disposition"]
-
-    js = client.get(f"/api/jobs/{job['id']}/result?fmt=json")
-    assert js.json()["id"] == job["id"]
+    assert client.get(f"/api/jobs/{job['id']}/result?fmt=md").status_code == 404
+    assert client.get(f"/api/jobs/{job['id']}/result?fmt=json").status_code == 404
 
 
 def test_cancel_finished_job_is_noop(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
     wait_for_job(client, job["id"])
     assert client.post(f"/api/jobs/{job['id']}/cancel").json()["cancelled"] is False
 
@@ -392,7 +565,15 @@ def test_cancel_finished_job_is_noop(client, prompt) -> None:
 
 
 def test_history_lists_and_deletes(client, prompt) -> None:
-    job = client.post("/api/jobs", json={"prompt_id": prompt["id"], "provider": "test"}).json()
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
     wait_for_job(client, job["id"])
 
     items = client.get("/api/history").json()
@@ -403,6 +584,45 @@ def test_history_lists_and_deletes(client, prompt) -> None:
 
     assert client.delete(f"/api/history/{job['id']}").status_code == 204
     assert client.get(f"/api/history/{job['id']}").status_code == 404
+
+
+def test_history_delete_all_clears_database_and_stored_files(client, prompt) -> None:
+    # 작업에 붙지 않은 업로드. 일괄 삭제가 이런 고아 행까지 지우는지 본다.
+    upload = client.post(
+        "/api/uploads", files=[("files", ("unused.txt", b"unused", "text/plain"))]
+    ).json()
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 테스트 청구항",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
+    wait_for_job(client, job["id"])
+
+    orphan_dir = PATHS.runs_dir / "orphan-record"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    (orphan_dir / "leftover.log").write_text("leftover", encoding="utf-8")
+    legacy_artifact = PATHS.artifacts_dir / "legacy-result.txt"
+    legacy_artifact.write_text("legacy", encoding="utf-8")
+
+    response = client.delete("/api/history")
+    assert response.status_code == 200
+    assert response.json()["deleted"] >= 1
+    assert client.get("/api/history").json() == []
+    assert client.get(f"/api/history/{job['id']}").status_code == 404
+    assert list(PATHS.runs_dir.iterdir()) == []
+    assert list(PATHS.artifacts_dir.iterdir()) == []
+
+    from app.db import session_scope
+    from app.models import Attachment
+
+    with session_scope() as session:
+        assert session.query(Attachment).filter(
+            Attachment.upload_batch == upload["batch_id"]
+        ).count() == 0
 
 
 # --------------------------------------------------------------- settings

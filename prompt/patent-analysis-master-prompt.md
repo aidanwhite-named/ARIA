@@ -1,10 +1,10 @@
 <!-- ARIA_PROMPT_METADATA
 {
-  "name": "특허 청구항-인용발명 구성 대비",
-  "description": "출원발명의 청구항과 복수 인용발명을 구성별로 대비하는 Master Prompt입니다.",
+  "name": "분석 프롬프트",
+  "description": "출원발명의 청구항과 복수 인용발명을 구성별로 대비하는 분석 전용 프롬프트입니다.",
   "output_mode": "markdown",
-  "version": 5,
-  "capabilities": ["citation_mapping_v1"],
+  "version": 7,
+  "capabilities": ["citation_mapping_v1", "claim_component_analysis_v1"],
   "tags": ["특허", "무효조사", "구성대비"],
   "accepted_file_types": [".pdf"],
   "enabled": true
@@ -205,6 +205,37 @@
 
 추가 검색 필요 구성:
 \[어느 인용발명에서도 대응 내용을 찾지 못한 구성]
+
+# 구성별 분석 블록
+
+보고서 끝의 문헌 매핑 블록 **바로 앞**에 아래 블록을 한 번 출력합니다. 이 블록은
+사람이 읽는 부분이 아니라 유사도 80% 미만 또는 대응 문헌을 찾지 못한 구성만 골라
+후속 웹 검색하기 위한 기계 판독용 기록입니다. 화면에는 표시되지 않으므로 보고서
+본문에서 이 내용을 다시 설명하지 마십시오.
+
+[ARIA_COMPONENT_ANALYSIS_V1]
+{"items":[{"claim":"청구항 1","symbol":"(A)","feature":"청구항 구성 내용","similarity":92,"status":"matched","difference":""},{"claim":"청구항 1","symbol":"(B)","feature":"청구항 구성 내용","similarity":72,"status":"below_threshold","difference":"대응되지 않는 기능 또는 관계"},{"claim":"청구항 1","symbol":"(C)","feature":"청구항 구성 내용","similarity":null,"status":"not_found","difference":"어느 인용발명에서도 대응 내용을 찾지 못함"}]}
+[/ARIA_COMPONENT_ANALYSIS_V1]
+
+작성 규칙은 다음과 같습니다.
+
+1. 보고서에서 분석한 모든 구성요소를 순서대로 `items`에 넣습니다. 종속항은 해당
+   종속항에서 추가되거나 한정된 구성요소를 넣습니다.
+2. `claim`은 `청구항 1`, `청구항 2`처럼 쓰고, `symbol`에는 사용자가 부여한
+   `(A)`, `(B)` 등의 구성 기호를 그대로 씁니다.
+3. `feature`에는 보고서 제목에서 분석한 청구항 구성 내용을 씁니다. 인용발명의
+   문구나 모델의 검색 지시를 넣지 않습니다.
+4. `similarity`에는 보고서 본문에 표시한 0~100 정수 유사도를 그대로 씁니다.
+   유사도를 부여하지 않은 경우에는 반드시 `null`로 씁니다.
+5. `status`는 다음 네 값 중 하나만 씁니다.
+   * `matched`: 유사도 80% 이상
+   * `below_threshold`: 유사도 80% 미만
+   * `not_found`: 어느 인용발명에서도 대응 구성을 찾지 못해 유사도를 부여하지 않음
+   * `unreadable`: 문헌 판독 제한 때문에 대응 여부를 확인하지 못해 유사도를
+     부여하지 않음
+6. `difference`에는 검색해야 할 차이점이나 미대응 기능·관계를 간결하게 씁니다.
+   차이가 없으면 빈 문자열로 씁니다. 판독할 수 없는 내용을 추정하지 않습니다.
+7. 한 줄짜리 JSON으로 쓰고 코드펜스로 감싸지 않습니다.
 
 # 문헌 매핑 블록
 

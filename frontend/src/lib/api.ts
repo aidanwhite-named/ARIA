@@ -2,9 +2,13 @@ import type {
   AppSettings,
   HistoryItem,
   Job,
+  JobKind,
   Prompt,
+  PromptCatalogItem,
   PromptVersion,
   ProviderInfo,
+  ProviderLoginSession,
+  ProviderLogoutResult,
   AttachmentRole,
   RelationType,
   UploadResponse,
@@ -53,6 +57,14 @@ export const api = {
     const suffix = query.toString();
     return request<Prompt[]>(`/api/prompts${suffix ? `?${suffix}` : ""}`);
   },
+  listPromptCatalog: (params: { search?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.search) query.set("search", params.search);
+    const suffix = query.toString();
+    return request<PromptCatalogItem[]>(
+      `/api/prompts/catalog${suffix ? `?${suffix}` : ""}`,
+    );
+  },
   getPrompt: (id: string) => request<Prompt>(`/api/prompts/${id}`),
   createPrompt: (body: Partial<Prompt>) =>
     request<Prompt>("/api/prompts", { method: "POST", body: JSON.stringify(body) }),
@@ -61,10 +73,17 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  updateReservedPrompt: (id: string, body: Partial<Prompt>) =>
+    request<PromptCatalogItem>(`/api/prompts/reserved/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
   deletePrompt: (id: string) =>
     request<void>(`/api/prompts/${id}`, { method: "DELETE" }),
   promptVersions: (id: string) =>
     request<PromptVersion[]>(`/api/prompts/${id}/versions`),
+  reservedPromptVersions: (id: string) =>
+    request<PromptVersion[]>(`/api/prompts/reserved/${id}/versions`),
   exportPrompts: () =>
     request<{ version: number; prompts: unknown[] }>("/api/prompts/export"),
   importPrompts: (prompts: unknown[], replaceExisting: boolean) =>
@@ -83,6 +102,27 @@ export const api = {
     request<Record<string, unknown>>(`/api/providers/${id}/smoke-test`, {
       method: "POST",
     }),
+  startProviderLogin: (id: string, method?: string) =>
+    request<ProviderLoginSession>(`/api/providers/${id}/login`, {
+      method: "POST",
+      body: JSON.stringify({ method: method ?? null }),
+    }),
+  providerLoginStatus: (id: string, sessionId: string) =>
+    request<ProviderLoginSession>(`/api/providers/${id}/login/${sessionId}`),
+  cancelProviderLogin: (id: string, sessionId: string) =>
+    request<ProviderLoginSession>(`/api/providers/${id}/login/${sessionId}`, {
+      method: "DELETE",
+    }),
+  logoutProvider: (id: string) =>
+    request<ProviderLogoutResult>(`/api/providers/${id}/logout`, {
+      method: "POST",
+    }),
+  providerLogoutStatus: (id: string, sessionId: string) =>
+    request<ProviderLoginSession>(`/api/providers/${id}/logout/${sessionId}`),
+  cancelProviderLogout: (id: string, sessionId: string) =>
+    request<ProviderLoginSession>(`/api/providers/${id}/logout/${sessionId}`, {
+      method: "DELETE",
+    }),
 
   upload: (items: { file: File; role: AttachmentRole }[]) => {
     const form = new FormData();
@@ -92,6 +132,7 @@ export const api = {
   },
 
   createJob: (body: {
+    job_kind?: JobKind;
     prompt_id?: string | null;
     provider?: string | null;
     model?: string | null;
@@ -101,6 +142,7 @@ export const api = {
     source_job_id?: string | null;
     relation_type?: RelationType | null;
     followup_instruction?: string;
+    search_component_ids?: string[];
   }) => request<Job>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
   getJob: (id: string) => request<Job>(`/api/jobs/${id}`),
   cancelJob: (id: string) =>
@@ -109,7 +151,8 @@ export const api = {
     }),
   finalPrompt: (id: string) =>
     fetch(`/api/jobs/${id}/final-prompt`).then((r) => r.text()),
-  rawOutput: (id: string, which: "stdout" | "stderr") =>
+  /** 실행 원문. "model" 은 검색 작업에서 모델이 쓴 산문(감사 자료)이다. */
+  rawOutput: (id: string, which: "stdout" | "stderr" | "model") =>
     fetch(`/api/jobs/${id}/raw?which=${which}`).then((r) => r.text()),
 
   history: (params: { provider?: string; status?: string } = {}) => {
@@ -120,6 +163,8 @@ export const api = {
     return request<HistoryItem[]>(`/api/history${suffix ? `?${suffix}` : ""}`);
   },
   historyItem: (id: string) => request<Job>(`/api/history/${id}`),
+  deleteAllHistory: () =>
+    request<{ deleted: number }>("/api/history", { method: "DELETE" }),
   deleteHistory: (id: string) =>
     request<void>(`/api/history/${id}`, { method: "DELETE" }),
   /** 이 실행과 그로부터 이어진 후속 실행 전부. 일괄 삭제 전 확인용. */
@@ -139,7 +184,3 @@ export const api = {
   resetRuntimeContext: () =>
     request<AppSettings>("/api/settings/runtime-context/reset", { method: "POST" }),
 };
-
-export function downloadUrl(jobId: string, fmt: "md" | "txt" | "json"): string {
-  return `/api/jobs/${jobId}/result?fmt=${fmt}`;
-}

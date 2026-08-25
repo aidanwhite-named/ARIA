@@ -39,12 +39,17 @@ async def lifespan(app: FastAPI):
     PATHS.ensure()
     PROMPT_STORE.ensure()
     init_engine()
-    yield
+    try:
+        yield
+    finally:
+        # ARIA가 종료될 때 브라우저 로그인 대기 프로세스나 agy 도우미 창을
+        # 고아 프로세스로 남기지 않는다.
+        await providers.LOGIN_MANAGER.shutdown()
 
 
 app = FastAPI(
     title="ARIA",
-    description="선택한 Master Prompt 를 선택한 AI CLI 에서 안전하게 실행하는 로컬 프로그램",
+    description="분석·검색 전용 프롬프트를 선택한 AI CLI에서 안전하게 실행하는 로컬 프로그램",
     version=__version__,
     lifespan=lifespan,
 )

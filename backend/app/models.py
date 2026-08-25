@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -41,6 +42,10 @@ class ExecutionJob(Base):
     __tablename__ = "execution_jobs"
 
     id = Column(String(36), primary_key=True, default=_uuid)
+
+    # 작업 종류. 도구 정책과 입력 형태를 결정한다. 과거 실행은 전부 PDF 구성대비
+    # 분석이므로 기본값이 그것이다. enums.JobKind 를 보라.
+    job_kind = Column(String(30), nullable=False, default="patent_analysis")
 
     # 프롬프트 스냅샷. 원본 템플릿이 수정/삭제돼도 과거 실행을 확인할 수 있어야 한다.
     prompt_id = Column(String(36), nullable=True)
@@ -77,6 +82,21 @@ class ExecutionJob(Base):
     # 이 실행이 어떤 계약으로 돌았는지 남는다.
     prompt_capabilities = Column(JSON, nullable=False, default=list)
 
+    # 구성별 유사도·미발견·판독 제한을 담은 기계 판독용 분석 결과. 사용자용
+    # Markdown 을 다시 파싱하지 않고 미대응 구성 검색을 시작하는 근거다.
+    analysis_manifest = Column(JSON, nullable=True)
+    analysis_manifest_error = Column(Text, nullable=True)
+
+    # 유사 문헌 검색의 감사 기록. 검색어, 라운드, 후보 출처, 접근 실패,
+    # 검색 프롬프트 해시가 들어간다. 분석 작업에서는 NULL 이다.
+    search_manifest = Column(JSON, nullable=True)
+    # 모델 보고 블록을 읽지 못한 사유. 화면에서 "후보 목록을 왜 못 만들었는지"
+    # 를 설명하는 데 쓴다. 관측 기록은 이 경우에도 남는다.
+    search_manifest_error = Column(Text, nullable=True)
+    # 구성대비 결과에서 시작한 검색이면 원본 실행과 선택 구성 스냅샷이 들어간다.
+    # 일반 유사문헌 검색은 NULL 이다.
+    search_focus = Column(JSON, nullable=True)
+
     provider = Column(String(30), nullable=False)
     model = Column(String(80), nullable=True)
     cli_path = Column(Text, nullable=True)
@@ -93,7 +113,6 @@ class ExecutionJob(Base):
     terminal_reason = Column(String(60), nullable=True)
     exit_code = Column(Integer, nullable=True)
 
-    warnings = Column(JSON, nullable=False, default=list)
     errors = Column(JSON, nullable=False, default=list)
     permission_denials = Column(JSON, nullable=False, default=list)
     usage = Column(JSON, nullable=True)
@@ -194,6 +213,34 @@ class ResultArtifact(Base):
     path = Column(Text, nullable=False)
     size_bytes = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class EvidenceReference(Base):
+    """작업 ↔ 증거 아티팩트 참조.
+
+    증거(특허 원문 응답)는 내용 주소 저장소에 한 벌만 있고 여러 작업이 같은
+    것을 가리킬 수 있다. 그래서 작업을 지울 때 아티팩트를 바로 지우면 안
+    되고, 아무도 참조하지 않을 때만 지운다.
+
+    참조를 두는 이유는 보존이 아니라 그 반대다. 별도 폴더에 영구 보존하면
+    사용자가 "모든 이력 삭제"를 눌러도 특허 원문이 디스크에 남는다. 삭제
+    의도가 지켜지지 않는 것이고, 개인정보·보안·저장공간 모두 문제가 된다.
+    작업이 사라지면 그 증거가 재현을 뒷받침할 대상도 없다.
+    """
+
+    __tablename__ = "evidence_references"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    job_id = Column(
+        String(36), ForeignKey("execution_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    # 아티팩트 id = 내용의 SHA-256 (hex 64자)
+    artifact_id = Column(String(64), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "artifact_id", name="uq_evidence_job_artifact"),
+    )
 
 
 class AppSetting(Base):

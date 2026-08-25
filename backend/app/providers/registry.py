@@ -3,23 +3,36 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import asdict
 
 from .agy_cli import AgyCliProvider
 from .base import ProbeResult, Provider
 from .claude_cli import ClaudeCliProvider
-from .pending import CodexCliProvider
+from .codex_cli import CodexCliProvider
 
 PROVIDER_ORDER = ["agy", "claude", "codex"]
 
-# 기술적으로 동작하지만 ARIA 의 안전 원칙(도구 없는 실행)을 충족하지
-# 못하는 Provider. 사용자가 Settings 에서 명시적으로 켜야 실행된다.
+# 도구를 끄는 수단이 없는 Provider. ARIA 는 도구 호출을 탐지해서 실패로
+# 기록할 뿐 호출 자체를 막지 못한다.
 #
-# agy 에는 도구를 끄는 플래그가 없다. ARIA 는 도구 호출을 탐지해서
-# 실패로 기록할 뿐 호출 자체를 막지 못하므로, 기본값은 '꺼짐' 이다.
-EXPERIMENTAL_PROVIDERS = frozenset({"agy"})
+# 이 목록은 실행을 막지 않는다. Settings 의 위험 고지와 경고 문구를 어디에
+# 붙일지 정하는 데만 쓴다. 각 Provider 는 probe 에서 스스로 experimental=True
+# 를 단다 — 여기는 화면 문구용 단일 출처다.
+#
+# Codex 는 설정으로 web_search 만 끄고 켤 수 있고 셸·파일 도구는 끄지 못한다.
+# 그 하나를 끌 수 있다는 이유로 등급을 올리지 않는다 — 남는 도구가 더 위험하다.
+TOOL_UNCONTROLLABLE_PROVIDERS = frozenset({"agy", "codex"})
+
+# 캐시 수명. probe 는 Provider 하나당 CLI 를 두 번(버전·인증) 띄우므로 화면을
+# 열 때마다 돌릴 수는 없다. 그렇다고 무기한 들고 있으면 사용자가 ARIA 밖에서
+# 로그아웃하거나 토큰이 만료됐을 때 화면이 계속 "로그인됨" 으로 거짓말한다.
+# 실측으로 그 사고가 났다: 터미널에서 agy /logout 을 마쳤는데도 `agy models` 가
+# 실패하는 동안 Settings 표는 "로그인됨. 사용 가능한 모델 14개" 를 계속 보여줬다.
+_CACHE_TTL_SECONDS = 60.0
 
 _cache: dict[str, ProbeResult] = {}
+_cached_at: float = 0.0
 _lock = asyncio.Lock()
 
 
@@ -47,8 +60,10 @@ def all_providers(overrides: dict[str, str] | None = None) -> list[Provider]:
 async def probe_all(
     overrides: dict[str, str] | None = None, force: bool = False
 ) -> list[ProbeResult]:
+    global _cached_at
     async with _lock:
-        if force or not _cache:
+        stale = (time.monotonic() - _cached_at) >= _CACHE_TTL_SECONDS
+        if force or not _cache or stale:
             results = await asyncio.gather(
                 *(p.probe() for p in all_providers(overrides)), return_exceptions=True
             )
@@ -68,6 +83,7 @@ async def probe_all(
             _cache.clear()
             for item in collected:
                 _cache[item.provider] = item
+            _cached_at = time.monotonic()
         return [_cache[pid] for pid in PROVIDER_ORDER if pid in _cache]
 
 
@@ -88,29 +104,9 @@ def cached(provider_id: str) -> ProbeResult | None:
 
 
 def invalidate() -> None:
+    global _cached_at
     _cache.clear()
-
-
-def apply_optin(
-    results: list[ProbeResult], enabled: list[str] | None
-) -> list[ProbeResult]:
-    """실험적 Provider 의 opt-in 여부를 probe 결과에 반영한다."""
-    allowed = set(enabled or [])
-    for item in results:
-        if item.provider in EXPERIMENTAL_PROVIDERS:
-            item.experimental = True
-            item.opted_in = item.provider in allowed
-    return results
-
-
-def is_allowed(provider_id: str, enabled: list[str] | None) -> bool:
-    """이 Provider 로 실행해도 되는가.
-
-    실험적 Provider 는 사용자가 Settings 에서 켜지 않으면 거부한다.
-    """
-    if provider_id not in EXPERIMENTAL_PROVIDERS:
-        return True
-    return provider_id in set(enabled or [])
+    _cached_at = 0.0
 
 
 def to_dict(result: ProbeResult) -> dict:
