@@ -42,6 +42,10 @@ DISCLAIMER = (
     "원문 직접 인용과 법적 판단을 보장하지 않습니다."
 )
 
+# 후보 식별 게이트와 행별 근거 게이트가 들어간 매니페스트 버전. 이보다 낮은
+# 기록은 그 검사를 통과한 적이 없으므로 화면에서 그 사실을 밝힌다.
+LEGACY_GATE_VERSION = 4
+
 def _group_titles(manifest: dict) -> dict[str, str]:
     """이 실행이 실제로 쓴 그룹 정의에서 제목을 만든다.
 
@@ -150,9 +154,9 @@ def _candidate_section(item: dict) -> list[str]:
         + " · 원문 대조 "
         + ("완료" if item["original_verified"] else "안 됨")
         + " · 문헌번호-주소 대조 "
-        + ("완료" if item.get("identity_verified") else "안 됨")
+        + ("완료" if item.get("identifier_url_matched") else "안 됨")
     )
-    if not item.get("identity_verified", True):
+    if not item.get("identifier_url_matched", True):
         lines.append(
             "- 이 후보의 문헌번호가 위 주소에서 확인되지 않아 명칭·출원인·"
             "패밀리를 표시하지 않았습니다."
@@ -393,6 +397,18 @@ def render(manifest: dict) -> str:
         f"(성공 {len(observed.get('succeeded_fetch_urls') or [])}건)",
         "",
     ]
+
+    # 식별·근거 게이트 이전에 만들어진 기록은 그 게이트를 통과한 적이 없다.
+    # 데이터를 덮어쓰지 않고 그 사실만 알린다 — 과거 기록을 고쳐 쓰면 무엇이
+    # 원본이었는지 알 수 없게 된다.
+    if int(manifest.get("version") or 0) < LEGACY_GATE_VERSION:
+        lines += [
+            "> **이 보고서는 후보 식별·행별 근거 게이트가 적용되기 전에 "
+            "생성되었습니다.** 아래 후보의 문헌번호·명칭·출원인이 같은 페이지에서 "
+            "확인되었는지, 각 대응 행이 실제 관측에 근거하는지는 검증되지 "
+            "않았습니다. 사용하기 전에 각 문헌을 직접 확인하십시오.",
+            "",
+        ]
 
     if verified == 0 and candidates:
         lines += [

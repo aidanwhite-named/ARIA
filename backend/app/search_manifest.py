@@ -313,6 +313,8 @@ def _mapping_row(
     verified: bool,
     *,
     fetched_ok: bool,
+    candidate_canonical: str,
+    succeeded_urls: set[str],
     index: int,
     row_no: int,
     notes: list[str],
@@ -337,16 +339,6 @@ def _mapping_row(
     남아 있으면 사용자는 그 산문을 읽는다.
     """
     support = _one_of(entry.get("support_source"), SUPPORT_SOURCES, SUPPORT_NONE)
-
-    # 페이지를 연 기록이 없는 후보에서 "페이지 본문을 읽었다"는 성립하지 않는다.
-    # ARIA 가 스트림에서 직접 본 사실이므로 모델 보고보다 이쪽이 우선한다.
-    if support == SUPPORT_PAGE and not fetched_ok:
-        support = SUPPORT_NONE
-        notes.append(
-            f"후보 {index} 대응표 {row_no}행: 성공한 페이지 열람 기록이 없는데 "
-            f"{SUPPORT_PAGE} 를 주장해 {SUPPORT_NONE} 으로 내렸습니다."
-        )
-
     degree = _one_of(entry.get("degree"), DEGREES, DEGREE_UNKNOWN)
     counterpart = _text(entry.get("counterpart"), 1500)
     similar = _text(entry.get("similar"), 1500)
@@ -354,6 +346,47 @@ def _mapping_row(
     support_text = _text(entry.get("support_text"))
     support_url = _text(entry.get("support_url"), 1000)
     scope = _one_of(entry.get("support_scope"), SUPPORT_SCOPES, SCOPE_UNKNOWN)
+
+    # --- page_text 주장의 최소 조건 ---------------------------------------
+    # "페이지 본문을 읽었다"는 주장은 그 자체로는 모델의 자기 보고다. ARIA 가
+    # 확인할 수 있는 것만 확인한다.
+    #
+    #   근거 텍스트가 실제로 있는가
+    #   근거 주소가 이 후보의 전용 페이지인가
+    #   그 주소로 성공한 열람을 ARIA 가 스트림에서 봤는가
+    #
+    # 세 가지를 통과해도 그 텍스트가 정말 그 페이지에 있었는지는 확인하지
+    # 못한다. 그러려면 도구 결과 본문을 보존해 대조해야 하는데, 지금 스트림
+    # 계층은 결과 본문을 버린다(claude_stream._on_user). agy 는 애초에 결과
+    # 본문을 이벤트로 내보내지 않는다. 그래서 이 검사는 상한이 아니라 하한이다.
+    if support == SUPPORT_PAGE:
+        # 근거 주소를 적지 않았으면 이 후보의 전용 페이지를 뜻하는 것으로 읽는다.
+        resolved = normalize_url(support_url) if support_url else candidate_canonical
+        if not support_text:
+            support = SUPPORT_NONE
+            notes.append(
+                f"후보 {index} 대응표 {row_no}행: 근거 텍스트 없이 "
+                f"{SUPPORT_PAGE} 를 주장해 {SUPPORT_NONE} 으로 내렸습니다."
+            )
+        elif not fetched_ok:
+            support = SUPPORT_SNIPPET
+            notes.append(
+                f"후보 {index} 대응표 {row_no}행: 이 후보의 페이지를 연 기록이 "
+                f"없어 {SUPPORT_PAGE} 를 {SUPPORT_SNIPPET} 으로 내렸습니다."
+            )
+        elif not resolved or resolved != candidate_canonical:
+            support = SUPPORT_SNIPPET
+            notes.append(
+                f"후보 {index} 대응표 {row_no}행: 근거 주소가 이 후보의 전용 "
+                f"페이지가 아니어서 {SUPPORT_PAGE} 를 {SUPPORT_SNIPPET} 으로 "
+                "내렸습니다."
+            )
+        elif resolved not in succeeded_urls:
+            support = SUPPORT_SNIPPET
+            notes.append(
+                f"후보 {index} 대응표 {row_no}행: 근거 주소로 성공한 열람 기록이 "
+                f"없어 {SUPPORT_PAGE} 를 {SUPPORT_SNIPPET} 으로 내렸습니다."
+            )
 
     if support == SUPPORT_NONE:
         if degree != DEGREE_UNKNOWN or counterpart or similar or different:
@@ -537,7 +570,7 @@ def _normalize_candidate(
     #
     # 두 단계로 나눈다.
     #   url_is_document   주소가 문헌 하나를 가리키는 전용 페이지인가
-    #   identity_verified 그 주소 안에 이 후보의 식별번호가 실제로 들어 있는가
+    #   identifier_url_matched  그 주소 안에 이 후보의 식별번호가 실제로 들어 있는가
     #
     # 전자가 아니면 후보를 그룹과 대응표에서 뺀다(격리). 후자가 아니면 후보는
     # 남기되 확인되지 않은 서지정보를 인쇄하지 않는다 — 번호는 검색 단서로
@@ -548,7 +581,13 @@ def _normalize_candidate(
     # 발명의 명칭을 붙이기) 자체가 성립하지 않으므로, 실제로 연 전용 페이지라는
     # 사실을 식별 근거로 쓴다. 번호나 DOI 가 있으면 반드시 대조한다.
     has_identifier = bool(_number_variants(doc_number) or _text(doi, 300))
-    identity_verified = bool(
+    #
+    # 이름을 조심해서 붙인다. 이 값은 "이 문헌이 무엇인지 확인됐다"가 아니라
+    # "주장한 번호가 실제로 연 주소 안에 들어 있다"이다. 올바른 문헌 페이지를
+    # 열고도 모델이 엉뚱한 명칭을 쓰면 이 검사는 통과한다. 명칭·출원인까지
+    # 확인하려면 페이지 관측 결과의 서지정보와 대조해야 하는데, 그러려면 도구
+    # 결과 본문이 필요하다(위 _mapping_row 주석 참조).
+    identifier_url_matched = bool(
         fetched_ok
         and url_is_document
         and (identity_in_url(doc_number, doi, url) if has_identifier else True)
@@ -567,7 +606,7 @@ def _normalize_candidate(
             "제외하고 미확인 검색 단서로 격리했습니다."
         )
 
-    if not identity_verified and (title or applicant or family):
+    if not identifier_url_matched and (title or applicant or family):
         notes.append(
             f"후보 {index}: 문헌번호와 페이지가 같은 문헌임을 확인하지 못해 "
             "명칭·출원인·패밀리를 출력에서 제외했습니다."
@@ -583,6 +622,8 @@ def _normalize_candidate(
                 row,
                 original_verified,
                 fetched_ok=fetched_ok,
+                candidate_canonical=canonical,
+                succeeded_urls=succeeded_urls,
                 index=index,
                 row_no=row_no,
                 notes=notes,
@@ -603,16 +644,26 @@ def _normalize_candidate(
         mapping = []
         note = ""
 
-    # A/B/C 진입 하한. 페이지 관측에 근거한 행이 하나도 없으면 이 후보는 유사도
-    # 그룹에 들어갈 자격이 없다. 원문 대조(raw_verified)를 요구하지는 않는다 —
-    # web 채널에서는 그 값이 나올 수 없어서 모든 후보가 빠져 버린다.
+    # A/B/C 진입 하한. 원문 대조(raw_verified)는 요구하지 않는다 — web 채널에서는
+    # 그 값이 나올 수 없어서 모든 후보가 빠져 버린다. 대신 두 가지를 요구한다.
+    #
+    #   identifier_url_matched  주장한 번호가 실제로 연 주소 안에 있다
+    #   page_supported_rows     그 페이지 관측에 근거한 대응 행이 하나 이상 있다
+    #
+    # 앞의 것을 빼면, 번호는 A 라고 적고 B 의 페이지를 연 후보가 그룹에 들어간다.
+    # 그 후보의 대응 행은 주장한 문헌이 아닌 다른 문헌에서 온 것이다. 서지정보만
+    # 지우는 것으로는 부족하다 — 대응 관계 자체가 다른 문헌의 것이기 때문이다.
     page_supported_rows = sum(1 for row in mapping if row["page_supported"])
-    group_eligible = bool(not quarantined and page_supported_rows)
+    group_eligible = bool(
+        not quarantined and identifier_url_matched and page_supported_rows
+    )
     if not quarantined and not group_eligible:
-        notes.append(
-            f"후보 {index}: 페이지 관측에 근거한 대응표 행이 없어 그룹 분류에서 "
-            "제외했습니다."
+        reason = (
+            "문헌번호가 실제로 연 주소에서 확인되지 않았습니다"
+            if not identifier_url_matched
+            else "페이지 관측에 근거한 대응표 행이 없습니다"
         )
+        notes.append(f"후보 {index}: {reason}. 그룹 분류에서 제외했습니다.")
 
     if mapping and not original_verified:
         discarded = sum(
@@ -647,7 +698,9 @@ def _normalize_candidate(
         "page_fetch_succeeded": fetched_ok,
         # 후보 식별 게이트의 결과. 모두 ARIA 가 계산한다.
         "url_is_document": url_is_document,
-        "identity_verified": identity_verified,
+        # "이 문헌이 무엇인지 확인됨"이 아니다. 주장한 번호가 실제로 연 주소
+        # 안에 들어 있다는 것뿐이다.
+        "identifier_url_matched": identifier_url_matched,
         "quarantined": quarantined,
         "quarantine_reason": quarantine_reason,
         "group_eligible": group_eligible,
@@ -850,7 +903,7 @@ def _evidence_score(candidate: dict) -> tuple[int, int, int, int, int]:
     """
     return (
         int(not candidate.get("quarantined", False)),
-        int(bool(candidate.get("identity_verified"))),
+        int(bool(candidate.get("identifier_url_matched"))),
         int(bool(candidate.get("original_verified"))),
         int(bool(candidate.get("page_fetch_succeeded"))),
         len(candidate.get("mapping") or []),

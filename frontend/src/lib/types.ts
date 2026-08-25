@@ -111,7 +111,7 @@ export interface SearchCandidate {
    *  옛 매니페스트에는 없다. 없으면 격리 이전의 기록이므로 그대로 그룹에 둔다.
    */
   url_is_document?: boolean;
-  identity_verified?: boolean;
+  identifier_url_matched?: boolean;
   quarantined?: boolean;
   quarantine_reason?: string;
   group_eligible?: boolean;

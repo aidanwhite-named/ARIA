@@ -172,7 +172,7 @@ def test_number_that_does_not_appear_in_the_url_loses_bibliographic_fields() -> 
         _observed(),
     )
     candidate = reported["candidates"][0]
-    assert candidate["identity_verified"] is False
+    assert candidate["identifier_url_matched"] is False
     # 페이지는 실제로 열렸으므로 격리 대상은 아니다.
     assert candidate["quarantined"] is False
     assert candidate["doc_number"] == "KR1020229999999A"
@@ -275,7 +275,7 @@ def test_page_supported_row_makes_the_candidate_group_eligible() -> None:
     candidate = reported["candidates"][0]
     assert candidate["group_eligible"] is True
     assert candidate["page_supported_rows"] == 1
-    assert candidate["identity_verified"] is True
+    assert candidate["identifier_url_matched"] is True
     # 게이트가 아무것도 강등하지 않았다. (라운드 미보고 같은 다른 메모는 무관하다)
     assert not [
         note
@@ -363,7 +363,7 @@ def test_paper_without_an_identifier_keeps_its_title_when_the_page_was_opened() 
         _observed(),
     )
     candidate = reported["candidates"][0]
-    assert candidate["identity_verified"] is True
+    assert candidate["identifier_url_matched"] is True
     assert candidate["title"] == "어떤 논문"
 
 
@@ -384,5 +384,120 @@ def test_paper_with_a_doi_still_requires_the_doi_to_match_the_url() -> None:
         _observed(),
     )
     candidate = reported["candidates"][0]
-    assert candidate["identity_verified"] is False
+    assert candidate["identifier_url_matched"] is False
     assert candidate["title"] == ""
+
+
+# ------------------------------------------------- 우회 사례 (2차 검토에서 발견)
+#
+# 1차 게이트를 넣은 뒤에도 세 가지가 그룹 진입에 성공했다. 모두 "ARIA 가 확인할
+# 수 있는데 확인하지 않은" 항목이다.
+
+
+def test_number_mismatch_blocks_group_entry_not_just_bibliography() -> None:
+    """번호가 URL 과 대조되지 않으면 그룹에도 들어갈 수 없다.
+
+    서지정보만 지우는 것으로는 부족하다. 번호는 A 라고 적고 B 의 페이지를 연
+    후보의 대응 행은 주장한 문헌이 아니라 다른 문헌에서 온 것이다.
+    """
+    reported, notes = search_manifest.parse(
+        _block({"candidates": [_candidate(doc_number="KR9999999999A")]}),
+        _observed(),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["identifier_url_matched"] is False
+    assert candidate["group_eligible"] is False
+    assert any("실제로 연 주소에서 확인되지 않았습니다" in note for note in notes)
+
+
+def test_page_text_without_support_text_is_not_page_supported() -> None:
+    """근거 텍스트 없이 page_text 만 적는 것으로 그룹에 들어갈 수 없다."""
+    reported, notes = search_manifest.parse(
+        _block(
+            {
+                "candidates": [
+                    _candidate(
+                        mapping=[
+                            {
+                                "feature": "f",
+                                "counterpart": "c",
+                                "degree": "강한 대응",
+                                "support_source": "page_text",
+                                "support_text": "",
+                                "support_url": CANDIDATE_URL,
+                            }
+                        ]
+                    )
+                ]
+            }
+        ),
+        _observed(),
+    )
+    candidate = reported["candidates"][0]
+    row = candidate["mapping"][0]
+    assert row["support_source"] == "none"
+    assert row["page_supported"] is False
+    assert row["degree"] == search_manifest.DEGREE_UNKNOWN
+    assert row["counterpart"] == ""
+    assert candidate["group_eligible"] is False
+    assert any("근거 텍스트 없이" in note for note in notes)
+
+
+def test_support_url_pointing_elsewhere_is_downgraded() -> None:
+    """근거 주소가 이 후보의 전용 페이지가 아니면 페이지 근거로 인정하지 않는다."""
+    reported, notes = search_manifest.parse(
+        _block(
+            {
+                "candidates": [
+                    _candidate(
+                        mapping=[
+                            {
+                                "feature": "f",
+                                "counterpart": "c",
+                                "degree": "강한 대응",
+                                "support_source": "page_text",
+                                "support_text": "무언가 읽은 문장",
+                                "support_url": "https://elsewhere.example.com/zzz",
+                            }
+                        ]
+                    )
+                ]
+            }
+        ),
+        _observed(),
+    )
+    candidate = reported["candidates"][0]
+    row = candidate["mapping"][0]
+    # 읽은 문장이 있다고 했으므로 서술은 남기되 페이지 근거로는 세지 않는다.
+    assert row["support_source"] == "snippet"
+    assert row["page_supported"] is False
+    assert row["counterpart"] == "c"
+    assert candidate["group_eligible"] is False
+    assert any("이 후보의 전용 페이지가 아니어서" in note for note in notes)
+
+
+def test_support_url_that_was_never_opened_is_downgraded() -> None:
+    """후보 URL 과 같아도 그 주소를 실제로 열지 않았으면 인정하지 않는다."""
+    reported, notes = search_manifest.parse(
+        _block({"candidates": [_candidate(url=CANDIDATE_URL)]}),
+        _observed(succeeded=("https://patents.example.com/patent/OTHER123456",)),
+    )
+    candidate = reported["candidates"][0]
+    # 이 후보의 페이지를 연 적이 없으므로 후보 자체가 격리된다.
+    assert candidate["quarantined"] is True
+    assert candidate["group_eligible"] is False
+
+
+def test_legacy_manifest_is_labelled_in_the_report() -> None:
+    """게이트 이전 기록은 덮어쓰지 않고 그 사실을 밝힌다."""
+    from app import search_report
+
+    legacy = {
+        "version": 3,
+        "reported": {"candidates": [], "rounds": [], "access_failures": []},
+        "observed": {},
+        "input": {},
+        "normalization_notes": [],
+    }
+    report = search_report.render(legacy)
+    assert "게이트가 적용되기 전에 생성되었습니다" in report

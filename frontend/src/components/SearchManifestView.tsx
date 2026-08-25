@@ -137,9 +137,9 @@ function CandidateRow({
         ARIA 관측: 페이지 열람{" "}
         {item.page_fetch_succeeded ? "성공" : "성공 기록 없음"} · 원문 대조{" "}
         {item.original_verified ? "완료" : "안 됨"} · 문헌번호-주소 대조{" "}
-        {item.identity_verified ? "완료" : "안 됨"}
+        {item.identifier_url_matched ? "완료" : "안 됨"}
       </div>
-      {item.identity_verified === false && (
+      {item.identifier_url_matched === false && (
         <div className="faint">
           문헌번호가 위 주소에서 확인되지 않아 명칭·출원인·패밀리를 표시하지
           않았습니다.
@@ -409,6 +409,15 @@ export default function SearchManifestView({ job }: { job: Job }) {
           {candidates.filter((c) => c.original_verified).length}건
         </span>
       </div>
+
+      {(manifest.version ?? 0) < 4 && (
+        <p className="faint">
+          <strong>이 기록은 후보 식별·행별 근거 게이트가 적용되기 전에
+          생성되었습니다.</strong> 아래 후보의 문헌번호·명칭·출원인이 같은
+          페이지에서 확인되었는지, 각 대응 행이 실제 관측에 근거하는지는 검증되지
+          않았습니다. 사용하기 전에 각 문헌을 직접 확인하십시오.
+        </p>
+      )}
 
       {grouped.length > 0 && (
         <div className="search-groups">
