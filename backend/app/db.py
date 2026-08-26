@@ -127,6 +127,13 @@ def _add_compatible_columns(engine) -> None:
                 "ALTER TABLE attachments "
                 "ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'SUPPLEMENTAL'"
             )
+        if "included" not in attachment_columns and attachment_columns:
+            # 「분석에 포함」이 없던 시절의 첨부는 전부 프롬프트에 들어갔다.
+            # 기본값 1 이 그 실행들의 기록을 그대로 유지한다.
+            connection.exec_driver_sql(
+                "ALTER TABLE attachments "
+                "ADD COLUMN included BOOLEAN NOT NULL DEFAULT 1"
+            )
         if job_columns:
             for name, ddl in (*_LINEAGE_COLUMNS, *_SEARCH_COLUMNS):
                 if name not in job_columns:

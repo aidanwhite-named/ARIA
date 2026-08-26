@@ -34,6 +34,12 @@ from app.providers.base import (
 
 _STEP_DELAY = 0.12
 
+#: 이 대역이 실제로 받은 실행 요청. preflight 가 안내한 크기와 실행에 나간
+#: 크기를 바이트까지 대조하려면 "무엇이 나갔는가"를 결과 텍스트가 아니라 원본
+#: 요청에서 읽어야 한다. 테스트 전용이며 제품 경로에는 없다. 읽는 쪽이 먼저
+#: clear() 한다.
+RECEIVED: list[ExecutionRequest] = []
+
 # 최종 프롬프트의 첨부 헤더에 ARIA 가 찍어 두는 자료 번호.
 _ALIAS_LINE = re.compile(r"^자료 번호: (ATT-\d+)$", re.MULTILINE)
 
@@ -163,6 +169,7 @@ class DeterministicTestProvider(Provider):
 
     async def execute(self, request: ExecutionRequest, emit: EmitFn) -> ExecutionOutcome:
         self._cancelled.discard(request.job_id)
+        RECEIVED.append(request)
         message = request.user_message
         outcome = ExecutionOutcome(
             cli_path="(내장)",

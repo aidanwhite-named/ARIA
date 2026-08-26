@@ -22,6 +22,7 @@ from .config import (
 from .enums import AttachmentRole, JobKind
 from .ingestion.service import IngestedFile, read_normalized
 from .prompt_assembly import AssembledPrompt, assemble, assemble_search
+from .prompt_assembly import included_attachments as prompt_assembly_included
 
 # 검색 실행의 런타임 규칙은 Provider 가 실제로 가진 도구에 맞춰야 한다.
 # 도구 이름이 다를 뿐 아니라, Codex 는 페이지를 여는 도구 자체가 없고 agy 는
@@ -34,6 +35,19 @@ SEARCH_CONTEXT_BY_POLICY = {
 
 # 분석 경로에는 레인이 없다. 하나뿐인 조립본을 담는 이름.
 LANE_SINGLE = "single"
+
+# 체크된 자료가 하나도 없을 때 세 경로가 함께 쓰는 문구. 화면 안내(preflight),
+# 작업 생성 거절(API), 실행 실패(runner)가 같은 말을 해야 한다.
+NO_INCLUDED_MATERIAL = (
+    "분석에 포함할 인용발명 문헌이 하나도 없습니다. 「분석에 포함」을 체크한 "
+    "PDF 가 최소 1건 있어야 구성대비 분석을 실행할 수 있습니다."
+)
+
+
+# 이 실행의 분석 자료를 고르는 단 하나의 계약. 정의는 prompt_assembly 에 있고
+# (조립 마지막 층에서도 같은 함수를 쓴다) 여기서는 이름만 다시 내보낸다.
+# preflight 와 runner 는 job_assembly 를 통해 부른다.
+included_attachments = prompt_assembly_included
 
 
 class SpecUnreadable(Exception):
@@ -119,7 +133,12 @@ def assemble_job(
     검색이면 청구항 단독 / 명세서 보조 두 레인을, 분석이면 하나를 돌려준다.
     InputTooLarge 와 SearchPromptError 는 그대로 올린다 — 호출부가 실행 실패로
     기록할지(runner) 화면에 안내할지(preflight) 정한다.
+
+    호출부가 이미 걸렀더라도 여기서 한 번 더 included_attachments 를 통과시킨다.
+    "제외한 자료는 프롬프트에 한 글자도 들어가지 않는다"는 불변조건을 조립
+    바로 앞에서 지키기 위해서다.
     """
+    attachments = included_attachments(attachments)
     if job_kind is not JobKind.SIMILARITY_SEARCH:
         return AssemblyResult(
             lanes={

@@ -25,6 +25,7 @@ import {
 } from "react";
 
 import { api } from "./api";
+import type { InclusionMap } from "./attachmentSelection";
 import type {
   CitationMapping,
   Job,
@@ -106,8 +107,13 @@ export interface RunSession {
   setSearchSpecFile: Dispatch<SetStateAction<File | null>>;
   searchUpload: UploadResponse | null;
   setSearchUpload: Dispatch<SetStateAction<UploadResponse | null>>;
-  required: Record<string, boolean>;
-  setRequired: Dispatch<SetStateAction<Record<string, boolean>>>;
+  /** 첨부 id → 「분석에 포함」 체크 여부.
+   *
+   *  `required`(자료를 못 읽으면 실행을 실패시킬 것인가)와 다른 축이다. 이 값은
+   *  "애초에 이 실행의 분석 자료로 쓸 것인가"이며, 화면 추정치·preflight·실제
+   *  실행이 모두 이 선택 하나를 따른다. */
+  included: InclusionMap;
+  setIncluded: Dispatch<SetStateAction<InclusionMap>>;
   stream: JobStreamState;
   /** 지금 보고 있는 축의 실행이 진행 중인가. 이 화면의 spinner·비활성화용. */
   running: boolean;
@@ -221,7 +227,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   const [upload, setUpload] = useState<UploadResponse | null>(null);
   const [searchSpecFile, setSearchSpecFile] = useState<File | null>(null);
   const [searchUpload, setSearchUpload] = useState<UploadResponse | null>(null);
-  const [required, setRequired] = useState<Record<string, boolean>>({});
+  const [included, setIncluded] = useState<InclusionMap>({});
   const storedIds = Object.values(initial?.jobIds ?? {}).filter(Boolean);
   const [restoring, setRestoring] = useState(
     storedIds.length > 0 && !hashJobParam(),
@@ -361,8 +367,8 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       setSearchSpecFile,
       searchUpload,
       setSearchUpload,
-      required,
-      setRequired,
+      included,
+      setIncluded,
       stream,
       running,
       busy,
@@ -381,7 +387,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       upload,
       searchSpecFile,
       searchUpload,
-      required,
+      included,
       stream,
       running,
       busy,

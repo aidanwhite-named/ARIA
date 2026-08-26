@@ -49,6 +49,11 @@ class IngestedFile:
     sha256: str
     required: bool
     stored_path: str
+    # 이 실행의 분석 자료로 쓸 것인가. False 면 최종 프롬프트에도, 문헌 매핑에도,
+    # 조립 manifest 에도 들어가지 않는다. `required` 와는 다른 축이다 — required
+    # 는 "넣기로 한 자료의 본문을 못 읽으면 실패시켜라"이고, 이 값은 "애초에
+    # 넣을 것인가"이다. 사용자가 준비 화면에서 체크를 풀면 여기가 False 가 된다.
+    included: bool = True
     role: str = AttachmentRole.SUPPLEMENTAL
     normalized_text_path: str | None = None
     page_count: int | None = None
@@ -68,6 +73,7 @@ class IngestedFile:
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
             "required": self.required,
+            "included": self.included,
             "role": self.role,
             "page_count": self.page_count,
             "char_count": self.char_count,
@@ -350,6 +356,7 @@ def clone_attachment(
         size_bytes=source.size_bytes,
         sha256=actual,
         required=source.required,
+        included=source.included,
         stored_path=str(dest_path),
         role=source.role,
         normalized_text_path=normalized_path,

@@ -106,6 +106,9 @@ class AttachmentAnalysis(BaseModel):
     delivery_mode: str
     read_ok: bool
     error: str | None = None
+    # 업로드 직후의 「분석에 포함」 초기값. 정상 처리된 자료만 True 이며,
+    # 화면은 이 값으로 체크박스를 seed 한다(스스로 추측하지 않는다).
+    included: bool = True
 
 
 class UploadResponse(BaseModel):
@@ -130,6 +133,19 @@ class JobCreate(BaseModel):
     claim_text: str = ""
     batch_id: str | None = None
     required_map: dict[str, bool] = Field(default_factory=dict)
+    # 이 실행의 분석 자료로 쓸 첨부 id. 준비 화면의 「분석에 포함」 체크박스가
+    # 정한다. required_map 과 다른 축이라 재사용하지 않는다 — required 는 "넣기로
+    # 한 자료를 못 읽으면 실패시켜라"이고 이쪽은 "애초에 넣을 것인가"다.
+    #
+    #   None(생략) : 각 첨부에 저장된 값을 그대로 쓴다. 새 업로드는 전부 포함이
+    #                기본이므로, 이 필드를 모르는 기존 클라이언트의 동작이 바뀌지
+    #                않는다. 물려받은 자료는 원본 실행에서 정한 포함 여부를 잇는다.
+    #   목록       : 목록에 있는 첨부만 포함한다. 나머지는 프롬프트·문헌 매핑·
+    #                조립 manifest 어디에도 들어가지 않는다.
+    #
+    # 물려받은 자료를 가리킬 때는 화면에 보이는 원본 실행의 attachment_id 를
+    # 쓴다. 복제되며 id 가 바뀌는 것은 작업 생성 쪽에서 맞춘다.
+    selected_attachment_ids: list[str] | None = None
 
     # 후속 분석. source_job_id 와 relation_type 은 항상 함께 온다.
     # batch_id 와 같이 보내면 물려받은 첨부에 새 업로드가 더해진다.
@@ -166,6 +182,8 @@ class JobAttachmentOut(BaseModel):
     size_bytes: int
     sha256: str
     required: bool
+    # 이 실행의 분석 자료였는가. False 면 프롬프트에 들어가지 않았다.
+    included: bool = True
     role: str = AttachmentRole.SUPPLEMENTAL
     page_count: int | None = None
     char_count: int

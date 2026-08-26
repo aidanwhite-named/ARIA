@@ -6,6 +6,12 @@ import ResultView from "../components/ResultView";
 import SearchManifestView from "../components/SearchManifestView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
+import {
+  estimateTotalChars,
+  hasAnalysisMaterial,
+  seedInclusion,
+  selectedAttachmentIds,
+} from "../lib/attachmentSelection";
 import { useRunSession } from "../lib/runSession";
 import type {
   AttachmentAnalysis,
@@ -19,6 +25,11 @@ import type {
 } from "../lib/types";
 
 const PROVIDER_IDS = new Set(["agy", "claude", "codex"]);
+
+/** 백엔드 job_assembly.NO_INCLUDED_MATERIAL 과 같은 문구. 화면이 먼저 막을
+ *  때와 서버가 거절할 때가 같은 말을 해야 한다. */
+const NO_INCLUDED_MATERIAL =
+  "분석에 포함할 인용발명 문헌이 하나도 없습니다. 「분석에 포함」을 체크한 PDF 가 최소 1건 있어야 구성대비 분석을 실행할 수 있습니다.";
 
 const JOB_KIND_LABEL: Record<JobKind, string> = {
   patent_analysis: "특허 구성대비 분석",
@@ -214,8 +225,8 @@ export default function RunPage() {
     setSearchSpecFile,
     searchUpload,
     setSearchUpload,
-    required,
-    setRequired,
+    included,
+    setIncluded,
     stream,
     running,
     busy,
@@ -270,7 +281,7 @@ export default function RunPage() {
           setClaimText(storedJob.claim_text);
         }
         setUpload(null);
-        setRequired({});
+        setIncluded({});
         setCitationFiles([]);
         setSearchSpecFile(null);
         setSearchUpload(null);
@@ -308,28 +319,23 @@ export default function RunPage() {
     [job],
   );
 
-  const totalChars = useMemo(() => {
-    const newAttachmentChars =
-      upload?.files.reduce(
-        (sum, f) => sum + (f.read_ok ? f.char_count + 200 : 0),
-        0,
-      ) ?? 0;
-    // 물려받는 첨부도 자식 실행의 프롬프트에 그대로 다시 들어간다.
-    const inheritedChars =
-      lineage?.inheritedAttachments.reduce(
-        (sum, f) => sum + (f.read_ok ? f.char_count + 200 : 0),
-        0,
-      ) ?? 0;
-    return (
-      newAttachmentChars +
-      inheritedChars +
-      claimText.length +
-      followupInstruction.length +
-      (lineage?.priorClaimChars ?? 0) +
-      (lineage?.priorReportChars ?? 0) +
-      (selectedPrompt?.body.length ?? 0)
-    );
-  }, [upload, lineage, claimText, followupInstruction, selectedPrompt]);
+  // 체크된 자료만 센다. preflight 응답이 오기 전까지 쓰는 추정치이며, 계산은
+  // attachmentSelection 이 한다 — preflight 에 보내는 목록과 같은 선택에서
+  // 나와야 체크를 바꾼 직후에도 두 숫자가 같은 방향으로 움직인다.
+  const totalChars = useMemo(
+    () =>
+      estimateTotalChars({
+        uploadedFiles: upload?.files ?? null,
+        inclusion: included,
+        inheritedAttachments: lineage?.inheritedAttachments ?? [],
+        claimText,
+        followupInstruction,
+        priorClaimChars: lineage?.priorClaimChars ?? 0,
+        priorReportChars: lineage?.priorReportChars ?? 0,
+        promptBodyChars: selectedPrompt?.body.length ?? 0,
+      }),
+    [upload, included, lineage, claimText, followupInstruction, selectedPrompt],
+  );
 
   // 업로드를 마쳤으면 서버가 그 응답에 실어 준 값이 가장 최신이다. 아직
   // 안 올렸으면 화면을 열 때 읽어 둔 설정값을 쓴다. 둘 다 null 이 "제한 없음"
@@ -343,6 +349,19 @@ export default function RunPage() {
     ? (searchUpload?.batch_id ?? null)
     : (upload?.batch_id ?? null);
   const activeClaim = searching ? searchClaimText : claimText;
+  // 검색은 명세서 한 건만 받고 「분석에 포함」 개념이 없다. null 을 보내면
+  // 서버가 저장된 포함 여부를 그대로 쓴다.
+  const activeSelection = searching
+    ? null
+    : selectedAttachmentIds(
+        upload?.files ?? null,
+        included,
+        lineage?.inheritedAttachments ?? [],
+      );
+  // 목록 자체를 의존성으로 두면 렌더마다 새 배열이라 매번 다시 부른다.
+  // null("저장된 값을 쓰라")과 빈 배열("전부 제외")은 뜻이 다르므로 키도 달라야
+  // 한다. 둘 다 빈 문자열이면 그 사이 전환에서 다시 재지 않는다.
+  const selectionKey = activeSelection === null ? "*" : activeSelection.join(",");
   useEffect(() => {
     if (!providerId) {
       setPreflight(null);
@@ -357,6 +376,7 @@ export default function RunPage() {
           prompt_id: searching ? null : promptId || null,
           claim_text: activeClaim,
           batch_id: activeBatchId,
+          selected_attachment_ids: activeSelection,
           source_job_id: lineage?.sourceJobId ?? null,
           relation_type: lineage?.relationType ?? null,
           followup_instruction: followupInstruction,
@@ -380,6 +400,9 @@ export default function RunPage() {
     searching,
     activeClaim,
     activeBatchId,
+    // 체크를 바꾸면 곧바로 다시 잰다. 화면 추정치와 preflight 가 같은 선택을
+    // 보고 있어야 하므로 이 목록이 바뀌면 반드시 다시 물어봐야 한다.
+    selectionKey,
     lineage?.sourceJobId,
     lineage?.relationType,
     followupInstruction,
@@ -399,6 +422,11 @@ export default function RunPage() {
   const analysisAttachmentCount =
     newAnalysisAttachmentCount + inheritedAnalysisAttachmentCount;
   const hasAnalysisAttachments = analysisAttachmentCount > 0;
+  // 전처리를 마쳤으면 「분석에 포함」까지 본다. 파일을 붙였어도 전부 체크를
+  // 풀었으면 대비할 자료가 없는 실행이다.
+  const analysisMaterialReady = upload
+    ? hasAnalysisMaterial(upload.files, included, lineage?.inheritedAttachments ?? [])
+    : hasAnalysisAttachments;
 
   /** 검색에 곁들인 명세서에서 뽑아낸 본문. 실행 전에 확인해 둔 경우에만 있다. */
   const searchSpec = searchUpload?.files?.[0] ?? null;
@@ -447,11 +475,9 @@ export default function RunPage() {
     try {
       const response = await api.upload(selectedUploadItems);
       setUpload(response);
-      const map: Record<string, boolean> = {};
-      response.files.forEach((f) => {
-        map[f.attachment_id] = true;
-      });
-      setRequired(map);
+      // 정상 처리된 PDF 만 「분석에 포함」으로 체크한다. 본문을 읽지 못한
+      // 파일은 목록에 사유와 함께 남지만 분석 자료로 들어가지 않는다.
+      setIncluded(seedInclusion(response.files));
       return response;
     } catch (e) {
       throw e;
@@ -543,6 +569,10 @@ export default function RunPage() {
       );
       return;
     }
+    if (!analysisMaterialReady) {
+      setError(NO_INCLUDED_MATERIAL);
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
@@ -555,6 +585,20 @@ export default function RunPage() {
         );
         return;
       }
+      // 방금 올렸다면 setIncluded 의 결과가 이 클로저에는 아직 없다. 응답이
+      // 실어 준 초기값을 그대로 쓴다 — 화면에 곧 표시될 체크 상태와 같다.
+      const inclusion = upload ? included : seedInclusion(preparedUpload?.files ?? []);
+      const inheritedAttachments = lineage?.inheritedAttachments ?? [];
+      if (
+        !hasAnalysisMaterial(
+          preparedUpload?.files ?? null,
+          inclusion,
+          inheritedAttachments,
+        )
+      ) {
+        setError(NO_INCLUDED_MATERIAL);
+        return;
+      }
       const created = await api.createJob({
         job_kind: "patent_analysis",
         // 화면에서 고른 값을 그대로 보낸다. 생략하면 백엔드가 설정
@@ -564,7 +608,13 @@ export default function RunPage() {
         model: model || null,
         claim_text: claimText,
         batch_id: preparedUpload?.batch_id ?? null,
-        required_map: required,
+        // preflight 에 보낸 것과 같은 목록. 안내한 크기와 실제로 나가는 크기가
+        // 어긋나지 않으려면 두 요청이 같은 선택을 실어야 한다.
+        selected_attachment_ids: selectedAttachmentIds(
+          preparedUpload?.files ?? null,
+          inclusion,
+          inheritedAttachments,
+        ),
         source_job_id: lineage?.sourceJobId ?? null,
         relation_type: lineage?.relationType ?? null,
         followup_instruction: lineage ? followupInstruction : "",
@@ -575,7 +625,7 @@ export default function RunPage() {
       // "이미 다른 작업에 사용된 업로드입니다" 로 거절한다. 고른 File 자체는
       // 남겨 두므로, 청구항만 고쳐 다시 실행하면 새 batch 로 다시 올라간다.
       setUpload(null);
-      setRequired({});
+      setIncluded({});
       setActiveTab("result");
     } catch (e) {
       setError((e as Error).message);
@@ -596,13 +646,13 @@ export default function RunPage() {
   const clearCitationFiles = () => {
     setCitationFiles([]);
     setUpload(null);
-    setRequired({});
+    setIncluded({});
     if (citationFileInput.current) citationFileInput.current.value = "";
   };
 
   const clearSelectedFiles = () => {
     setUpload(null);
-    setRequired({});
+    setIncluded({});
     setCitationFiles([]);
     if (citationFileInput.current) citationFileInput.current.value = "";
   };
@@ -637,7 +687,9 @@ export default function RunPage() {
       sourceJobId: job.id,
       sourceLabel: jobLabel(job),
       relationType,
-      inheritedAttachments: job.attachments,
+      // 원본에서 「분석에 포함」을 풀었던 자료는 물려받지 않는다. 그 실행의
+      // 분석 자료가 아니었으므로, 후속 실행에서 조용히 되살아나면 안 된다.
+      inheritedAttachments: job.attachments.filter((a) => a.included),
       priorMapping: carriesClaims ? job.citation_mapping : null,
       priorClaimChars: carriesClaims ? job.claim_text.length : 0,
       priorReportChars:
@@ -998,7 +1050,7 @@ export default function RunPage() {
               onChange={(e) => {
                 setCitationFiles(Array.from(e.target.files ?? []));
                 setUpload(null);
-                setRequired({});
+                setIncluded({});
               }}
               disabled={running || uploading}
             />
@@ -1128,16 +1180,16 @@ export default function RunPage() {
                   <label className="checkbox">
                     <input
                       type="checkbox"
-                      checked={required[file.attachment_id] ?? false}
+                      checked={included[file.attachment_id] ?? false}
                       onChange={(e) =>
-                        setRequired((prev) => ({
+                        setIncluded((prev) => ({
                           ...prev,
                           [file.attachment_id]: e.target.checked,
                         }))
                       }
                       disabled={running}
                     />
-                    필수
+                    분석에 포함
                   </label>
                 </div>
               );
@@ -1229,6 +1281,13 @@ export default function RunPage() {
           </div>
         )}
 
+        {!searching && hasAnalysisAttachments && !analysisMaterialReady && (
+          <div className="notice danger" style={{ marginBottom: 12 }}>
+            <strong>분석에 포함한 문헌이 없습니다</strong>
+            <div style={{ marginTop: 4 }}>{NO_INCLUDED_MATERIAL}</div>
+          </div>
+        )}
+
         <div className="btn-row">
           <button
             className="btn primary"
@@ -1243,7 +1302,7 @@ export default function RunPage() {
               !selectedProvider?.usable ||
               (searching
                 ? !searchClaimText.trim() || !searchAvailable
-                : !promptId || !claimText.trim() || !hasAnalysisAttachments)
+                : !promptId || !claimText.trim() || !analysisMaterialReady)
             }
           >
             {submitting

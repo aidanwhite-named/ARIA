@@ -73,6 +73,26 @@ class AssembledPrompt:
     aliases: dict[str, AliasedAttachment] = field(default_factory=dict)
 
 
+def included_attachments(attachments: list[IngestedFile]) -> list[IngestedFile]:
+    """이 실행의 분석 자료. 화면·preflight·실행이 공유하는 단 하나의 계약.
+
+    사용자가 준비 화면에서 「분석에 포함」 체크를 푼 자료는 여기서 빠지고, 그
+    뒤로는 어디에도 나타나지 않는다 — 첨부 헤더도, 본문도, 자료 번호(별칭)도,
+    문헌 매핑도, 조립 manifest 도 포함된 자료만으로 만들어진다.
+
+    세 경로가 각자 거르면 화면이 안내한 크기와 실제로 나가는 크기가 어긋난다.
+    그래서 거르는 지점을 이 함수 하나로 못박는다. preflight 와 runner 는 첨부
+    목록을 만든 직후 job_assembly.included_attachments(같은 함수)를 통과시키고,
+    assemble 은 조립 직전에 한 번 더 부른다 — 같은 함수라 결과는 달라지지 않고,
+    새 호출부가 거르기를 잊어도 프롬프트에는 들어가지 않는다.
+
+    `required` 를 대신 쓰지 않는다. required 는 "넣기로 한 자료의 본문을 읽지
+    못하면 실행을 실패시켜라"라는 뜻이고, 그 판정은 evaluator 가 여기 남은
+    자료에 대해서만 한다.
+    """
+    return [item for item in attachments if item.included]
+
+
 def ordered_attachments(attachments: list[IngestedFile]) -> list[IngestedFile]:
     """최종 프롬프트에 나타나는 순서.
 
@@ -147,6 +167,8 @@ def assemble(
     prior_report: str = "",
     prior_citation_mapping: dict | None = None,
 ) -> AssembledPrompt:
+    # 체크를 푼 자료는 여기서 사라진다. 별칭도 manifest 도 이 목록으로만 만든다.
+    attachments = included_attachments(attachments)
     ranked = ordered_attachments(attachments)
     aliases = assign_aliases(ranked)
     alias_by_id = {item.attachment_id: item.alias for item in aliases.values()}
@@ -266,6 +288,7 @@ def assemble_search(
     ARIA 는 여기서도 업무 지시를 덧붙이지 않는다. 시스템 프롬프트는 신뢰 경계와
     증거 등급 계약이고, 무엇을 검색해서 어떻게 정리할지는 프롬프트 파일에 있다.
     """
+    attachments = included_attachments(attachments or [])
     user_message = search_prompt_body.strip() + "\n"
     system_prompt = runtime_context.strip()
 
@@ -281,7 +304,7 @@ def assemble_search(
         user_message=user_message,
         sha256=digest,
         total_chars=total,
-        manifest=[item.manifest_entry() for item in (attachments or [])],
+        manifest=[item.manifest_entry() for item in attachments],
     )
 
 
@@ -305,6 +328,6 @@ def estimate_total_chars(
     )
     if runtime_context_enabled:
         total += len(runtime_context)
-    for item in attachments:
+    for item in included_attachments(attachments):
         total += item.char_count + 200
     return total

@@ -170,6 +170,10 @@ class Attachment(Base):
     size_bytes = Column(Integer, nullable=False, default=0)
     sha256 = Column(String(64), nullable=False, default="")
     required = Column(Boolean, nullable=False, default=True)
+    # 이 실행의 분석 자료인가. 준비 화면의 「분석에 포함」 체크박스가 정한다.
+    # required 와 다른 축이다 — 아래 db.py 마이그레이션이 기존 행을 True 로
+    # 채우므로, 이 개념이 없던 시절의 실행 기록은 예전과 똑같이 전부 포함이다.
+    included = Column(Boolean, nullable=False, default=True)
     role = Column(String(30), nullable=False, default="SUPPLEMENTAL")
 
     stored_path = Column(Text, nullable=False)

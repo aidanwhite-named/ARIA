@@ -139,7 +139,13 @@ export const api = {
     model?: string | null;
     claim_text?: string;
     batch_id?: string | null;
+    /** 넣기로 한 자료를 못 읽었을 때 실행을 실패시킬지. 실행 화면은 보내지
+     *  않으며(모두 필수), 백엔드 기본값도 필수다. 「분석에 포함」과 다른 축이라
+     *  남겨 둔다. */
     required_map?: Record<string, boolean>;
+    /** 「분석에 포함」을 체크한 첨부 id. 생략하면 서버에 저장된 포함 여부를
+     *  그대로 쓴다(= 새 업로드는 전부 포함). */
+    selected_attachment_ids?: string[] | null;
     source_job_id?: string | null;
     relation_type?: RelationType | null;
     followup_instruction?: string;
@@ -153,6 +159,8 @@ export const api = {
     provider?: string | null;
     claim_text?: string;
     batch_id?: string | null;
+    /** createJob 과 같은 목록을 보내야 안내한 크기와 실제 실행이 일치한다. */
+    selected_attachment_ids?: string[] | null;
     source_job_id?: string | null;
     relation_type?: RelationType | null;
     followup_instruction?: string;

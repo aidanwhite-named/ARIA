@@ -58,6 +58,7 @@ def row_to_ingested(row: Attachment) -> IngestedFile:
         size_bytes=row.size_bytes,
         sha256=row.sha256,
         required=row.required,
+        included=row.included,
         stored_path=row.stored_path,
         role=row.role,
         normalized_text_path=row.normalized_text_path,
@@ -333,7 +334,12 @@ class JobRunner:
             prompt_version = job.prompt_version
             output_mode = job.output_mode
             work_dir = Path(job.work_dir) if job.work_dir else PATHS.run_dir(job_id)
-            attachments = [row_to_ingested(a) for a in job.attachments]
+            # 「분석에 포함」을 푼 자료는 여기서 빠진다. preflight 가 크기를
+            # 잴 때 부르는 것과 같은 함수이므로, 화면이 안내한 숫자와 실제로
+            # 나가는 숫자가 어긋나지 않는다.
+            attachments = job_assembly.included_attachments(
+                [row_to_ingested(a) for a in job.attachments]
+            )
             values = settings_service.get_all(session)
 
         limit = int(values.get("max_concurrency_per_provider", 1))
@@ -379,6 +385,17 @@ class JobRunner:
                 tool_policy = replace(
                     selected_policy, max_tool_calls=max(1, search_budget)
                 )
+
+            if job_kind is JobKind.PATENT_ANALYSIS and not attachments:
+                # 작업 생성에서 이미 막지만, 큐에서 기다리는 사이에 자료가
+                # 사라졌거나 예전 클라이언트가 만든 작업일 수 있다. 대비할
+                # 문헌이 없는 실행은 사용량만 쓰고 끝나므로 여기서도 막는다.
+                await self._fail(
+                    job_id,
+                    ErrorCode.ATTACHMENT_ERROR,
+                    job_assembly.NO_INCLUDED_MATERIAL,
+                )
+                return
 
             self._providers[job_id] = provider
             work_dir.mkdir(parents=True, exist_ok=True)

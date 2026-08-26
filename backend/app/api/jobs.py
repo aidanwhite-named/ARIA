@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -193,6 +194,10 @@ async def upload_files(
                 delivery_mode=f.delivery_mode,
                 read_ok=f.read_ok,
                 error=f.error,
+                # 「분석에 포함」 체크박스의 초기값. 정상 처리된 자료만 체크한다.
+                # 저장된 Attachment.included 는 여기서 건드리지 않는다 — 이 필드를
+                # 모르는 클라이언트가 만든 작업은 예전처럼 전부 포함으로 돈다.
+                included=f.read_ok,
             )
             for f in result.files
         ],
@@ -204,6 +209,25 @@ async def upload_files(
             settings_service.get(session, "max_inline_chars")
         ),
     )
+
+
+def _selection(payload: JobCreate) -> set[str] | None:
+    """요청이 지정한 「분석에 포함」 목록. None 이면 저장된 값을 그대로 쓴다.
+
+    None 과 빈 목록은 뜻이 다르다. None 은 "이 요청은 포함 여부에 대해 아무
+    말도 하지 않았다"(= 기존 클라이언트)이고, 빈 목록은 "하나도 포함하지
+    말라"는 명시적 선택이라 구성대비 분석에서는 거절 대상이다.
+    """
+    if payload.selected_attachment_ids is None:
+        return None
+    return set(payload.selected_attachment_ids)
+
+
+def _resolve_included(item: IngestedFile, selected: set[str] | None) -> IngestedFile:
+    """첨부 하나의 포함 여부를 이 요청 기준으로 확정한다."""
+    if selected is None:
+        return item
+    return replace(item, included=item.attachment_id in selected)
 
 
 def _job_out(job: ExecutionJob) -> JobOut:
@@ -255,6 +279,7 @@ def _job_out(job: ExecutionJob) -> JobOut:
                 "size_bytes": a.size_bytes,
                 "sha256": a.sha256,
                 "required": a.required,
+                "included": a.included,
                 "role": a.role,
                 "page_count": a.page_count,
                 "char_count": a.char_count,
@@ -285,6 +310,7 @@ def _clone_parent_attachments(
     source_job: ExecutionJob,
     job: ExecutionJob,
     work_dir: Path,
+    selected: set[str] | None = None,
 ) -> list:
     """원본 실행의 첨부를 자식 작업 폴더로 복제하고 새 행을 만든다.
 
@@ -292,13 +318,20 @@ def _clone_parent_attachments(
     남으므로, 부분 복제 상태의 폴더를 만들지 않는다.
 
     복제본 목록을 돌려준다. 문헌 매핑을 새 attachment_id 에 다시 묶어야 한다.
+
+    포함 여부는 복제 뒤에 정한다. 화면이 보낸 목록은 사용자가 보고 있던 *원본*
+    실행의 attachment_id 이므로, 복제로 id 가 바뀌기 전에 대조해야 한다. 제외한
+    자료도 파일은 복제한다 — 이 실행의 자료 목록이 원본과 같아야 나중에 체크를
+    다시 켤 수 있고, 문헌 매핑 재결합(sha256)도 원본과 같은 집합을 본다.
     """
     written: list[Path] = []
     cloned: list = []
     try:
         for row in source_job.attachments:
             new_id = str(uuid.uuid4())
-            cloned_file = clone_attachment(row_to_ingested(row), work_dir, new_id)
+            cloned_file = clone_attachment(
+                _resolve_included(row_to_ingested(row), selected), work_dir, new_id
+            )
             written.append(Path(cloned_file.stored_path))
             if cloned_file.normalized_text_path:
                 written.append(Path(cloned_file.normalized_text_path))
@@ -313,6 +346,7 @@ def _clone_parent_attachments(
                     size_bytes=cloned_file.size_bytes,
                     sha256=cloned_file.sha256,
                     required=cloned_file.required,
+                    included=cloned_file.included,
                     role=cloned_file.role,
                     stored_path=cloned_file.stored_path,
                     normalized_text_path=cloned_file.normalized_text_path,
@@ -590,6 +624,9 @@ async def _create_search_job(
     for row in spec_rows:
         row.job_id = job.id
         row.required = True
+        # 검색이 받는 첨부는 명세서 한 건뿐이고, 넣었으면 반드시 쓴다.
+        # 「분석에 포함」은 구성대비 분석 화면의 개념이라 여기서는 갈리지 않는다.
+        row.included = True
 
     session.commit()
     session.refresh(job)
@@ -689,6 +726,31 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
             "첨부하거나 이전 실행의 자료를 물려받으십시오.",
         )
 
+    # --- 「분석에 포함」에서 전부 빠진 실행은 시작하지 않는다 ---------------
+    # 위 검사는 "자료를 넣었는가"이고 이것은 "그중 분석할 것을 골랐는가"다.
+    # 포함이 하나도 없으면 프롬프트에 인용발명 문헌 절 자체가 없고, 모델은 대비할
+    # 자료가 없다는 답만 돌려주면서 사용량을 쓴다.
+    #
+    # 자료를 복제하기 전에 판정한다. 복제한 뒤에 거절하면 DB 는 롤백돼도 작업
+    # 폴더에는 사본이 남는다.
+    selected = _selection(payload)
+    batch_rows: list[Attachment] = []
+    if payload.batch_id:
+        batch_rows = (
+            session.query(Attachment)
+            .filter(Attachment.upload_batch == payload.batch_id)
+            .all()
+        )
+        # 없는 batch 는 그쪽 사유가 더 정확하다. 아래 포함 검사보다 먼저 답한다.
+        if not batch_rows:
+            raise HTTPException(400, "업로드 batch 를 찾을 수 없습니다.")
+    inherited_rows = list(source_job.attachments) if source_job is not None else []
+    if not any(
+        (row.id in selected) if selected is not None else row.included
+        for row in (*batch_rows, *inherited_rows)
+    ):
+        raise HTTPException(400, job_assembly.NO_INCLUDED_MATERIAL)
+
     work_dir = (
         PATHS.run_dir(payload.batch_id) if payload.batch_id else None
     )
@@ -731,18 +793,15 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
     # 업로드 batch 를 먼저 처리한다. 여기서 거절당할 수 있는데, 복제를 먼저 하면
     # 롤백된 작업의 파일 사본만 폴더에 남는다.
     if payload.batch_id:
-        rows = (
-            session.query(Attachment)
-            .filter(Attachment.upload_batch == payload.batch_id)
-            .all()
-        )
-        if not rows:
+        if not batch_rows:
             raise HTTPException(400, "업로드 batch 를 찾을 수 없습니다.")
-        for row in rows:
+        for row in batch_rows:
             if row.job_id is not None:
                 raise HTTPException(400, "이미 다른 작업에 사용된 업로드입니다.")
             row.job_id = job.id
             row.required = bool(payload.required_map.get(row.id, True))
+            if selected is not None:
+                row.included = row.id in selected
 
     if source_job is not None:
         # 두 실행이 같은 폴더를 쓰면 복제본이 원본의 증거 파일을 덮어쓴다.
@@ -753,7 +812,9 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
                 400, "원본 실행과 같은 작업 폴더를 쓸 수 없습니다. 자료는 복제됩니다."
             )
         try:
-            cloned = _clone_parent_attachments(session, source_job, job, work_dir)
+            cloned = _clone_parent_attachments(
+                session, source_job, job, work_dir, selected
+            )
         except AttachmentCloneError as exc:
             raise HTTPException(409, f"원본 자료를 복제하지 못했습니다: {exc}") from exc
 
@@ -816,6 +877,10 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         prompt_body = prompt.body
 
     # --- 이 실행에 들어갈 자료 -------------------------------------------
+    # 「분석에 포함」을 푼 자료는 여기서 빠진다. runner 가 실행 직전에 부르는 것과
+    # 같은 함수(job_assembly.included_attachments)를 쓰므로, 이 화면이 안내하는
+    # 글자 수·바이트가 실제로 나가는 값과 어긋나지 않는다.
+    selected = _selection(payload)
     attachments: list[IngestedFile] = []
     if payload.batch_id:
         rows = (
@@ -842,6 +907,10 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             prior_mapping = source_job.prior_citation_mapping or source_job.citation_mapping
         if relation is RelationType.CONTINUED:
             prior_report = source_job.result_text or ""
+
+    attachments = job_assembly.included_attachments(
+        [_resolve_included(item, selected) for item in attachments]
+    )
 
     # --- Provider 의 바이트 한도 ------------------------------------------
     provider = (
@@ -919,8 +988,17 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
     over_bytes = bool(byte_budget and largest > byte_budget)
 
     over_chars = max_chars is not None and chars > max_chars
+    # 대비할 자료를 하나도 고르지 않은 구성대비 분석. 크기와 무관하게 막힌다.
+    # 작업 생성이 거절하는 것과 같은 문구를 쓴다.
+    no_material = (
+        job_kind is JobKind.PATENT_ANALYSIS
+        and not attachments
+        and bool(payload.batch_id or payload.source_job_id)
+    )
     message = ""
-    if over_bytes:
+    if no_material:
+        message = job_assembly.NO_INCLUDED_MATERIAL
+    elif over_bytes:
         message = (
             f"지금 실행하면 시작하지 못합니다. 최종 프롬프트가 {largest:,} bytes 로 "
             f"{provider_id} 가 자료 전체를 손실 없이 전달할 수 있는 한도 "
@@ -945,7 +1023,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         byte_budget=byte_budget,
         over_chars=over_chars,
         over_bytes=over_bytes,
-        blocked=over_bytes or over_chars,
+        blocked=no_material or over_bytes or over_chars,
         message=message,
     )
 

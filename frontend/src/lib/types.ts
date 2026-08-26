@@ -392,6 +392,9 @@ export interface AttachmentAnalysis {
   delivery_mode: string;
   read_ok: boolean;
   error: string | null;
+  /** 「분석에 포함」의 초기 체크 상태. 업로드 응답에서는 정상 처리된 자료만
+   *  true 다. 실행 기록에서는 그 실행이 실제로 분석 자료로 썼는지를 뜻한다. */
+  included: boolean;
 }
 
 export interface UploadResponse {

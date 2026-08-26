@@ -40,6 +40,38 @@ def test_adds_claim_text_and_attachment_role_to_existing_database(tmp_path) -> N
     engine.dispose()
 
 
+def test_adds_attachment_included_defaulting_to_true(tmp_path) -> None:
+    """「분석에 포함」이 없던 시절의 첨부는 전부 포함이었다.
+
+    기본값이 0 이면 기존 실행 기록의 자료가 전부 분석 대상에서 빠진 것처럼
+    보이고, 그 DB 로 후속 분석을 시작하면 물려받을 자료가 없다고 거절당한다.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'pre-included.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE attachments ("
+            "  id VARCHAR(36) PRIMARY KEY,"
+            "  required BOOLEAN NOT NULL DEFAULT 1"
+            ")"
+        )
+        connection.exec_driver_sql("INSERT INTO attachments (id) VALUES ('file-1')")
+
+    _add_compatible_columns(engine)
+
+    inspector = inspect(engine)
+    assert "included" in {
+        column["name"] for column in inspector.get_columns("attachments")
+    }
+    with engine.connect() as connection:
+        included = connection.exec_driver_sql(
+            "SELECT included FROM attachments WHERE id = 'file-1'"
+        ).scalar_one()
+        # 컬럼을 모르는 INSERT 도 그대로 통과해야 한다.
+        connection.exec_driver_sql("INSERT INTO attachments (id) VALUES ('file-2')")
+    assert bool(included) is True
+    engine.dispose()
+
+
 def test_removes_legacy_user_input_column(tmp_path) -> None:
     """v0.1 의 user_input 은 NOT NULL 이라 남아 있으면 INSERT 가 전부 실패한다."""
     engine = create_engine(f"sqlite:///{tmp_path / 'v01.db'}")
