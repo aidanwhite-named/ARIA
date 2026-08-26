@@ -63,6 +63,46 @@ def ids_by_name(upload: dict) -> dict[str, str]:
     return {f["original_filename"]: f["attachment_id"] for f in upload["files"]}
 
 
+def upload_many(client, count: int) -> dict:
+    """인용발명 PDF `count` 건. 개수는 호출부가 정한다.
+
+    같은 파일을 다시 올려도 내용이 같으므로 sha256 이 같다 — 화면이 두 번째
+    실행을 위해 새 batch 로 다시 올리는 상황을 그대로 재현할 수 있다.
+    """
+    files = [
+        (
+            "files",
+            (
+                f"doc{i}.txt",
+                (f"문서고유표식-{i}-끝 " + "본문 " * (50 * (i + 1))).encode(),
+                "text/plain",
+            ),
+        )
+        for i in range(count)
+    ]
+    response = client.post(
+        "/api/uploads",
+        files=files,
+        data={"roles": json.dumps(["CITATION"] * count)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def ordered_ids(upload: dict) -> list[str]:
+    """`doc{i}.txt` 순서의 attachment_id. 자리 번호로 부분집합을 고르기 위한 것."""
+    by_name = ids_by_name(upload)
+    return [by_name[f"doc{i}.txt"] for i in range(len(upload["files"]))]
+
+
+def first_half(count: int) -> list[int]:
+    return list(range((count + 1) // 2))
+
+
+def last_half(count: int) -> list[int]:
+    return list(range(count - (count + 1) // 2, count))
+
+
 def attachment_manifest(job_id: str) -> list[dict]:
     """이 실행이 조립 시점에 남긴 자료 목록. API 에는 노출되지 않는다."""
     from app.db import session_scope
@@ -361,3 +401,104 @@ def test_follow_up_without_a_selection_keeps_the_parent_decision(client, prompt)
     assert "드롭문서고유표식" not in client.get(
         f"/api/jobs/{child['id']}/final-prompt"
     ).text
+
+
+# ------------------------------------------- 같은 자료로 부분집합만 바꿔 재실행
+
+
+@pytest.mark.parametrize("count", [1, 2, 5, 6])
+def test_two_runs_over_the_same_files_keep_their_own_subsets(
+    client, prompt, count
+) -> None:
+    """자료를 그대로 두고 선택만 바꿔 두 번 돌리면, 각 실행은 자기 부분집합만 본다.
+
+    PDF 개수도 고른 자리도 고정하지 않는다. 앞 절반 / 뒤 절반으로 나누므로 홀수
+    개면 두 부분집합이 겹치고, 1건이면 같은 자료를 두 번 쓰는 경우가 된다 — 어느
+    쪽이든 실행끼리 자료가 새지 않아야 한다.
+
+    두 번째 실행이 새 batch 로 올라가는 것은 업로드가 작업 하나에만 귀속되기
+    때문이다. 화면도 같은 파일을 다시 올리고 체크 상태만 이어받는다.
+    """
+    first_upload = upload_many(client, count)
+    first_ids = ordered_ids(first_upload)
+    a_positions = first_half(count)
+    created_a = create(
+        client,
+        prompt,
+        first_upload["batch_id"],
+        [first_ids[i] for i in a_positions],
+    )
+    assert created_a.status_code == 201, created_a.text
+    job_a = wait_for_job(client, created_a.json()["id"])
+    assert job_a["status"] == "SUCCEEDED", job_a["errors"]
+
+    # 결과를 보고 「분석 준비」로 돌아와 다른 부분집합을 고른 뒤 다시 실행한다.
+    second_upload = upload_many(client, count)
+    second_ids = ordered_ids(second_upload)
+    b_positions = last_half(count)
+    created_b = create(
+        client,
+        prompt,
+        second_upload["batch_id"],
+        [second_ids[i] for i in b_positions],
+    )
+    assert created_b.status_code == 201, created_b.text
+    job_b = wait_for_job(client, created_b.json()["id"])
+    assert job_b["status"] == "SUCCEEDED", job_b["errors"]
+
+    text_a = client.get(f"/api/jobs/{job_a['id']}/final-prompt").text
+    text_b = client.get(f"/api/jobs/{job_b['id']}/final-prompt").text
+    for i in range(count):
+        marker = f"문서고유표식-{i}-끝"
+        assert (marker in text_a) is (i in a_positions), (i, "A")
+        assert (marker in text_b) is (i in b_positions), (i, "B")
+        assert (f"doc{i}.txt" in text_a) is (i in a_positions), (i, "A 파일명")
+        assert (f"doc{i}.txt" in text_b) is (i in b_positions), (i, "B 파일명")
+
+    # 두 실행은 서로 다른 작업 폴더와 자료를 갖는다. 나중 실행이 앞선 실행의
+    # 기록을 덮어쓰면 첫 보고서의 근거가 사라진다.
+    assert job_a["id"] != job_b["id"]
+    assert {a["attachment_id"] for a in job_a["attachments"]}.isdisjoint(
+        {a["attachment_id"] for a in job_b["attachments"]}
+    )
+    included_a = sorted(
+        a["original_filename"] for a in job_a["attachments"] if a["included"]
+    )
+    included_b = sorted(
+        a["original_filename"] for a in job_b["attachments"] if a["included"]
+    )
+    assert included_a == sorted(f"doc{i}.txt" for i in a_positions)
+    assert included_b == sorted(f"doc{i}.txt" for i in b_positions)
+
+
+@pytest.mark.parametrize("count", [1, 3, 8])
+def test_preflight_tracks_any_subset_of_any_upload_size(client, prompt, count) -> None:
+    """부분집합을 어떻게 잡든 preflight 는 그 조합의 크기를 그대로 돌려준다.
+
+    개수·자리를 고정하지 않는다. 한 건씩 늘려 가며 재면 매번 그 자료의 본문만큼
+    늘어나야 한다 — 어떤 조합에서도 화면이 안내하는 크기가 자료 목록을 따라간다.
+    """
+    upload = upload_many(client, count)
+    ids = ordered_ids(upload)
+    chars_by_id = {
+        f["attachment_id"]: f["char_count"] for f in upload["files"]
+    }
+
+    empty = preflight(client, prompt, upload["batch_id"], [])
+    assert empty["blocked"] is True
+
+    previous = empty["chars"]
+    for position in range(count):
+        selected = ids[: position + 1]
+        measured = preflight(client, prompt, upload["batch_id"], selected)
+        assert measured["blocked"] is False
+        # 늘어난 폭은 방금 더한 자료의 본문 길이 이상이다(헤더가 더 붙는다).
+        assert measured["chars"] - previous >= chars_by_id[ids[position]]
+        previous = measured["chars"]
+
+    # 전부 고른 크기는 목록을 보내지 않은 기본 동작과 같다.
+    everything = preflight(client, prompt, upload["batch_id"], ids)
+    assert everything["chars"] == preflight(
+        client, prompt, upload["batch_id"], None
+    )["chars"]
+

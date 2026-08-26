@@ -114,6 +114,14 @@ export interface RunSession {
    *  실행이 모두 이 선택 하나를 따른다. */
   included: InclusionMap;
   setIncluded: Dispatch<SetStateAction<InclusionMap>>;
+  /** 이미 작업 하나에 귀속된 업로드 batch. 업로드는 작업 하나에만 쓸 수 있으므로,
+   *  같은 자료로 한 번 더 돌릴 때는 이 값과 비교해 새 batch 로 다시 올린다.
+   *
+   *  실행을 마쳐도 upload/included 를 지우지 않기 때문에 필요하다 — 화면에는
+   *  전처리 결과와 체크 상태가 남아 있어야 사용자가 선택만 바꿔 곧바로 다시
+   *  돌릴 수 있고, 그 남아 있는 batch 가 이미 쓴 것인지는 여기서만 알 수 있다. */
+  spentBatchId: string | null;
+  setSpentBatchId: Dispatch<SetStateAction<string | null>>;
   stream: JobStreamState;
   /** 지금 보고 있는 축의 실행이 진행 중인가. 이 화면의 spinner·비활성화용. */
   running: boolean;
@@ -228,6 +236,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   const [searchSpecFile, setSearchSpecFile] = useState<File | null>(null);
   const [searchUpload, setSearchUpload] = useState<UploadResponse | null>(null);
   const [included, setIncluded] = useState<InclusionMap>({});
+  const [spentBatchId, setSpentBatchId] = useState<string | null>(null);
   const storedIds = Object.values(initial?.jobIds ?? {}).filter(Boolean);
   const [restoring, setRestoring] = useState(
     storedIds.length > 0 && !hashJobParam(),
@@ -369,6 +378,8 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       setSearchUpload,
       included,
       setIncluded,
+      spentBatchId,
+      setSpentBatchId,
       stream,
       running,
       busy,
@@ -388,6 +399,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       searchSpecFile,
       searchUpload,
       included,
+      spentBatchId,
       stream,
       running,
       busy,

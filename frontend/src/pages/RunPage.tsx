@@ -7,9 +7,9 @@ import SearchManifestView from "../components/SearchManifestView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
 import {
+  carryInclusion,
   estimateTotalChars,
   hasAnalysisMaterial,
-  seedInclusion,
   selectedAttachmentIds,
 } from "../lib/attachmentSelection";
 import { useRunSession } from "../lib/runSession";
@@ -227,6 +227,8 @@ export default function RunPage() {
     setSearchUpload,
     included,
     setIncluded,
+    spentBatchId,
+    setSpentBatchId,
     stream,
     running,
     busy,
@@ -282,6 +284,7 @@ export default function RunPage() {
         }
         setUpload(null);
         setIncluded({});
+        setSpentBatchId(null);
         setCitationFiles([]);
         setSearchSpecFile(null);
         setSearchUpload(null);
@@ -474,17 +477,22 @@ export default function RunPage() {
     setError("");
     try {
       const response = await api.upload(selectedUploadItems);
+      const inclusion = carryInclusion(
+        upload?.files ?? [],
+        included,
+        response.files,
+      );
       setUpload(response);
-      // 정상 처리된 PDF 만 「분석에 포함」으로 체크한다. 본문을 읽지 못한
-      // 파일은 목록에 사유와 함께 남지만 분석 자료로 들어가지 않는다.
-      setIncluded(seedInclusion(response.files));
-      return response;
-    } catch (e) {
-      throw e;
+      // 처음 올렸으면 정상 처리된 PDF 만 체크한다(본문을 읽지 못한 파일은 목록에
+      // 사유와 함께 남지만 분석 자료로 들어가지 않는다). 같은 자료를 다시 올린
+      // 것이면 직전에 고른 부분집합을 그대로 이어받는다 — 두 번째 분석을 돌릴
+      // 때마다 처음부터 다시 고르게 하지 않는다.
+      setIncluded(inclusion);
+      return { response, inclusion };
     } finally {
       setUploading(false);
     }
-  }, [selectedUploadItems]);
+  }, [selectedUploadItems, upload, included]);
 
   const prepareFiles = async () => {
     try {
@@ -576,7 +584,15 @@ export default function RunPage() {
     setSubmitting(true);
     setError("");
     try {
-      const preparedUpload = upload ?? (await uploadSelectedFiles());
+      // 업로드 batch 는 작업 하나에만 귀속된다. 아직 쓰지 않은 batch 가 화면에
+      // 있으면 그대로 쓰고, 이미 한 번 실행에 쓴 batch 라면 같은 파일을 새 batch
+      // 로 다시 올린다. 체크 상태는 내용 기준으로 따라오므로 이때도 사용자가 고른
+      // 부분집합이 그대로 유지된다.
+      const reusable = upload && upload.batch_id !== spentBatchId ? upload : null;
+      const prepared = reusable
+        ? { response: reusable, inclusion: included }
+        : await uploadSelectedFiles();
+      const preparedUpload = prepared?.response ?? null;
       const preparedAttachmentCount =
         (preparedUpload?.files.length ?? 0) + inheritedAnalysisAttachmentCount;
       if (preparedAttachmentCount === 0) {
@@ -585,9 +601,9 @@ export default function RunPage() {
         );
         return;
       }
-      // 방금 올렸다면 setIncluded 의 결과가 이 클로저에는 아직 없다. 응답이
-      // 실어 준 초기값을 그대로 쓴다 — 화면에 곧 표시될 체크 상태와 같다.
-      const inclusion = upload ? included : seedInclusion(preparedUpload?.files ?? []);
+      // 방금 올렸다면 setIncluded 의 결과가 이 클로저에는 아직 없다. 업로드가
+      // 계산해 둔 값을 그대로 쓴다 — 화면에 곧 표시될 체크 상태와 같다.
+      const inclusion = prepared?.inclusion ?? {};
       const inheritedAttachments = lineage?.inheritedAttachments ?? [];
       if (
         !hasAnalysisMaterial(
@@ -621,11 +637,11 @@ export default function RunPage() {
       });
       setJob(created);
       navigate("/run", { replace: true });
-      // 이 batch 는 방금 만든 작업에 귀속됐다. 그대로 다시 보내면 백엔드가
-      // "이미 다른 작업에 사용된 업로드입니다" 로 거절한다. 고른 File 자체는
-      // 남겨 두므로, 청구항만 고쳐 다시 실행하면 새 batch 로 다시 올라간다.
-      setUpload(null);
-      setIncluded({});
+      // 전처리 결과와 체크 상태는 지우지 않는다. 결과를 보고 「분석 준비」로
+      // 돌아왔을 때 그대로 있어야, 선택만 다른 부분집합으로 바꿔 곧바로 다시
+      // 돌릴 수 있다. 다만 이 batch 는 방금 만든 작업에 귀속됐으므로 다시 보내면
+      // 백엔드가 거절한다 — 표시해 두고, 다음 실행은 새 batch 로 올린다.
+      setSpentBatchId(preparedUpload?.batch_id ?? null);
       setActiveTab("result");
     } catch (e) {
       setError((e as Error).message);
@@ -647,12 +663,14 @@ export default function RunPage() {
     setCitationFiles([]);
     setUpload(null);
     setIncluded({});
+    setSpentBatchId(null);
     if (citationFileInput.current) citationFileInput.current.value = "";
   };
 
   const clearSelectedFiles = () => {
     setUpload(null);
     setIncluded({});
+    setSpentBatchId(null);
     setCitationFiles([]);
     if (citationFileInput.current) citationFileInput.current.value = "";
   };
@@ -1051,6 +1069,7 @@ export default function RunPage() {
                 setCitationFiles(Array.from(e.target.files ?? []));
                 setUpload(null);
                 setIncluded({});
+                setSpentBatchId(null);
               }}
               disabled={running || uploading}
             />

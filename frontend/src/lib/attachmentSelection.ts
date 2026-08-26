@@ -19,22 +19,58 @@ export type InclusionMap = Record<string, boolean>;
  *  preflight 가 돌려주므로 이 값은 preflight 응답이 오기 전의 임시 표시용이다. */
 const ATTACHMENT_OVERHEAD_CHARS = 200;
 
-/** 업로드 직후의 초기 체크 상태.
- *
- *  서버가 응답에 실어 준 included 를 그대로 쓴다(= 정상 처리된 자료만 체크).
- *  화면이 read_ok 를 다시 해석하지 않는다 — 판단 지점이 둘이면 갈라진다. */
-export function seedInclusion(files: AttachmentAnalysis[]): InclusionMap {
-  const map: InclusionMap = {};
-  for (const file of files) map[file.attachment_id] = file.included;
-  return map;
-}
-
 /** 체크된 첨부만. 체크 상태가 없는 첨부는 포함하지 않는다. */
 export function includedFiles<T extends { attachment_id: string }>(
   files: T[],
   inclusion: InclusionMap,
 ): T[] {
   return files.filter((file) => inclusion[file.attachment_id] === true);
+}
+
+/** 업로드 한 건을 가리키는, 재업로드를 견디는 열쇠.
+ *
+ *  attachment_id 는 업로드마다 새로 발급되므로 체크 상태를 그대로 옮길 수 없다.
+ *  내용 해시는 같은 파일이면 언제 올려도 같다. 같은 문서를 두 번 올린 경우까지
+ *  구분하려고 같은 해시 안에서의 등장 순서를 덧붙인다. */
+function contentKeys(files: AttachmentAnalysis[]): string[] {
+  const seen = new Map<string, number>();
+  return files.map((file) => {
+    const nth = seen.get(file.sha256) ?? 0;
+    seen.set(file.sha256, nth + 1);
+    return `${file.sha256}#${nth}`;
+  });
+}
+
+/** 이전 업로드의 체크 상태를 새 업로드로 옮긴다.
+ *
+ *  batch 는 작업 하나에만 귀속되므로, 같은 PDF 로 두 번째 분석을 돌리려면 같은
+ *  파일을 새 batch 로 다시 올려야 한다. 그때 attachment_id 가 전부 바뀌는데
+ *  사용자가 고른 부분집합까지 사라지면 매번 처음부터 다시 골라야 한다.
+ *
+ *  이전 업로드에 없던 자료는 서버가 준 초기값(`included` = 정상 처리 여부)을
+ *  따른다. 첫 업로드는 이전 목록이 비어 있는 경우일 뿐이라 같은 함수로 처리된다
+ *  — 화면이 read_ok 를 다시 해석하지 않는다. 파일 개수에도 자리에도 기대지
+ *  않으므로 N 이 몇이든, 어느 부분집합을 골랐든 그대로 따라온다. */
+export function carryInclusion(
+  previousFiles: AttachmentAnalysis[],
+  previousInclusion: InclusionMap,
+  nextFiles: AttachmentAnalysis[],
+): InclusionMap {
+  const previousKeys = contentKeys(previousFiles);
+  const wasIncluded = new Map<string, boolean>();
+  previousFiles.forEach((file, index) => {
+    wasIncluded.set(
+      previousKeys[index],
+      previousInclusion[file.attachment_id] === true,
+    );
+  });
+
+  const nextKeys = contentKeys(nextFiles);
+  const map: InclusionMap = {};
+  nextFiles.forEach((file, index) => {
+    map[file.attachment_id] = wasIncluded.get(nextKeys[index]) ?? file.included;
+  });
+  return map;
 }
 
 /** 요청에 실어 보낼 첨부 id 목록.
