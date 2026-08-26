@@ -14,6 +14,23 @@
 문헌 매핑 블록은 기본적으로 첨부에 붙은 자료 번호를 그대로 되돌려준다.
   TEST_BADMAP    깨진 매핑 블록
   TEST_NOMAP     매핑 블록 없음
+
+로컬 검색(retrieval) 라운드는 시스템 프롬프트로 구분해서 action JSON 을
+돌려준다. 청구항에 아래 키워드를 넣으면 각 경로를 재현할 수 있다.
+
+  RETRIEVAL_NOEXPAND    구성마다 검색어를 하나만 쓴다 (확장 검색 미수행)
+  RETRIEVAL_BADATT      존재하지 않는 자료 번호를 요청한다
+  RETRIEVAL_BADPAGE     범위 밖 페이지를 요청한다
+  RETRIEVAL_NOFINALIZE  끝까지 finalize 하지 않는다 (라운드 예산 테스트)
+  RETRIEVAL_NOTFOUND    근거 없이 not_found 를 주장한다
+  RETRIEVAL_FAKETEXT    존재하지 않는 chunk_id 를 근거로 제시한다
+  RETRIEVAL_BADJSON     JSON 이 아닌 응답을 한 번 돌려준다
+  RETRIEVAL_TOOL        도구를 끈 실행에서 도구를 호출한다
+  RETRIEVAL_SLOW        오래 걸린다 (취소 테스트)
+  RETRIEVAL_UNSEEN      본 적 없는 chunk_id 를 추측해서 근거로 제시한다
+  RETRIEVAL_ONEDOC      첫 문헌만 검색하고 나머지는 건드리지 않는다
+  RETRIEVAL_NOCOMPONENT 구성 분해 없이 빈 finalize 를 돌려준다
+  RETRIEVAL_PARTIAL     선언한 구성 중 하나를 finalize 에서 빠뜨린다
 """
 
 from __future__ import annotations
@@ -120,6 +137,177 @@ def _component_block(message: str) -> list[str]:
     ]
 
 
+# --------------------------------------------------- 로컬 검색 라운드 대역
+
+#: 라운드 payload 앞에 붙는 표시. render_round 가 찍는다.
+_ROUND_MARKER = "[ARIA 로컬 검색 라운드]"
+
+
+def _round_payload(message: str) -> dict:
+    """라운드 메시지에서 ARIA 가 넣은 JSON 을 되읽는다."""
+    start = message.find("{", message.find(_ROUND_MARKER))
+    depth = 0
+    for index in range(start, len(message)):
+        if message[index] == "{":
+            depth += 1
+        elif message[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(message[start : index + 1])
+    raise AssertionError("라운드 payload 를 찾지 못했습니다.")
+
+
+def _claim_text(message: str) -> str:
+    head = message.find("<CLAIM_TEXT>")
+    tail = message.find("</CLAIM_TEXT>")
+    return message[head + len("<CLAIM_TEXT>") : tail] if head >= 0 < tail else ""
+
+
+#: 구성 분해. 실제 모델이 하듯 청구항을 몇 조각으로 나눈다.
+_COMPONENTS = [
+    {"label": "청구항 1 (A)", "feature": "제1 센서와 제2 센서를 포함하는 구성"},
+    {"label": "청구항 1 (B)", "feature": "두 센서의 신호를 결합하여 제어하는 구성"},
+]
+
+#: 확장 검색어. MIN_EXPANSION_TERMS 를 넘긴다.
+_QUERIES = ["센서", "결합", "제어", "sensor"]
+
+#: 실재하지만 위 검색어로는 절대 반환되지 않는 청크. 노출 게이트 테스트용이며,
+#: 테스트 fixture 의 마지막 페이지(검색어가 하나도 없는 페이지)를 가리킨다.
+UNSEEN_CHUNK_ID = "P0004-001"
+
+
+def _retrieval_response(message: str) -> str:
+    payload = _round_payload(message)
+    claim = _claim_text(message)
+    round_no = int(payload.get("round") or 1)
+
+    if "RETRIEVAL_BADJSON" in claim and round_no == 1:
+        return "여기 JSON 이 없습니다. 설명만 씁니다."
+
+    if "RETRIEVAL_NOCOMPONENT" in claim:
+        # 구성 분해 없이 빈 마무리. 서버가 받아 주면 근거 0개짜리 패키지가
+        # 최종 분석에 그대로 들어간다.
+        return json.dumps(
+            {
+                "components": [],
+                "notes": "분해 없이 끝냅니다.",
+                "actions": [{"action": "finalize_evidence", "components": []}],
+            },
+            ensure_ascii=False,
+        )
+
+    if not payload.get("components"):
+        queries = ["센서"] if "RETRIEVAL_NOEXPAND" in claim else _QUERIES
+        # 첫 문헌만 검색한다. 나머지 문헌은 검색 기록이 남지 않아야 한다.
+        target = (
+            payload["documents"][0]["attachment"]
+            if "RETRIEVAL_ONEDOC" in claim and payload.get("documents")
+            else "*"
+        )
+        actions = [
+            {
+                "action": "search_document",
+                "component_id": f"R{index:03d}",
+                "attachment": target,
+                "queries": queries,
+                "limit": 5,
+            }
+            for index in range(1, len(_COMPONENTS) + 1)
+        ]
+        if "RETRIEVAL_BADATT" in claim:
+            actions.append(
+                {
+                    "action": "get_document_status",
+                    "attachment": "ATT-99",
+                }
+            )
+        if "RETRIEVAL_BADPAGE" in claim:
+            actions.append(
+                {"action": "read_page", "attachment": "ATT-01", "page": 9999}
+            )
+        return json.dumps(
+            {"components": _COMPONENTS, "notes": "1라운드", "actions": actions},
+            ensure_ascii=False,
+        )
+
+    # 2라운드 이후: 결과에서 chunk_id 를 모아 근거로 확정한다.
+    found: dict[str, list[dict]] = {}
+    for entry in payload.get("results") or []:
+        component_id = entry.get("component_id") or ""
+        for document in entry.get("documents") or []:
+            for hit in document.get("hits") or []:
+                found.setdefault(component_id, []).append(
+                    {"attachment": hit["alias"], "chunk_id": hit["chunk_id"]}
+                )
+
+    if "RETRIEVAL_NOFINALIZE" in claim:
+        return json.dumps(
+            {
+                "notes": "계속 찾습니다.",
+                "actions": [
+                    {
+                        "action": "search_document",
+                        "component_id": "R001",
+                        "attachment": "*",
+                        "queries": [f"추가 검색 {round_no}"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    components = []
+    for index in range(1, len(_COMPONENTS) + 1):
+        component_id = f"R{index:03d}"
+        if "RETRIEVAL_PARTIAL" in claim and index == len(_COMPONENTS):
+            # 마지막 구성을 통째로 빠뜨린다. 받아 주면 그 구성은 근거도 사유도
+            # 없이 보고서에서 사라진다.
+            continue
+        hits = found.get(component_id, [])[:2]
+        if "RETRIEVAL_UNSEEN" in claim:
+            # 실재하지만 이번 실행에서 반환받은 적 없는 청크. 형식만 맞다.
+            # 마지막 페이지에는 이 실행의 검색어가 하나도 없으므로 검색
+            # 결과로 돌아온 적이 없다.
+            hits = [{"attachment": "ATT-01", "chunk_id": UNSEEN_CHUNK_ID}]
+        if "RETRIEVAL_NOTFOUND" in claim:
+            components.append(
+                {
+                    "component_id": component_id,
+                    "status_claim": "not_found",
+                    "searched_terms": _QUERIES,
+                    "evidence": [],
+                    "note": "찾지 못했습니다.",
+                }
+            )
+            continue
+        if "RETRIEVAL_FAKETEXT" in claim:
+            hits = [{"attachment": "ATT-01", "chunk_id": "P9999-999"}]
+        components.append(
+            {
+                "component_id": component_id,
+                "status_claim": "matched" if hits else "not_found",
+                "searched_terms": _QUERIES,
+                "evidence": [
+                    {
+                        "attachment": hit["attachment"],
+                        "chunk_id": hit["chunk_id"],
+                        "relevance": "테스트 관련성 메모",
+                    }
+                    for hit in hits
+                ],
+                "note": "테스트 근거",
+            }
+        )
+    return json.dumps(
+        {
+            "notes": "마무리",
+            "actions": [{"action": "finalize_evidence", "components": components}],
+        },
+        ensure_ascii=False,
+    )
+
+
 class DeterministicTestProvider(Provider):
     id = "test"
     display_name = "Deterministic test provider"
@@ -176,6 +364,11 @@ class DeterministicTestProvider(Provider):
             cli_version="0.1.0",
             cli_args=["test-provider", "--simulate"],
         )
+
+        # 로컬 검색 라운드는 최종 분석 호출과 계약이 다르다. 시스템 프롬프트로
+        # 구분한다 — 사용자 메시지에는 청구항이 들어 있어 키워드가 섞일 수 있다.
+        if _ROUND_MARKER in message:
+            return await self._retrieval_round(request, emit, outcome)
 
         await emit("provider_start", {"provider": self.id, "message": "테스트 실행기 시작"})
         if await self._sleep(request.job_id, _STEP_DELAY):
@@ -252,6 +445,35 @@ class DeterministicTestProvider(Provider):
     def _cancelled_outcome(self, outcome: ExecutionOutcome) -> ExecutionOutcome:
         outcome.cancelled = True
         outcome.terminal_reason = "cancelled"
+        return outcome
+
+    async def _retrieval_round(
+        self, request: ExecutionRequest, emit: EmitFn, outcome: ExecutionOutcome
+    ) -> ExecutionOutcome:
+        """로컬 검색 라운드 하나. action JSON 만 돌려준다."""
+        claim = _claim_text(request.user_message)
+        await emit("provider_start", {"provider": self.id, "message": "검색 라운드"})
+
+        if "RETRIEVAL_SLOW" in claim:
+            for index in range(1, 61):
+                await emit("analyzing", {"message": f"검색 중 ({index}/60)"})
+                if await self._sleep(request.job_id, 1.0):
+                    return self._cancelled_outcome(outcome)
+        elif await self._sleep(request.job_id, _STEP_DELAY):
+            return self._cancelled_outcome(outcome)
+
+        if "RETRIEVAL_TOOL" in claim:
+            # 도구를 끈 실행에서 도구를 부른 경우. ARIA 가 사후 탐지해서 실패로
+            # 처리해야 한다.
+            outcome.tool_uses.append("Bash")
+            outcome.tool_calls.append({"name": "Bash", "input": {}, "ok": True})
+
+        outcome.result_text = _retrieval_response(request.user_message)
+        outcome.exit_code = 0
+        outcome.terminal_reason = "completed"
+        outcome.raw_stdout = outcome.result_text
+        outcome.usage = {"input_tokens": 100, "output_tokens": 50}
+        await emit("provider_done", {"message": "검색 라운드 완료"})
         return outcome
 
     def _compose(self, request: ExecutionRequest) -> list[str]:

@@ -5,6 +5,7 @@ import type { JobStatus, StreamEvent } from "./types";
 const STAGE_LABEL: Record<string, string> = {
   queued: "실행 대기 중",
   preprocessing: "입력 전처리 및 프롬프트 조립",
+  indexing: "인용발명 문헌 로컬 색인 중",
   executing: "Provider 실행 중",
   verifying: "결과 검증 중",
 };
@@ -19,6 +20,9 @@ export interface JobStreamState {
   /** 검색 실행에서 관측한 도구 호출 수. 진행 표시에만 쓴다. */
   searchCount: number;
   fetchCount: number;
+  /** 로컬 검색 실행의 진행 상황. 색인·라운드·읽은 페이지는 ARIA 가 센다. */
+  retrievalRound: number;
+  retrievalPagesRead: number;
 }
 
 const EMPTY: JobStreamState = {
@@ -30,6 +34,8 @@ const EMPTY: JobStreamState = {
   errors: [],
   searchCount: 0,
   fetchCount: 0,
+  retrievalRound: 0,
+  retrievalPagesRead: 0,
 };
 
 export function useJobStream(jobId: string | null): JobStreamState {
@@ -94,6 +100,16 @@ export function useJobStream(jobId: string | null): JobStreamState {
             next.searchCount = Number(payload.searches ?? prev.searchCount);
             next.fetchCount = Number(payload.fetches ?? prev.fetchCount);
             next.stage = String(payload.message ?? "검색 중");
+            break;
+          case "retrieval_progress":
+            next.retrievalRound = Number(payload.round ?? prev.retrievalRound);
+            next.retrievalPagesRead = Number(
+              payload.pages_read ?? prev.retrievalPagesRead,
+            );
+            next.stage = String(payload.message ?? "로컬 검색 중");
+            break;
+          case "retrieval_ready":
+            next.stage = "근거 패키지 조립 완료 — 구성대비 분석 시작";
             break;
           case "tool_budget_exceeded":
             next.stage = String(payload.message ?? "검색 호출 상한 초과");

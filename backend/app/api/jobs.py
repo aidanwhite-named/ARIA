@@ -12,13 +12,20 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from .. import analysis_manifest, citation_mapping, job_assembly, settings_service
+from .. import (
+    analysis_manifest,
+    citation_mapping,
+    job_assembly,
+    retrieval,
+    settings_service,
+)
 from ..config import PATHS
 from ..db import get_db
 from ..enums import (
     AuthState,
     AttachmentRole,
     DeliveryMode,
+    DeliveryPlan,
     JobKind,
     JobStatus,
     RelationType,
@@ -257,6 +264,9 @@ def _job_out(job: ExecutionJob) -> JobOut:
         search_manifest=job.search_manifest,
         search_manifest_error=job.search_manifest_error,
         search_focus=job.search_focus,
+        delivery_plan=job.delivery_plan or DeliveryPlan.FULL_INLINE,
+        retrieval_manifest=job.retrieval_manifest,
+        retrieval_manifest_error=job.retrieval_manifest_error,
         provider=job.provider,
         model=job.model,
         cli_path=job.cli_path,
@@ -921,6 +931,10 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
     byte_budget = getattr(provider, "max_input_bytes", None)
     tool_policy = getattr(provider, "search_tool_policy", None)
     tool_policy_name = getattr(tool_policy, "name", "") or ""
+    # 예산은 runner 가 쓰는 것과 **같은 함수**로 만든다. 로컬 검색의 크기는
+    # 근거 패키지 예산이 정하므로, 두 곳이 다른 기본값을 쓰면 화면이 안내한
+    # 상한과 실행이 강제하는 상한이 어긋난다.
+    retrieval_budget = retrieval.budget_from_settings(values)
 
     # --- 실제 조립 --------------------------------------------------------
     try:
@@ -937,6 +951,12 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             prior_report=prior_report,
             prior_citation_mapping=prior_mapping,
             tool_policy_name=tool_policy_name,
+            retrieval_mode=str(values.get("retrieval_mode") or "auto"),
+            provider_byte_budget=byte_budget,
+            retrieval_auto_threshold_bytes=int(
+                values.get("retrieval_auto_threshold_bytes") or 0
+            ),
+            retrieval_budget=retrieval_budget,
         )
     except job_assembly.SpecUnreadable as exc:
         return PreflightOut(
@@ -995,17 +1015,37 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         and not attachments
         and bool(payload.batch_id or payload.source_job_id)
     )
+    retrieval_plan = assembly.delivery_plan == DeliveryPlan.LOCAL_RETRIEVAL
     message = ""
     if no_material:
         message = job_assembly.NO_INCLUDED_MATERIAL
+    elif retrieval_plan and not over_bytes and not over_chars:
+        message = (
+            f"인용발명 문헌 전체를 넣으면 {assembly.full_inline_bytes:,} bytes 라, "
+            "ARIA 가 문헌을 페이지·문단 단위로 로컬 색인한 뒤 AI 가 청구항 "
+            "구성별로 검색한 구간만 근거 패키지로 전달합니다. 위 크기는 근거 "
+            f"패키지 예산({retrieval_budget.max_evidence_chars:,}자)을 모두 "
+            "썼을 때의 최댓값이며, 실제 실행은 이보다 작습니다. 문서를 자르거나 "
+            "요약하지 않으므로 검색되지 않은 구간은 「확인하지 못한 범위」로 "
+            "보고서에 남습니다."
+        )
     elif over_bytes:
         message = (
             f"지금 실행하면 시작하지 못합니다. 최종 프롬프트가 {largest:,} bytes 로 "
             f"{provider_id} 가 자료 전체를 손실 없이 전달할 수 있는 한도 "
             f"{byte_budget:,} bytes 를 넘습니다. ARIA 는 문서를 임의로 자르거나 "
             "요약하지 않으므로 Provider 를 호출하기 전에 막습니다(토큰 소모 없음). "
-            "문헌을 나눠 여러 번 실행하거나, 입력 전송 한도가 더 큰 Provider 를 "
-            "선택하십시오."
+        ) + (
+            # 로컬 검색에서는 크기를 정하는 것이 근거 패키지 예산이다. 문헌을
+            # 나누라고 안내하면 사용자가 실제로 조절해야 할 값을 못 찾는다.
+            f"이 실행은 로컬 검색이므로 크기의 대부분은 근거 패키지 예산"
+            f"({retrieval_budget.max_evidence_chars:,}자, 한글 기준 최대 "
+            f"{retrieval_budget.max_evidence_chars * 3:,} bytes)입니다. "
+            "환경설정에서 그 값을 낮추거나, 청구항을 나눠 실행하거나, 입력 전송 "
+            "한도가 더 큰 Provider 를 선택하십시오."
+            if retrieval_plan
+            else "문헌을 나눠 여러 번 실행하거나, 입력 전송 한도가 더 큰 "
+            "Provider 를 선택하십시오."
         )
     elif over_chars:
         message = (
@@ -1024,6 +1064,11 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         over_chars=over_chars,
         over_bytes=over_bytes,
         blocked=no_material or over_bytes or over_chars,
+        delivery_plan=assembly.delivery_plan,
+        full_inline_bytes=assembly.full_inline_bytes,
+        evidence_budget_chars=(
+            retrieval_budget.max_evidence_chars if retrieval_plan else None
+        ),
         message=message,
     )
 
@@ -1093,6 +1138,46 @@ def get_final_prompt(job_id: str, session: Session = Depends(get_db)) -> PlainTe
     if not path.exists():
         raise HTTPException(404, "최종 프롬프트 파일이 삭제되었습니다.")
     return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/plain")
+
+
+_RETRIEVAL_ARTIFACTS = {
+    "evidence": ("evidence_bundle.json", "application/json"),
+    "manifest": ("retrieval_manifest.json", "application/json"),
+    "extraction": ("extraction_report.json", "application/json"),
+    "trace": ("retrieval_trace.jsonl", "application/x-ndjson"),
+}
+
+
+@router.get("/jobs/{job_id}/retrieval")
+def get_retrieval_artifact(
+    job_id: str, which: str = "evidence", session: Session = Depends(get_db)
+) -> PlainTextResponse:
+    """로컬 검색 실행의 감사 자료를 그대로 돌려준다.
+
+    실행별 격리 폴더 안에서만 읽는다. 이력을 지우면 이 파일들도 함께 사라지므로,
+    별도 보존 경로를 만들지 않는다. 파일을 그대로 내보내는 이유는 화면이 다시
+    가공하면 "모델이 실제로 무엇을 받았는가"를 확인할 수 없기 때문이다.
+    """
+    job = session.get(ExecutionJob, job_id)
+    if job is None:
+        raise HTTPException(404, "작업을 찾을 수 없습니다.")
+    if which not in _RETRIEVAL_ARTIFACTS:
+        raise HTTPException(
+            400,
+            "which 는 " + ", ".join(sorted(_RETRIEVAL_ARTIFACTS)) + " 중 하나여야 합니다.",
+        )
+    if not job.work_dir:
+        raise HTTPException(404, "이 실행에는 작업 폴더가 없습니다.")
+
+    name, media_type = _RETRIEVAL_ARTIFACTS[which]
+    path = Path(job.work_dir) / retrieval.RETRIEVAL_DIRNAME / name
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            "이 실행에는 로컬 검색 기록이 없습니다. 인용발명 문헌을 전체 "
+            "인라인으로 전달했거나, 기록이 삭제되었습니다.",
+        )
+    return PlainTextResponse(path.read_text(encoding="utf-8"), media_type=media_type)
 
 
 @router.get("/jobs/{job_id}/raw")

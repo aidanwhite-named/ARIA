@@ -22,6 +22,7 @@ from .. import (
     analysis_manifest,
     citation_mapping,
     job_assembly,
+    retrieval,
     search_manifest,
     search_prompt,
     search_report,
@@ -29,7 +30,7 @@ from .. import (
 )
 from ..config import PATHS
 from ..db import session_scope
-from ..enums import ErrorCode, JobKind, JobStatus
+from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus
 from ..evaluation.evaluator import Verdict, evaluate
 from ..ingestion.service import IngestedFile, preprocessing_versions
 from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
@@ -352,6 +353,15 @@ class JobRunner:
         keep_raw = bool(values.get("keep_raw_output", True))
         fail_on_tool_use = bool(values.get("fail_on_tool_use", True))
         overrides = values.get("provider_paths") or {}
+        # 로컬 검색 설정. preflight 가 크기를 잴 때 쓰는 것과 **같은 함수**로
+        # 예산을 만든다. 두 곳이 각자 기본값을 적어 두면 화면이 안내한 상한과
+        # 실행이 강제하는 상한이 어긋난다.
+        retrieval_mode = str(values.get("retrieval_mode") or "auto")
+        retrieval_budget = retrieval.budget_from_settings(values)
+        retrieval_auto_threshold = int(
+            values.get("retrieval_auto_threshold_bytes") or 0
+        )
+        semantic_enabled = bool(values.get("retrieval_semantic_enabled", False))
 
         # Provider 를 만든 뒤 그 Provider 가 선언한 검색 정책으로 교체한다.
         tool_policy: ToolPolicy = NO_TOOLS
@@ -440,6 +450,10 @@ class JobRunner:
                     prior_report=prior_report,
                     prior_citation_mapping=prior_mapping,
                     tool_policy_name=tool_policy.name,
+                    retrieval_mode=retrieval_mode,
+                    provider_byte_budget=getattr(provider, "max_input_bytes", None),
+                    retrieval_auto_threshold_bytes=retrieval_auto_threshold,
+                    retrieval_budget=retrieval_budget,
                 )
                 assembled = assembly.representative
                 if job_kind is JobKind.SIMILARITY_SEARCH:
@@ -496,6 +510,112 @@ class JobRunner:
             except search_prompt.SearchPromptError as exc:
                 await self._fail(job_id, ErrorCode.SEARCH_PROMPT_ERROR, str(exc))
                 return
+
+            # --- 로컬 검색 (retrieval) -----------------------------------
+            # 여기까지의 assembly 는 "어떻게 전달할 것인가"만 정한 것이다.
+            # 로컬 검색으로 정해졌으면 실제 근거 패키지를 만든 뒤 **같은 조립
+            # 함수**로 최종 프롬프트를 다시 만든다. preflight 가 잰 크기는 예산
+            # 상한이고, 여기서 만드는 실제 패키지는 그 상한을 넘지 못한다.
+            delivery_plan = assembly.delivery_plan
+            retrieval_manifest: dict | None = None
+            retrieval_error: str | None = None
+            retrieval_artifacts: list[tuple[str, Path]] = []
+            retrieval_usage: dict = {}
+
+            if (
+                job_kind is JobKind.PATENT_ANALYSIS
+                and delivery_plan == DeliveryPlan.LOCAL_RETRIEVAL
+            ):
+                await self._emit(
+                    job_id,
+                    "stage",
+                    {
+                        "stage": "indexing",
+                        "message": "인용발명 문헌을 페이지·문단 단위로 로컬 색인 중",
+                    },
+                )
+
+                async def retrieval_emit(event_type: str, payload: dict) -> None:
+                    await self._emit(job_id, event_type, payload)
+
+                found = await retrieval.run_retrieval(
+                    job_id=job_id,
+                    provider=provider,
+                    model=model,
+                    timeout_seconds=timeout,
+                    work_dir=work_dir,
+                    attachments=attachments,
+                    claim_text=claim_text,
+                    budget=retrieval_budget,
+                    semantic_enabled=semantic_enabled,
+                    emit=retrieval_emit,
+                    is_cancelled=lambda: job_id in self._cancel_requested,
+                )
+                retrieval_manifest = found.manifest or None
+                retrieval_artifacts = list(found.artifacts)
+                retrieval_usage = found.usage
+                try:
+                    if not found.ok:
+                        retrieval_error = found.error or "로컬 검색이 실패했습니다."
+                        self._save_retrieval(
+                            job_id,
+                            delivery_plan,
+                            retrieval_manifest,
+                            retrieval_error,
+                            retrieval_artifacts,
+                        )
+                        if found.cancelled:
+                            await self._cancelled(job_id)
+                            return
+                        await self._fail(
+                            job_id,
+                            found.error_code or ErrorCode.RETRIEVAL_FAILED,
+                            retrieval_error,
+                        )
+                        return
+
+                    try:
+                        assembly = job_assembly.assemble_job(
+                            job_kind=job_kind,
+                            master_prompt=master_prompt,
+                            attachments=attachments,
+                            runtime_context=runtime_context,
+                            runtime_context_enabled=runtime_enabled,
+                            max_chars=max_chars,
+                            claim_text=claim_text,
+                            followup_instruction=followup_instruction,
+                            prior_claim_text=prior_claim_text,
+                            prior_report=prior_report,
+                            prior_citation_mapping=prior_mapping,
+                            retrieval_mode="retrieval",
+                            retrieval_budget=retrieval_budget,
+                            evidence_bundle=found.bundle,
+                        )
+                        assembled = assembly.representative
+                    except InputTooLarge as exc:
+                        self._save_retrieval(
+                            job_id,
+                            delivery_plan,
+                            retrieval_manifest,
+                            str(exc),
+                            retrieval_artifacts,
+                        )
+                        await self._fail(job_id, ErrorCode.INPUT_TOO_LARGE, str(exc))
+                        return
+                finally:
+                    retrieval.close_documents(found.documents)
+
+                await self._emit(
+                    job_id,
+                    "retrieval_ready",
+                    {
+                        "rounds": len((retrieval_manifest or {}).get("rounds") or []),
+                        "pages_read": (retrieval_manifest or {}).get("pages_read", 0),
+                        "evidence_chars": (found.bundle or {}).get(
+                            "evidence_chars", 0
+                        ),
+                    },
+                )
 
             prompt_path = work_dir / "final_prompt.txt"
             if job_kind is JobKind.SIMILARITY_SEARCH and len(search_assemblies) > 1:
@@ -953,7 +1073,13 @@ class JobRunner:
 
             # --- 저장 -----------------------------------------------------
             completed = _utcnow()
-            artifacts: list[tuple[str, Path]] = []
+            artifacts: list[tuple[str, Path]] = list(retrieval_artifacts)
+            if retrieval_usage:
+                # 로컬 검색 라운드도 사용량을 쓴다. 최종 호출분만 남기면 이
+                # 실행이 실제로 얼마를 썼는지가 기록에서 빠진다.
+                merged_usage = dict(outcome.usage or {})
+                merged_usage["retrieval"] = retrieval_usage
+                outcome.usage = merged_usage
 
             if outcome.result_text.strip():
                 result_path = work_dir / "result.md"
@@ -1015,6 +1141,9 @@ class JobRunner:
                 job.analysis_manifest_error = component_error
                 job.search_manifest = manifest
                 job.search_manifest_error = manifest_error
+                job.delivery_plan = delivery_plan
+                job.retrieval_manifest = retrieval_manifest
+                job.retrieval_manifest_error = retrieval_error
                 job.exit_code = outcome.exit_code
                 job.terminal_reason = outcome.terminal_reason
                 job.cli_path = outcome.cli_path
@@ -1046,6 +1175,61 @@ class JobRunner:
             )
             await self._emit(job_id, "done", {"status": verdict.status})
             await BUS.close(job_id)
+
+    def _save_retrieval(
+        self,
+        job_id: str,
+        delivery_plan: str,
+        manifest: dict | None,
+        error: str | None,
+        artifacts: list[tuple[str, Path]],
+    ) -> None:
+        """로컬 검색 감사 기록을 저장한다. 실패한 실행에서도 남긴다.
+
+        실패했다고 기록을 버리면 "무엇을 검색했고 어디서 막혔는지"가 사라진다.
+        사용자가 다시 실행할지 문헌을 나눌지 정하려면 그 기록이 필요하다.
+        """
+        with contextlib.suppress(Exception), session_scope() as session:
+            job = session.get(ExecutionJob, job_id)
+            if job is None:
+                return
+            job.delivery_plan = delivery_plan
+            job.retrieval_manifest = manifest
+            job.retrieval_manifest_error = error
+            for kind, path in artifacts:
+                session.add(
+                    ResultArtifact(
+                        job_id=job_id,
+                        kind=kind,
+                        path=str(path),
+                        size_bytes=path.stat().st_size if path.exists() else 0,
+                    )
+                )
+
+    async def _cancelled(self, job_id: str) -> None:
+        """취소로 끝난 다단계 실행을 종료 상태로 확정한다."""
+        completed = _utcnow()
+        with contextlib.suppress(Exception), session_scope() as session:
+            job = session.get(ExecutionJob, job_id)
+            if job is not None:
+                job.status = JobStatus.CANCELLED
+                job.error_code = ErrorCode.CANCELLED
+                job.completed_at = completed
+                if job.started_at:
+                    job.duration_ms = int(
+                        (
+                            completed - job.started_at.replace(tzinfo=timezone.utc)
+                        ).total_seconds()
+                        * 1000
+                    )
+        await self._emit(
+            job_id,
+            "status",
+            {"status": JobStatus.CANCELLED, "error_code": ErrorCode.CANCELLED},
+        )
+        await self._emit(job_id, "done", {"status": JobStatus.CANCELLED})
+        await BUS.close(job_id)
+        self._providers.pop(job_id, None)
 
     async def _fail(self, job_id: str, error_code: str, message: str) -> None:
         completed = _utcnow()

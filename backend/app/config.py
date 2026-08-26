@@ -520,6 +520,35 @@ DEFAULTS: dict[str, object] = {
     # 프로세스를 끊고 SEARCH_BUDGET_EXCEEDED 로 실패시킨다. 프롬프트의
     # "최대 2라운드"는 요청이고, 실제로 멈추는 것은 이 숫자다.
     "max_search_tool_calls": 40,
+    # 인용발명 문헌을 최종 분석 모델에게 어떻게 전달할 것인가.
+    #
+    #   auto      기본값. 전체 인라인으로 넣을 수 있으면 그렇게 하고, Provider
+    #             전송 한도를 넘을 때만 로컬 검색으로 바꾼다. 어느 쪽으로
+    #             갔는지는 History 와 manifest 에 기록되며, 문서를 조용히
+    #             자르거나 요약하는 경로는 어느 쪽에도 없다.
+    #   full      항상 전체 인라인. 한도를 넘으면 예전처럼 INPUT_TOO_LARGE.
+    #   retrieval 항상 로컬 검색. 작은 문헌에서도 근거 패키지만 전달한다.
+    "retrieval_mode": "auto",
+    # auto 모드에서 Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기.
+    # 0 = 사용하지 않음(기본값). 전송 한도를 선언하지 않은 Provider(claude,
+    # codex)에서 큰 문헌을 로컬 검색으로 돌리고 싶을 때만 쓴다.
+    "retrieval_auto_threshold_bytes": 0,
+    # 로컬 검색 예산. preflight 와 실행이 같은 값을 쓴다
+    # (retrieval.budget_from_settings).
+    "retrieval_max_rounds": 6,
+    "retrieval_max_page_reads": 40,
+    # 근거 패키지에 담을 수 있는 원문 문자 수의 상한. preflight 는 이 값으로
+    # 최대 크기를 계산하고, 실행은 같은 값을 넘지 못한다. 한글 1자는 UTF-8
+    # 3 bytes 이므로 40,000자는 최악의 경우 120,000 bytes 다 — agy 의 전송 한도
+    # 180,000 bytes 에서 Master Prompt 와 청구항을 빼고도 들어간다.
+    "retrieval_evidence_chars": 40_000,
+    # 한 구성 × 한 문헌에서 확보하는 후보 수. 전역 top-k 가 아니라 문헌마다
+    # 따로 걸리므로, 문헌이 늘어도 한 문헌이 결과를 독점하지 않는다.
+    "retrieval_hits_per_document": 6,
+    # 의미 검색(sentence-transformers). 기본 꺼짐이고 requirements.txt 에도
+    # 없다. 켜도 라이브러리·모델이 없으면 키워드 검색만으로 진행하고 그 사실을
+    # 보고서와 실행 기록에 남긴다. docs/adr-0001-local-retrieval.md 참조.
+    "retrieval_semantic_enabled": False,
     # Kiwee 특허 검색 연동. 기본 꺼짐. 켜도 지금은 연동 지점(모듈)만 준비된
     # 상태라 실제 외부 검색은 수행하지 않는다. app.patent_search 참조.
     "kiwee_integration_enabled": False,

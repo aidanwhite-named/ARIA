@@ -87,6 +87,18 @@ class ExecutionJob(Base):
     analysis_manifest = Column(JSON, nullable=True)
     analysis_manifest_error = Column(Text, nullable=True)
 
+    # 인용발명 문헌을 최종 분석 모델에게 어떻게 전달했는가.
+    # enums.DeliveryPlan 을 보라. 값이 비어 있는 과거 실행은 full_inline 이다.
+    delivery_plan = Column(String(30), nullable=False, default="full_inline")
+
+    # 로컬 검색(retrieval) 실행의 감사 기록. 인덱스 재현 정보, 라운드별 LLM
+    # 입출력 해시, 실행된 검색어, 예산, 라이브러리 버전이 들어간다. 전체 인라인
+    # 실행에서는 NULL 이다.
+    retrieval_manifest = Column(JSON, nullable=True)
+    # 로컬 검색이 근거 패키지를 만들지 못한 사유. 화면이 "왜 실패했는지"를
+    # 설명하는 데 쓴다.
+    retrieval_manifest_error = Column(Text, nullable=True)
+
     # 유사 문헌 검색의 감사 기록. 검색어, 라운드, 후보 출처, 접근 실패,
     # 검색 프롬프트 해시가 들어간다. 분석 작업에서는 NULL 이다.
     search_manifest = Column(JSON, nullable=True)

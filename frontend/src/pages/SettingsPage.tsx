@@ -774,6 +774,99 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <div className="card settings-limits">
+        <h2>대용량 인용발명 전달 방식</h2>
+        <p className="muted">
+          인용발명 PDF 를 최종 분석 모델에게 어떻게 전달할지 정합니다. 어느
+          방식이든 ARIA 는 문서를 임의로 자르거나 요약하지 않습니다. 로컬 검색은
+          문헌을 페이지·문단 단위로 색인한 뒤 AI 가 청구항 구성별로 검색한
+          구간만 근거 패키지로 전달하고, 검색되지 않은 구간은 「확인하지 못한
+          범위」로 보고서에 남깁니다. OCR 은 수행하지 않습니다.
+        </p>
+        <div className="settings-limit-grid">
+          <div className="field">
+            <label htmlFor="retrieval-mode">전달 방식</label>
+            <select
+              id="retrieval-mode"
+              value={v.retrieval_mode}
+              onChange={(e) => saveValue("retrieval_mode", e.target.value)}
+            >
+              <option value="auto">
+                auto — 전송 한도를 넘을 때만 로컬 검색 (권장)
+              </option>
+              <option value="full">full — 항상 전체 인라인</option>
+              <option value="retrieval">retrieval — 항상 로컬 검색</option>
+            </select>
+            <div className="hint">
+              auto 는 선택한 Provider 가 자료 전체를 손실 없이 전달할 수 있는지만
+              봅니다. full 로 두면 한도를 넘는 문헌이 예전처럼 INPUT_TOO_LARGE 로
+              거절됩니다.
+            </div>
+          </div>
+          <NumberField
+            label="근거 패키지 최대 문자 수"
+            value={v.retrieval_evidence_chars}
+            hint={
+              "실행 전 크기 안내가 이 값으로 최댓값을 계산하고, 실행은 그 값을 " +
+              "넘지 못합니다. 한글 1자는 UTF-8 3 bytes 이므로 40,000자는 최대 " +
+              "120,000 bytes 입니다. 전송 한도가 작은 Provider 에서 실행이 " +
+              "막히면 이 값을 낮추십시오."
+            }
+            onSave={(n) => saveValue("retrieval_evidence_chars", n)}
+          />
+          <NumberField
+            label="AI 검색 라운드 상한"
+            value={v.retrieval_max_rounds}
+            hint="AI 가 검색어를 바꿔 가며 다시 찾을 수 있는 횟수입니다."
+            onSave={(n) => saveValue("retrieval_max_rounds", n)}
+          />
+          <NumberField
+            label="읽을 수 있는 페이지 수 상한"
+            value={v.retrieval_max_page_reads}
+            hint="AI 가 앞뒤 문맥을 확인하려고 여는 페이지의 총합입니다."
+            onSave={(n) => saveValue("retrieval_max_page_reads", n)}
+          />
+          <NumberField
+            label="구성 × 문헌당 후보 수"
+            value={v.retrieval_hits_per_document}
+            hint={
+              "전역 top-k 가 아니라 문헌마다 따로 걸립니다. 문헌이 늘어도 한 " +
+              "문헌이 결과를 독점하지 않습니다."
+            }
+            onSave={(n) => saveValue("retrieval_hits_per_document", n)}
+          />
+          <NumberField
+            label="auto 전환 크기 (bytes, 0 = 사용 안 함)"
+            value={v.retrieval_auto_threshold_bytes}
+            hint={
+              "Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기입니다. " +
+              "전송 한도를 선언하지 않은 Provider(claude, codex)에서 큰 문헌을 " +
+              "로컬 검색으로 돌리고 싶을 때만 씁니다."
+            }
+            onSave={(n) => saveValue("retrieval_auto_threshold_bytes", n)}
+          />
+        </div>
+        <div className="settings-limit-options">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={v.retrieval_semantic_enabled}
+              onChange={(e) =>
+                saveValue("retrieval_semantic_enabled", e.target.checked)
+              }
+            />
+            의미 검색 사용 (sentence-transformers)
+          </label>
+          <div className="hint">
+            기본 꺼짐이며 기본 의존성에 포함되어 있지 않습니다. 켜도
+            라이브러리나 모델 캐시가 없으면 키워드 검색(정확 문구 · BM25 ·
+            부분문자 · 숫자/도면부호)만으로 진행하고, 그 사실을 보고서와 실행
+            기록에 남깁니다. 설치하려면 backend/requirements-semantic.txt 를
+            사용하십시오.
+          </div>
+        </div>
+      </div>
+
       <div className="card settings-kiwee">
         <h2>Kiwee 특허 검색 연동</h2>
         <p className="muted">

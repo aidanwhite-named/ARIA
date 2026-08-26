@@ -31,9 +31,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+from . import retrieval
 from .citation_mapping import AliasedAttachment, assign_aliases
+from .citation_mapping import ordered_attachments as citation_ordered_attachments
 from .citation_mapping import render as render_mapping
-from .enums import AttachmentRole, DeliveryMode
+from .enums import AttachmentRole, DeliveryMode, DeliveryPlan, is_local_search_target
 from .ingestion.service import IngestedFile, read_normalized
 
 
@@ -50,7 +52,7 @@ class InputTooLarge(Exception):
         )
 
 
-def _char_gate(total: int, max_chars: int | None) -> None:
+def char_gate(total: int, max_chars: int | None) -> None:
     """설정한 글자 수 한도를 넘으면 막는다. None 이나 0 이면 한도가 없다.
 
     글자 수 한도는 사용자가 스스로 걸어 두는 상한이라 끌 수 있다. 끄더라도
@@ -71,6 +73,8 @@ class AssembledPrompt:
     manifest: list[dict] = field(default_factory=list)
     # 별칭 → 첨부. 보고서의 문헌 매핑 블록을 되돌릴 때 쓴다.
     aliases: dict[str, AliasedAttachment] = field(default_factory=dict)
+    # 인용발명 문헌을 어떻게 전달했는가. History 와 manifest 에 그대로 남는다.
+    delivery_plan: str = DeliveryPlan.FULL_INLINE
 
 
 def included_attachments(attachments: list[IngestedFile]) -> list[IngestedFile]:
@@ -93,26 +97,20 @@ def included_attachments(attachments: list[IngestedFile]) -> list[IngestedFile]:
     return [item for item in attachments if item.included]
 
 
-def ordered_attachments(attachments: list[IngestedFile]) -> list[IngestedFile]:
-    """최종 프롬프트에 나타나는 순서.
-
-    별칭 번호가 이 순서를 따라야 모델이 본 화면과 ARIA 의 표가 일치한다.
-    """
-    order = (
-        AttachmentRole.APPLICATION,
-        AttachmentRole.CITATION,
-        AttachmentRole.SUPPLEMENTAL,
-    )
-    ranked: list[IngestedFile] = []
-    for role in order:
-        ranked += [a for a in attachments if a.role == role]
-    # 알 수 없는 역할이 생겨도 빠뜨리지 않는다.
-    ranked += [a for a in attachments if a.role not in order]
-    return ranked
+# 최종 프롬프트에 나타나는 순서. 별칭 번호가 이 순서를 따라야 모델이 본 화면과
+# ARIA 의 표가 일치한다. 정의는 citation_mapping 에 있다 — 정렬과 별칭 부여가
+# 떨어져 있으면 새 호출부가 정렬을 잊고, 같은 실행 안에서 ATT-01 이 서로 다른
+# 자료를 가리키게 된다.
+ordered_attachments = citation_ordered_attachments
 
 
 def _attachment_block(
-    index: int, total: int, item: IngestedFile, alias: str = ""
+    index: int,
+    total: int,
+    item: IngestedFile,
+    alias: str = "",
+    *,
+    retrieval_mode: bool = False,
 ) -> str:
     role_label = {
         AttachmentRole.APPLICATION: "출원발명 문서",
@@ -143,6 +141,22 @@ def _attachment_block(
         )
         return "\n".join(header)
 
+    # 출원발명 문서는 로컬 검색 실행에서도 본문 전체가 들어간다. 검색 대상이
+    # 아니므로 근거 패키지에 그 문헌의 구간이 실릴 일이 없고, 여기서까지 빼면
+    # 청구항 해석의 기준 자료가 통째로 사라진다. enums.is_local_search_target
+    # 참조 — 검색 대상 판정과 본문 전달 판정이 같은 함수를 쓴다.
+    if retrieval_mode and is_local_search_target(item.role):
+        # 로컬 검색 전달. 본문은 여기 넣지 않고, 아래 근거 패키지 절에 검색으로
+        # 확인한 구간만 들어간다. 자르거나 요약한 것이 아니라 **검색으로 찾은
+        # 구간만** 넣은 것이므로, 그 차이를 헤더에 그대로 적는다.
+        header.append(f"전체 문자 수: {item.char_count:,}")
+        header.append(
+            "상태: 이 문헌의 전체 본문은 이 프롬프트에 들어 있지 않습니다. "
+            "ARIA 가 로컬 색인한 뒤 검색으로 확인한 구간만 아래 "
+            "「ARIA 로컬 검색 근거 패키지」에 담았습니다."
+        )
+        return "\n".join(header)
+
     body = read_normalized(item)
     header.append(f"문자 수: {len(body):,}")
     return "\n".join(
@@ -166,7 +180,15 @@ def assemble(
     prior_claim_text: str = "",
     prior_report: str = "",
     prior_citation_mapping: dict | None = None,
+    evidence_bundle: dict | None = None,
 ) -> AssembledPrompt:
+    """최종 분석 프롬프트를 만든다.
+
+    evidence_bundle 이 있으면 인용발명 본문 대신 검증된 근거 패키지를 넣는다.
+    그때도 첨부 헤더(자료 번호·파일명·sha256)는 그대로 남는다 — 문헌 매핑
+    프로토콜이 자료 번호로 돌아가고, 어떤 자료가 이 실행의 입력이었는지는
+    전달 방식과 무관하게 기록되어야 한다.
+    """
     # 체크를 푼 자료는 여기서 사라진다. 별칭도 manifest 도 이 목록으로만 만든다.
     attachments = included_attachments(attachments)
     ranked = ordered_attachments(attachments)
@@ -218,14 +240,37 @@ def assemble(
                 "--- 이전 보고서 끝 ---",
             ]
 
+    retrieval_mode = evidence_bundle is not None
+
     if attachments:
         deliverable = [a for a in attachments if a.delivery_mode == DeliveryMode.INLINE_CONTEXT]
         failed = [a for a in attachments if a.delivery_mode != DeliveryMode.INLINE_CONTEXT]
 
         sections += ["", "[ATTACHMENTS / 첨부 자료]"]
-        sections.append(
-            f"총 {len(attachments)}개 중 {len(deliverable)}개의 본문이 아래에 포함되어 있습니다."
-        )
+        if retrieval_mode:
+            # 검색 대상과 전체 인라인 자료를 나눠서 센다. 합쳐서 안내하면
+            # "전부 색인했고 본문은 어디에도 없다"로 읽히는데, 출원발명 문서는
+            # 색인하지 않고 본문이 그대로 들어가 있다.
+            indexed = [
+                a for a in deliverable if is_local_search_target(a.role)
+            ]
+            inlined = [
+                a for a in deliverable if not is_local_search_target(a.role)
+            ]
+            sections.append(
+                f"총 {len(attachments)}개 중 {len(indexed)}개(인용발명·기타 자료)를 "
+                "ARIA 가 로컬 색인했습니다. 그 자료의 본문 전체는 이 프롬프트에 "
+                "없고, 검색으로 확인한 구간만 아래 근거 패키지에 있습니다."
+            )
+            if inlined:
+                sections.append(
+                    f"출원발명 문서 {len(inlined)}개는 검색 대상이 아니며 본문 "
+                    "전체가 아래에 그대로 들어 있습니다."
+                )
+        else:
+            sections.append(
+                f"총 {len(attachments)}개 중 {len(deliverable)}개의 본문이 아래에 포함되어 있습니다."
+            )
         if failed:
             names = ", ".join(f"{a.original_filename}" for a in failed)
             sections.append(
@@ -244,16 +289,23 @@ def assemble(
             for i, item in enumerate(items, start=1):
                 sections.append(
                     _attachment_block(
-                        i, len(items), item, alias_by_id.get(item.attachment_id, "")
+                        i,
+                        len(items),
+                        item,
+                        alias_by_id.get(item.attachment_id, ""),
+                        retrieval_mode=retrieval_mode,
                     )
                 )
                 sections.append("")
+
+    if retrieval_mode:
+        sections += ["", retrieval.render(evidence_bundle)]
 
     user_message = "\n".join(sections).strip() + "\n"
     system_prompt = runtime_context.strip() if runtime_context_enabled else ""
 
     total = len(user_message) + len(system_prompt)
-    _char_gate(total, max_chars)
+    char_gate(total, max_chars)
 
     digest = hashlib.sha256(
         (system_prompt + "\n\x00\n" + user_message).encode("utf-8")
@@ -266,6 +318,9 @@ def assemble(
         total_chars=total,
         manifest=[a.manifest_entry() for a in attachments],
         aliases=aliases,
+        delivery_plan=(
+            DeliveryPlan.LOCAL_RETRIEVAL if retrieval_mode else DeliveryPlan.FULL_INLINE
+        ),
     )
 
 
@@ -293,7 +348,7 @@ def assemble_search(
     system_prompt = runtime_context.strip()
 
     total = len(user_message) + len(system_prompt)
-    _char_gate(total, max_chars)
+    char_gate(total, max_chars)
 
     digest = hashlib.sha256(
         (system_prompt + "\n\x00\n" + user_message).encode("utf-8")

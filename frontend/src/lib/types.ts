@@ -14,6 +14,153 @@ export type AttachmentRole = "APPLICATION" | "CITATION" | "SUPPLEMENTAL";
  */
 export type JobKind = "patent_analysis" | "similarity_search";
 
+/** 인용발명 문헌을 최종 분석 모델에게 어떻게 전달했는가.
+ *
+ *  full_inline      정규화 텍스트 전체를 프롬프트에 넣었다 (v0.1 의 유일한 경로).
+ *  local_retrieval  ARIA 가 로컬 색인하고, AI 가 구조화된 검색으로 찾은 구간만
+ *                   근거 패키지로 넣었다.
+ *
+ *  첨부 하나의 상태(delivery_mode)와 축이 다르다. 로컬 검색으로 전달한 실행에서도
+ *  각 첨부의 delivery_mode 는 "본문을 읽었는가"를 그대로 뜻한다.
+ */
+export type DeliveryPlan = "full_inline" | "local_retrieval";
+
+/** 근거 패키지에서 구성 하나에 ARIA 가 확정한 상태.
+ *
+ *  matched 가 아닌 것을 "문헌에 없음"으로 읽으면 안 된다. 그 구분이 이 타입의
+ *  존재 이유다.
+ */
+export type EvidenceStatus =
+  | "matched"
+  | "not_found_in_reviewed_scope"
+  | "coverage_insufficient"
+  | "extraction_unreadable"
+  | "visual_review_required";
+
+/** 문헌 하나의 색인·추출 상태. ARIA 가 관측한 사실이며 모델이 정하지 않는다. */
+export interface RetrievalDocument {
+  alias: string;
+  attachment_id: string;
+  filename: string;
+  pdf_sha256: string;
+  role: string;
+  index_rebuilt: boolean;
+  index: {
+    index_version: number;
+    extractor_version: string;
+    chunk_count: number;
+    page_count: number;
+    source_page_count: number;
+    trigram_enabled: boolean;
+    built_at: string;
+  };
+  extraction: {
+    source_page_count: number;
+    processed_page_count: number;
+    page_count_mismatch: boolean;
+    ok_pages: number;
+    empty_or_low_text_pages: number[];
+    extraction_failed_pages: number[];
+    visual_review_required_pages: number[];
+    extraction_divergence_pages: number[];
+    chunk_count: number;
+    chunk_failures: number;
+    status: "complete" | "review_required" | "unusable";
+    open_error: string | null;
+  };
+}
+
+/** 로컬 검색 실행의 감사 기록. 전체 인라인 실행에서는 null 이다. */
+export interface RetrievalManifest {
+  version: number;
+  delivery_mode: "local_retrieval";
+  generated_at: string;
+  claim_sha256: string;
+  agent_prompt_sha256: string;
+  ocr_performed: false;
+  budget: {
+    max_rounds: number;
+    max_page_reads: number;
+    max_evidence_chars: number;
+    hits_per_document: number;
+    max_round_result_chars: number;
+  };
+  sqlite: {
+    fts5: boolean;
+    trigram: boolean;
+    sqlite_version: string;
+    error: string;
+  };
+  /** 의미 검색이 실제로 돌았는가. enabled 와 active 는 다른 축이다. */
+  semantic: {
+    enabled: boolean;
+    active: boolean;
+    model: string | null;
+    revision: string | null;
+    cache_state: string;
+    reason: string;
+    notes: string[];
+  };
+  libraries: Record<string, string>;
+  documents: RetrievalDocument[];
+  not_indexed: { alias: string; filename: string; reason: string }[];
+  rounds: {
+    round: number;
+    started_at: string;
+    completed_at: string;
+    status: string;
+    input_sha256: string;
+    output_sha256: string;
+    input_chars: number;
+    output_chars: number;
+    actions: number;
+    error: string;
+  }[];
+  pages_read: number;
+  /** 이미 읽은 페이지를 다시 요청한 횟수. 막지는 않고 기록만 남긴다. */
+  repeat_page_reads: number;
+  /** 실제로 최종 프롬프트에 들어간 근거 패키지의 문자 수.
+   *
+   *  예산(budget.max_evidence_chars)은 이 값의 상한이다. 넘으면 ARIA 가 서지
+   *  발췌 → 구성 메타데이터 → 근거 구간 순으로 줄이고, 그래도 안 되면 실행을
+   *  실패시킨다. 원문은 절대 자르지 않는다. */
+  evidence_chars: number;
+  components: {
+    id: string;
+    label: string;
+    queries: string[];
+    channels_used: string[];
+    channels_failed: string[];
+    candidates: number;
+    /** 문헌별 검색 실행 기록. 결과가 0건이었던 검색도 들어 있다.
+     *
+     *  "찾지 못했다"와 "찾아보지 않았다"를 가르는 유일한 근거다. 이 기록이
+     *  없으면 한 문헌만 뒤지고 나머지를 건너뛴 실행이 「검토 범위에서 미발견」
+     *  으로 보인다. */
+    searched_documents: {
+      attachment: string;
+      attachment_id: string;
+      queries: string[];
+      channels_used: string[];
+      channels_failed: string[];
+      hits: number;
+    }[];
+    /** 이 구성에 대해 검색 자체를 하지 않은 문헌. 비어 있어야 정상이다. */
+    unsearched_documents: string[];
+  }[];
+  action_errors: { round?: number; action?: string; reason: string }[];
+  notes: string[];
+  budget_exhausted: boolean;
+  /** 근거 패키지를 예산에 맞추려고 줄인 내역. 비어 있어야 정상이다.
+   *
+   *  원문은 절대 자르지 않는다. 여기 적히는 것은 서지 발췌 제거, 구성
+   *  메타데이터 축약, 근거 구간 제거뿐이며 전부 검토 범위 제한으로도 올라간다. */
+  package_reductions: string[];
+  error: string;
+  error_code: string;
+  status: "complete" | "partial" | "failed";
+}
+
 export type AnalysisComponentStatus =
   | "matched"
   | "below_threshold"
@@ -442,6 +589,12 @@ export interface Job {
   search_manifest_error: string | null;
   /** 구성대비 결과에서 시작한 검색의 선택 구성 스냅샷. */
   search_focus: GapSearchFocus | null;
+  /** 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline. */
+  delivery_plan: DeliveryPlan;
+  /** 로컬 검색 실행의 감사 기록. 전체 인라인 실행에서는 null. */
+  retrieval_manifest: RetrievalManifest | null;
+  /** 로컬 검색이 근거 패키지를 만들지 못한 사유. */
+  retrieval_manifest_error: string | null;
   provider: string;
   model: string | null;
   cli_path: string | null;
@@ -483,6 +636,8 @@ export interface HistoryItem {
   has_citation_mapping: boolean;
   /** 이 실행에서 이어진 후속 실행 수. 스레드 일괄 삭제 대상 건수. */
   descendant_count: number;
+  /** 인용발명 문헌을 어떻게 전달했는가. */
+  delivery_plan: DeliveryPlan;
 }
 
 export interface AppSettings {
@@ -503,6 +658,16 @@ export interface AppSettings {
     keep_raw_output: boolean;
     fail_on_tool_use: boolean;
     max_search_tool_calls: number;
+    /** 인용발명 전달 방식 정책. auto = 크기를 보고 고른다. */
+    retrieval_mode: "auto" | "full" | "retrieval";
+    /** 0 = 사용 안 함. Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기. */
+    retrieval_auto_threshold_bytes: number;
+    retrieval_max_rounds: number;
+    retrieval_max_page_reads: number;
+    retrieval_evidence_chars: number;
+    retrieval_hits_per_document: number;
+    /** 기본 꺼짐. 켜도 라이브러리·모델이 없으면 키워드 검색만으로 진행한다. */
+    retrieval_semantic_enabled: boolean;
     kiwee_integration_enabled: boolean;
   };
   warnings: string[];
@@ -553,6 +718,15 @@ export type Preflight = {
   over_chars: boolean;
   over_bytes: boolean;
   blocked: boolean;
+  /** 이 입력이 실제로 어떻게 전달되는가. runner 와 같은 판정 함수를 쓴다. */
+  delivery_plan: DeliveryPlan;
+  /** 전체 인라인으로 넣었을 때의 크기. auto 가 왜 로컬 검색을 골랐는지 설명한다. */
+  full_inline_bytes: number;
+  /**
+   * local_retrieval 일 때 위 chars/bytes 는 근거 패키지 예산으로 계산한
+   * **최댓값**이다. 실제 실행은 이 값을 넘지 못한다. full_inline 이면 null.
+   */
+  evidence_budget_chars: number | null;
   message: string;
   error: string | null;
 };

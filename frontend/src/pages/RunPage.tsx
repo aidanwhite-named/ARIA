@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import GapSearchPanel from "../components/GapSearchPanel";
 import ResultView from "../components/ResultView";
+import RetrievalManifestView from "../components/RetrievalManifestView";
 import SearchManifestView from "../components/SearchManifestView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
 import { api } from "../lib/api";
@@ -120,15 +121,28 @@ function SizeNotice({
     );
   }
   const lanes = preflight.lanes.length > 1 ? preflight.lanes : [];
+  const retrieval = preflight.delivery_plan === "local_retrieval";
   return (
     <div
       className={`notice ${preflight.blocked ? "danger" : "info"}`}
       style={{ marginTop: 12 }}
     >
       <div>
-        최종 프롬프트 {preflight.chars.toLocaleString()}자 ·{" "}
+        <span className={`pill ${retrieval ? "accent" : "neutral"}`}>
+          {retrieval ? "로컬 검색 전달" : "전체 인라인 전달"}
+        </span>{" "}
+        최종 프롬프트 {retrieval ? "최대 " : ""}
+        {preflight.chars.toLocaleString()}자 ·{" "}
         {preflight.bytes.toLocaleString()} bytes
       </div>
+      {retrieval && (
+        <div className="faint">
+          인용발명 전체를 넣으면 {preflight.full_inline_bytes.toLocaleString()}{" "}
+          bytes · 근거 패키지 예산{" "}
+          {(preflight.evidence_budget_chars ?? 0).toLocaleString()}자 — 위
+          숫자는 예산을 모두 썼을 때의 최댓값이고 실제 실행은 이보다 작습니다.
+        </div>
+      )}
       <div className="faint">
         {preflight.byte_budget !== null
           ? `${preflight.provider} 가 자료 전체를 손실 없이 전달할 수 있는 한도 ` +
@@ -154,11 +168,18 @@ function SizeNotice({
         </div>
       )}
       {preflight.message && <div style={{ marginTop: 6 }}>{preflight.message}</div>}
-      {!preflight.blocked && (
+      {!preflight.blocked && !retrieval && (
         <div className="faint">
           ARIA 는 내용을 임의로 자르거나 요약하지 않습니다. 한도를 넘으면 Provider
           를 호출하기 전에 막으므로 토큰이 소모되지 않고, 그때는 문헌을 나눠 여러
           번 실행하거나 전송 한도가 더 큰 Provider 를 선택하면 됩니다.
+        </div>
+      )}
+      {!preflight.blocked && retrieval && (
+        <div className="faint">
+          ARIA 는 문서를 자르거나 요약하지 않습니다. 대신 문헌을 페이지·문단
+          단위로 로컬 색인하고, AI 가 청구항 구성별로 검색한 구간만 전달합니다.
+          검색되지 않은 구간은 「확인하지 못한 범위」로 보고서에 남습니다.
         </div>
       )}
     </div>
@@ -1346,6 +1367,12 @@ export default function RunPage() {
                   검색 {stream.searchCount}회 · 페이지 열람 {stream.fetchCount}건
                 </div>
               )}
+              {!searching && stream.retrievalRound > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  로컬 검색 {stream.retrievalRound}라운드 · 읽은 페이지{" "}
+                  {stream.retrievalPagesRead}쪽
+                </div>
+              )}
             </span>
           )}
         </div>
@@ -1524,6 +1551,12 @@ export default function RunPage() {
             <SearchManifestView job={job} />
           )}
 
+          {job.job_kind === "patent_analysis" &&
+            !running &&
+            job.delivery_plan === "local_retrieval" && (
+              <RetrievalManifestView job={job} />
+            )}
+
           <details className="no-print" style={{ marginTop: 16 }}>
             <summary className="faint" style={{ cursor: "pointer" }}>
               실행 정보
@@ -1549,6 +1582,30 @@ export default function RunPage() {
                       {job.cli_path ?? "-"} {job.cli_version ? `(${job.cli_version})` : ""}
                     </td>
                   </tr>
+                  {job.job_kind === "patent_analysis" && (
+                    <tr>
+                      <th>인용발명 전달 방식</th>
+                      <td>
+                        {job.delivery_plan === "local_retrieval" ? (
+                          <>
+                            로컬 검색 (근거 패키지)
+                            {job.retrieval_manifest && (
+                              <div className="faint">
+                                색인 {job.retrieval_manifest.documents.length}건 ·
+                                라운드 {job.retrieval_manifest.rounds.length}회 ·
+                                읽은 페이지 {job.retrieval_manifest.pages_read}쪽 ·
+                                근거{" "}
+                                {job.retrieval_manifest.evidence_chars.toLocaleString()}
+                                자
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          "전체 인라인"
+                        )}
+                      </td>
+                    </tr>
+                  )}
                   <tr>
                     <th>최종 프롬프트</th>
                     <td className="break mono-text">

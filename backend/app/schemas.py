@@ -226,6 +226,14 @@ class PreflightOut(BaseModel):
     over_bytes: bool = False
     # 지금 실행하면 Provider 호출 전에 막힌다.
     blocked: bool = False
+    # 이 입력이 실제로 어떤 방식으로 전달되는가(full_inline / local_retrieval).
+    # runner 와 같은 판정 함수(job_assembly.decide_delivery_plan)를 쓴다.
+    delivery_plan: str = "full_inline"
+    # 전체 인라인으로 넣었을 때의 크기. auto 가 왜 로컬 검색을 골랐는지 설명한다.
+    full_inline_bytes: int = 0
+    # local_retrieval 일 때 위 chars/bytes 는 예산 상한으로 계산한 **최댓값**이다.
+    # 실제 근거 패키지는 이 값을 넘지 못한다.
+    evidence_budget_chars: int | None = None
     message: str = ""
     # 조립 자체가 불가능한 상태(명세서 본문을 읽지 못함 등). 크기는 재지 못한다.
     error: str | None = None
@@ -257,6 +265,11 @@ class JobOut(BaseModel):
     search_manifest: dict[str, Any] | None = None
     search_manifest_error: str | None = None
     search_focus: dict[str, Any] | None = None
+    # 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline.
+    delivery_plan: str = "full_inline"
+    # 로컬 검색 실행의 감사 기록. 전체 인라인 실행에서는 null.
+    retrieval_manifest: dict[str, Any] | None = None
+    retrieval_manifest_error: str | None = None
     provider: str
     model: str | None = None
     cli_path: str | None = None
@@ -297,6 +310,8 @@ class HistoryItem(BaseModel):
     has_citation_mapping: bool = False
     # 이 실행에서 이어진 후속 실행 수. 스레드 일괄 삭제 대상 건수와 같다.
     descendant_count: int = 0
+    # 인용발명 문헌을 어떻게 전달했는가. 목록에서 바로 구분할 수 있어야 한다.
+    delivery_plan: str = "full_inline"
 
 
 class SettingsOut(BaseModel):

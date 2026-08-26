@@ -237,7 +237,14 @@ export default function HistoryPage() {
                       {item.provider}
                       {item.model ? ` / ${item.model}` : ""}
                     </td>
-                    <td>{item.attachment_count}</td>
+                    <td>
+                      {item.attachment_count}
+                      {item.delivery_plan === "local_retrieval" && (
+                        <div className="faint" title="인용발명 문헌 전체가 아니라 검색으로 확인한 구간만 전달했습니다.">
+                          로컬 검색 전달
+                        </div>
+                      )}
+                    </td>
                     <td>
                       {item.duration_ms ? `${(item.duration_ms / 1000).toFixed(1)}초` : "-"}
                     </td>

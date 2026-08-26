@@ -32,6 +32,13 @@ EDITABLE_KEYS = frozenset(
         "keep_raw_output",
         "fail_on_tool_use",
         "max_search_tool_calls",
+        "retrieval_mode",
+        "retrieval_auto_threshold_bytes",
+        "retrieval_max_rounds",
+        "retrieval_max_page_reads",
+        "retrieval_evidence_chars",
+        "retrieval_hits_per_document",
+        "retrieval_semantic_enabled",
         "kiwee_integration_enabled",
     }
 )
@@ -62,6 +69,11 @@ _INT_KEYS = frozenset(
         "default_timeout_seconds",
         "max_concurrency_per_provider",
         "max_search_tool_calls",
+        "retrieval_auto_threshold_bytes",
+        "retrieval_max_rounds",
+        "retrieval_max_page_reads",
+        "retrieval_evidence_chars",
+        "retrieval_hits_per_document",
     }
 )
 
@@ -73,13 +85,24 @@ _LIMITS = {
     "default_timeout_seconds": (10, 86_400),
     "max_concurrency_per_provider": (1, 8),
     "max_search_tool_calls": (1, 200),
+    "retrieval_auto_threshold_bytes": (10_000, 20_000_000),
+    "retrieval_max_rounds": (1, 30),
+    "retrieval_max_page_reads": (1, 500),
+    "retrieval_evidence_chars": (2_000, 400_000),
+    "retrieval_hits_per_document": (1, 20),
 }
+
+# 인용발명 문헌 전달 방식. enums.RetrievalMode 와 같은 값이며, 여기서 import
+# 하지 않는 이유는 settings_service 가 enums 에 의존하지 않기 때문이다.
+_RETRIEVAL_MODES = ("auto", "full", "retrieval")
 
 # 0 이나 null 을 "제한 없음"으로 받는 키. 다른 한도와 달리 이 값은 안전 장치가
 # 아니라 사용자가 스스로 걸어 두는 상한이라, 끄는 것을 허용한다. 끈다고 해서
 # 무제한으로 보내지는 것은 아니다 — Provider 전송 한도(Provider.max_input_bytes)
 # 와 모델 컨텍스트 한도는 그대로 남고, 그 둘은 사용자가 끌 수 없다.
-_UNLIMITED_KEYS = frozenset({"max_inline_chars"})
+_UNLIMITED_KEYS = frozenset(
+    {"max_inline_chars", "retrieval_auto_threshold_bytes"}
+)
 
 
 def inline_char_budget(source: Any) -> int | None:
@@ -154,9 +177,19 @@ def _coerce(key: str, value: Any) -> Any:
         "runtime_context_enabled",
         "keep_raw_output",
         "fail_on_tool_use",
+        "retrieval_semantic_enabled",
         "kiwee_integration_enabled",
     ):
         return bool(value)
+    if key == "retrieval_mode":
+        text = str(value).strip().lower()
+        if text not in _RETRIEVAL_MODES:
+            raise ValueError(
+                "retrieval_mode 는 "
+                + ", ".join(_RETRIEVAL_MODES)
+                + " 중 하나여야 합니다."
+            )
+        return text
     if key == "runtime_context":
         return str(value)
     if key == "default_prompt_id":
@@ -220,6 +253,25 @@ def warnings_for(values: dict[str, Any]) -> list[str]:
         notes.append(
             "런타임 컨텍스트가 비활성화되어 있습니다. 첨부 문서 안의 지시문이 "
             "실행 지시로 해석될 위험이 커집니다."
+        )
+    mode = str(values.get("retrieval_mode") or "auto")
+    if mode == "full":
+        notes.append(
+            "인용발명 전달 방식이 「전체 인라인 고정」입니다. Provider 전송 "
+            "한도를 넘는 문헌은 로컬 검색으로 넘어가지 않고 INPUT_TOO_LARGE 로 "
+            "거절됩니다."
+        )
+    elif mode == "retrieval":
+        notes.append(
+            "인용발명 전달 방식이 「로컬 검색 고정」입니다. 작은 문헌도 전체 "
+            "본문 대신 근거 패키지만 전달되므로, 검색어에 걸리지 않은 구간은 "
+            "최종 분석 모델이 보지 못합니다."
+        )
+    if values.get("retrieval_semantic_enabled"):
+        notes.append(
+            "의미 검색이 켜져 있습니다. sentence-transformers 와 모델 캐시가 "
+            "없으면 키워드 검색만으로 진행하며, 그 사실이 보고서와 실행 기록에 "
+            "남습니다."
         )
     # 연동을 켜도 지금은 실제 검색이 안 된다는 사실을 화면에 정직하게 남긴다.
     # "URL 이 보인다"와 "공식 API 다"는 다른 문제이므로, 접속 구현은 공급자

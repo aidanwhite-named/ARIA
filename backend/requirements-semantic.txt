@@ -1,0 +1,25 @@
+# 선택 기능: 로컬 의미 검색 (opt-in)
+#
+# 기본 requirements.txt 에 넣지 않는다. 이유는
+# docs/adr-0001-local-retrieval.md 「3. 의미 검색」에 있다.
+#
+#   - sentence-transformers 는 torch 를 끌고 오고, 휠 크기가 수 GB 다.
+#   - 모델은 최초 실행에 네트워크 다운로드가 필요하다.
+#   두 조건 모두 "오프라인에서도 키워드 검색은 동작해야 한다"는 요구와 충돌한다.
+#
+# 설치하지 않아도 ARIA 는 그대로 동작한다. 키워드 검색(정확 문구 · FTS5 BM25 ·
+# trigram 부분문자 · 숫자/단위/도면부호)만으로 진행하고, 의미 검색이 비활성인
+# 사실과 그 사유를 retrieval_manifest 와 근거 패키지에 남긴다.
+#
+# 설치 후에도 Settings 의 「의미 검색 사용」을 켜야 실제로 동작한다.
+#
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-semantic.txt
+#
+# 사용하는 모델과 revision 은 backend/app/retrieval/semantic.py 에 고정되어
+# 있다(paraphrase-multilingual-MiniLM-L12-v2). 태그를 고정하지 않으면 어느 날
+# 조용히 다른 가중치가 내려와 같은 문헌에서 다른 후보가 나온다.
+#
+# 라이선스: sentence-transformers Apache-2.0, torch BSD-3-Clause,
+#           모델 가중치 Apache-2.0. 설치 전에 각자 확인하십시오.
+
+sentence-transformers==3.3.1

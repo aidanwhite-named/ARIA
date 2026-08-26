@@ -66,6 +66,18 @@ _SEARCH_COLUMNS = (
     ("search_focus", "search_focus JSON"),
 )
 
+# 로컬 검색(retrieval) 컬럼. 이 기능이 없던 시절의 실행은 전부 전체 인라인
+# 전달이므로 delivery_plan 기본값이 full_inline 이고, 감사 기록은 NULL 이 맞는
+# 기본값이다. 과거 실행의 의미가 바뀌지 않는다.
+_RETRIEVAL_COLUMNS = (
+    (
+        "delivery_plan",
+        "delivery_plan VARCHAR(30) NOT NULL DEFAULT 'full_inline'",
+    ),
+    ("retrieval_manifest", "retrieval_manifest JSON"),
+    ("retrieval_manifest_error", "retrieval_manifest_error TEXT"),
+)
+
 
 def _add_compatible_columns(engine) -> None:
     """기존 v0.1 SQLite 파일을 현재 모델에 맞춘다.
@@ -135,7 +147,11 @@ def _add_compatible_columns(engine) -> None:
                 "ADD COLUMN included BOOLEAN NOT NULL DEFAULT 1"
             )
         if job_columns:
-            for name, ddl in (*_LINEAGE_COLUMNS, *_SEARCH_COLUMNS):
+            for name, ddl in (
+                *_LINEAGE_COLUMNS,
+                *_SEARCH_COLUMNS,
+                *_RETRIEVAL_COLUMNS,
+            ):
                 if name not in job_columns:
                     connection.exec_driver_sql(
                         f"ALTER TABLE execution_jobs ADD COLUMN {ddl}"

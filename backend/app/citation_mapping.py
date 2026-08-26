@@ -73,6 +73,30 @@ def alias_for(index: int) -> str:
     return f"ATT-{index:02d}"
 
 
+def ordered_attachments(attachments):
+    """별칭을 붙이는 순서. 최종 프롬프트에 나타나는 순서와 같아야 한다.
+
+    정렬과 별칭 부여를 **같은 모듈에 둔다.** 둘이 떨어져 있으면 새 호출부가
+    정렬을 잊고 assign_aliases 만 부르게 되고, 그러면 같은 실행 안에서 ATT-01
+    이 서로 다른 자료를 가리키게 된다. 실제로 로컬 검색 corpus 가 그렇게
+    어긋난 적이 있다 — 근거 패키지의 ATT-01 과 프롬프트 첨부 헤더의 ATT-01 이
+    다른 문헌이었다. 모델은 그 사실을 알 방법이 없다.
+    """
+    from .enums import AttachmentRole
+
+    order = (
+        AttachmentRole.APPLICATION,
+        AttachmentRole.CITATION,
+        AttachmentRole.SUPPLEMENTAL,
+    )
+    ranked = []
+    for role in order:
+        ranked += [a for a in attachments if a.role == role]
+    # 알 수 없는 역할이 생겨도 빠뜨리지 않는다.
+    ranked += [a for a in attachments if a.role not in order]
+    return ranked
+
+
 def assign_aliases(attachments) -> dict[str, AliasedAttachment]:
     """첨부에 별칭을 붙인다. 키는 별칭이다.
 

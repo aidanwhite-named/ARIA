@@ -42,6 +42,12 @@ class ErrorCode(StrEnum):
     SEARCH_BUDGET_EXCEEDED = "SEARCH_BUDGET_EXCEEDED"
     # 검색 프롬프트 파일을 읽지 못했거나 placeholder 가 없다.
     SEARCH_PROMPT_ERROR = "SEARCH_PROMPT_ERROR"
+    # 로컬 검색(retrieval) 전용.
+    # 이 실행 환경에서 로컬 검색 인덱스를 만들 수 없거나(FTS5 없음), 색인할 수
+    # 있는 문헌이 하나도 없다. 검색 없이 근거를 지어내지 않으므로 실패시킨다.
+    RETRIEVAL_UNAVAILABLE = "RETRIEVAL_UNAVAILABLE"
+    # 로컬 검색 루프가 근거 패키지를 만들지 못했다.
+    RETRIEVAL_FAILED = "RETRIEVAL_FAILED"
 
 
 class JobKind(StrEnum):
@@ -76,12 +82,63 @@ class DeliveryMode(StrEnum):
     FAILED = "FAILED"
 
 
+class DeliveryPlan(StrEnum):
+    """인용발명 문헌을 최종 분석 모델에게 어떻게 전달했는가.
+
+    첨부 하나의 상태가 아니라 **실행 전체의 전달 방식**이다. DeliveryMode 와
+    축이 다르므로 섞지 않는다 — 로컬 검색으로 전달한 실행에서도 각 첨부의
+    delivery_mode 는 "본문을 읽었는가"를 그대로 뜻한다.
+
+      FULL_INLINE      정규화 텍스트 전체를 프롬프트에 넣는다. v0.1 의 유일한
+                       경로였고 작은 문헌에서는 지금도 기본이다.
+      LOCAL_RETRIEVAL  ARIA 가 로컬 색인하고, AI 가 구조화된 검색 action 으로
+                       찾은 구간만 근거 패키지로 넣는다.
+
+    값이 비어 있는 과거 실행은 FULL_INLINE 이다.
+    """
+
+    FULL_INLINE = "full_inline"
+    LOCAL_RETRIEVAL = "local_retrieval"
+
+
+class RetrievalMode(StrEnum):
+    """사용자가 고른 전달 방식 정책.
+
+    AUTO 는 크기를 보고 고른다. 문서를 조용히 자르거나 요약하지 않으므로,
+    고르는 기준은 "Provider 가 자료 전체를 손실 없이 전달할 수 있는가" 하나다.
+    """
+
+    AUTO = "auto"
+    FULL = "full"
+    RETRIEVAL = "retrieval"
+
+
 class AttachmentRole(StrEnum):
     """분석 안에서 첨부 자료가 맡는 역할."""
 
     APPLICATION = "APPLICATION"
     CITATION = "CITATION"
     SUPPLEMENTAL = "SUPPLEMENTAL"
+
+
+def is_local_search_target(role: str) -> bool:
+    """이 첨부를 로컬 검색(retrieval)의 **검색 대상**으로 삼아도 되는가.
+
+    출원발명 문서는 절대 검색 대상이 아니다. 두 가지가 동시에 깨지기 때문이다.
+
+      1. 자기 발명을 인용발명처럼 검색해서 "대응 구성을 찾았다"고 판정할 수 있다.
+         구성대비에서 이보다 나쁜 오류는 없다.
+      2. 출원발명 명세서는 청구항 문언을 해석하는 기준 자료다. 검색으로 일부만
+         전달하면 해석의 근거가 임의로 잘린다.
+
+    그래서 출원발명 문서는 로컬 검색 실행에서도 **본문 전체가 인라인으로**
+    들어간다. 그 때문에 전송 한도를 넘으면 자르지 않고 INPUT_TOO_LARGE 로
+    중단한다.
+
+    이 함수를 prompt_assembly 와 retrieval 양쪽이 함께 쓴다. 두 곳이 각자
+    판단하면 "검색 대상에서는 뺐는데 본문도 빠진" 상태가 만들어진다.
+    """
+    return str(role) != AttachmentRole.APPLICATION
 
 
 class RelationType(StrEnum):

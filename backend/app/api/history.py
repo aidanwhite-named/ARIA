@@ -86,6 +86,7 @@ def _history_item(row: ExecutionJob, descendant_count: int = 0) -> HistoryItem:
         relation_type=row.relation_type,
         has_citation_mapping=bool((row.citation_mapping or {}).get("items")),
         descendant_count=descendant_count,
+        delivery_plan=row.delivery_plan or "full_inline",
     )
 
 
