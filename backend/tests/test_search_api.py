@@ -293,6 +293,17 @@ def _lane_user_message(client, job_id: str, origin: str) -> str:
     return lane.split("===== USER MESSAGE =====", 1)[1]
 
 
+def _lane_parts(client, job_id: str, origin: str) -> tuple[str, str]:
+    """저장된 최종 프롬프트에서 한 레인의 시스템·사용자 본문을 떼어 낸다."""
+    text = client.get(f"/api/jobs/{job_id}/final-prompt").text
+    lane = text.split(f"===== SEARCH LANE: {origin} =====\n", 1)[1]
+    lane = lane.split("===== SEARCH LANE:", 1)[0]
+    system = lane.split("===== SYSTEM PROMPT =====\n", 1)[1]
+    system, user = system.split("\n\n===== USER MESSAGE =====\n", 1)
+    # 마지막 레인이 아니면 다음 구분자 앞의 개행 두 개가 붙어 온다.
+    return system, user[:-2] if user.endswith("\n\n") else user
+
+
 def _upload_spec(client, name: str = "spec.txt", body: bytes | None = None) -> str:
     response = client.post(
         "/api/uploads",
@@ -334,6 +345,10 @@ def test_search_runs_claim_only_and_spec_assisted_in_isolated_contexts(client) -
     assert manifest["policy"]["search_strategy"] == "isolated_union"
     assert manifest["policy"]["candidate_merge"] == "union"
     assert sum(manifest["policy"]["lane_budgets"].values()) == 40
+    # 본문 읽기 상한은 검색 상한과 별개로 기록된다. 이 Provider 는 본문을
+    # 그대로 돌려주므로 나눌 예산이 없고, 그 사실도 기록에 남아야 한다.
+    assert "max_content_reads_total" in manifest["policy"]
+    assert manifest["policy"]["content_read_lane_budgets"] == {}
     assert [lane["spec_in_context"] for lane in manifest["search_lanes"]] == [
         False,
         True,
@@ -639,3 +654,68 @@ def test_history_reports_job_kind(client) -> None:
     rows = client.get("/api/history").json()
     row = next(item for item in rows if item["id"] == search_job["id"])
     assert row["job_kind"] == JobKind.SIMILARITY_SEARCH.value
+
+
+# ------------------------------------------------- 실행 전 크기 안내(preflight)
+
+
+def _preflight(client, **overrides) -> dict:
+    body = {
+        "job_kind": JobKind.SIMILARITY_SEARCH.value,
+        "provider": "test-search",
+        "claim_text": CLAIM,
+    }
+    body.update(overrides)
+    response = client.post("/api/jobs/preflight", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_preflight_matches_what_the_runner_actually_sends(client) -> None:
+    """화면이 안내하는 크기는 실행이 실제로 보내는 크기여야 한다.
+
+    두 곳이 각자 조립하면 안내한 숫자와 실행이 막히는 지점이 어긋나고, 그
+    어긋남은 실행이 실패한 뒤에야 드러난다. 그래서 같은 함수를 부르는지를
+    숫자로 고정한다.
+    """
+    batch_id = _upload_spec(client)
+    ahead = _preflight(client, batch_id=batch_id)
+    job = wait_for_job(client, _start(client, batch_id=batch_id)["id"])
+    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+
+    # 검색은 레인이 둘이고, 한도는 레인마다 따로 걸린다.
+    lanes = {lane["id"]: lane for lane in ahead["lanes"]}
+    assert set(lanes) == {"claim_only", "spec_assisted"}
+    assert ahead["bytes"] == max(lane["bytes"] for lane in ahead["lanes"])
+
+    # 실행이 남긴 레인 프롬프트와 대조한다. 저장 파일은 구분 머리글을 붙이므로
+    # 시스템 프롬프트와 사용자 메시지 본문만 떼어 낸다.
+    for origin, lane in lanes.items():
+        system, user = _lane_parts(client, job["id"], origin)
+        assert lane["chars"] == len(system) + len(user), origin
+        assert lane["bytes"] == len(system.encode("utf-8")) + len(
+            user.encode("utf-8")
+        ), origin
+
+    # 저장된 합계와도 어긋나지 않아야 한다.
+    assert sum(lane["chars"] for lane in ahead["lanes"]) == job["final_prompt_chars"]
+
+
+def test_preflight_reports_the_provider_byte_limit_not_just_chars(client) -> None:
+    """ARIA 글자 수 제한을 꺼도 최종 UTF-8 바이트 수는 보고한다."""
+    ahead = _preflight(client, batch_id=_upload_spec(client))
+    assert ahead["char_budget"] is None
+    # 이 테스트 Provider 는 바이트 한도를 선언하지 않는다. 그 사실이 그대로
+    # 드러나야 한다 — 없는 한도를 0 이나 추정값으로 채우지 않는다.
+    assert ahead["byte_budget"] is None
+    assert ahead["over_bytes"] is False
+    assert ahead["blocked"] is False
+    # 바이트는 언제나 계산해서 돌려준다. 한도가 없어도 크기는 사실이다.
+    assert ahead["bytes"] > ahead["chars"]
+
+
+def test_preflight_does_not_create_a_job(client) -> None:
+    before = len(client.get("/api/history").json())
+    _preflight(client)
+    after = len(client.get("/api/history").json())
+    assert before == after

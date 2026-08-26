@@ -12,6 +12,7 @@ import type {
   AttachmentRole,
   Job,
   JobKind,
+  Preflight,
   Prompt,
   ProviderInfo,
   RelationType,
@@ -66,6 +67,99 @@ function roleLabel(role: AttachmentRole): string {
   return "기타 자료";
 }
 
+/** 실행 전 크기 안내.
+ *
+ *  숫자는 백엔드가 runner 와 같은 조립 함수로 잰 값이다. 화면이 따로 추정하면
+ *  안내한 숫자와 실행이 막히는 지점이 어긋나고, 그 어긋남은 실행이 실패한
+ *  뒤에야 드러난다. 아직 못 받았을 때만 화면 추정치를 임시로 보여 준다.
+ */
+function SizeNotice({
+  preflight,
+  totalChars,
+  budget,
+  overBudget,
+}: {
+  preflight: Preflight | null;
+  totalChars: number;
+  /** 환경설정의 글자 수 한도. null = 제한 없음, undefined = 아직 못 읽음. */
+  budget: number | null | undefined;
+  overBudget: boolean;
+}) {
+  if (!preflight) {
+    return (
+      <div
+        className={`notice ${overBudget ? "danger" : "info"}`}
+        style={{ marginTop: 12 }}
+      >
+        화면 추정 입력 크기 {totalChars.toLocaleString()}자
+        {budget === undefined
+          ? " / 설정 확인 중"
+          : budget === null
+            ? ""
+            : ` / 설정한 한도 ${budget.toLocaleString()}자`}
+        {" — 최종 크기를 확인하는 중입니다."}
+      </div>
+    );
+  }
+  if (preflight.error) {
+    return (
+      <div className="notice danger" style={{ marginTop: 12 }}>
+        {preflight.error}
+      </div>
+    );
+  }
+  const lanes = preflight.lanes.length > 1 ? preflight.lanes : [];
+  return (
+    <div
+      className={`notice ${preflight.blocked ? "danger" : "info"}`}
+      style={{ marginTop: 12 }}
+    >
+      <div>
+        최종 프롬프트 {preflight.chars.toLocaleString()}자 ·{" "}
+        {preflight.bytes.toLocaleString()} bytes
+      </div>
+      <div className="faint">
+        {preflight.byte_budget !== null
+          ? `${preflight.provider} 가 자료 전체를 손실 없이 전달할 수 있는 한도 ` +
+            `${preflight.byte_budget.toLocaleString()} bytes`
+          : `${preflight.provider || "이 Provider"} 는 전송 한도를 선언하지 않았습니다`}
+        {preflight.char_budget !== null && (
+          <>
+            {" · "}
+            환경설정에서 걸어 둔 글자 수 한도{" "}
+            {preflight.char_budget.toLocaleString()}자
+          </>
+        )}
+      </div>
+      {lanes.length > 0 && (
+        <div className="faint">
+          독립 실행마다 따로 걸립니다 —{" "}
+          {lanes
+            .map(
+              (lane) =>
+                `${LANE_LABEL[lane.id] ?? lane.id} ${lane.bytes.toLocaleString()} bytes`,
+            )
+            .join(" · ")}
+        </div>
+      )}
+      {preflight.message && <div style={{ marginTop: 6 }}>{preflight.message}</div>}
+      {!preflight.blocked && (
+        <div className="faint">
+          ARIA 는 내용을 임의로 자르거나 요약하지 않습니다. 한도를 넘으면 Provider
+          를 호출하기 전에 막으므로 토큰이 소모되지 않고, 그때는 문헌을 나눠 여러
+          번 실행하거나 전송 한도가 더 큰 Provider 를 선택하면 됩니다.
+        </div>
+      )}
+    </div>
+  );
+}
+
+const LANE_LABEL: Record<string, string> = {
+  claim_only: "청구항 단독",
+  spec_assisted: "명세서 확장",
+};
+
+
 export default function RunPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -77,10 +171,16 @@ export default function RunPage() {
   // 사용자가 위험을 확인하지 않은 채 실행하게 된다.
   const [providerId, setProviderId] = useState("");
   const [model, setModel] = useState("");
-  // 환경설정의 「모델에 전달할 최대 글자 수」. 화면에 상수를 박아 두면 설정을
-  // 바꿔도 옛 숫자가 남아, 사용자가 틀린 한도를 믿고 입력을 줄이게 된다.
-  // 아직 못 읽었으면 null 로 두고 짐작한 숫자를 보여 주지 않는다.
-  const [inlineCharBudget, setInlineCharBudget] = useState<number | null>(null);
+  // 환경설정에서 사용자가 스스로 걸어 둔 글자 수 한도. 화면에 상수를 박아 두면
+  // 설정을 바꿔도 옛 숫자가 남아, 사용자가 틀린 한도를 믿고 입력을 줄이게 된다.
+  // null = 제한 없음(기본값), undefined = 아직 못 읽음.
+  const [inlineCharBudget, setInlineCharBudget] = useState<number | null | undefined>(
+    undefined,
+  );
+  // 실행 전 크기는 백엔드가 잰다. 화면이 원본 첨부 글자 수를 세는 것으로는
+  // 최종 조립 프롬프트의 크기를 맞힐 수 없고, Provider 한도는 문자가 아니라
+  // UTF-8 바이트로 걸린다. null 이면 아직 못 받았다는 뜻이다.
+  const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [uploading, setUploading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [gapSearchOpen, setGapSearchOpen] = useState(false);
@@ -118,6 +218,7 @@ export default function RunPage() {
     setRequired,
     stream,
     running,
+    busy,
     restoring,
   } = useRunSession();
 
@@ -126,7 +227,8 @@ export default function RunPage() {
       .then(([promptList, providerList, appSettings]) => {
         setPrompts(promptList);
         setProviders(providerList);
-        setInlineCharBudget(appSettings.values.max_inline_chars);
+        // 0 = 제한 없음. 화면에서는 null 로 다룬다.
+        setInlineCharBudget(appSettings.values.max_inline_chars || null);
         const configuredPromptId = appSettings.values.default_prompt_id;
         const fallbackPrompt = promptList.find((p) => p.enabled) ?? promptList[0];
         const configuredPrompt = promptList.find(
@@ -230,9 +332,58 @@ export default function RunPage() {
   }, [upload, lineage, claimText, followupInstruction, selectedPrompt]);
 
   // 업로드를 마쳤으면 서버가 그 응답에 실어 준 값이 가장 최신이다. 아직
-  // 안 올렸으면 화면을 열 때 읽어 둔 설정값을 쓴다.
-  const budget = upload?.max_inline_chars ?? inlineCharBudget;
-  const overBudget = budget !== null && totalChars > budget;
+  // 안 올렸으면 화면을 열 때 읽어 둔 설정값을 쓴다. 둘 다 null 이 "제한 없음"
+  // 이므로 ?? 로 합치면 뜻이 뒤집힌다.
+  const budget = upload ? upload.max_inline_chars : inlineCharBudget;
+  const overBudget = typeof budget === "number" && totalChars > budget;
+
+  // 실행 전 크기는 백엔드가 잰다. 입력이 바뀔 때마다 부르되 타이핑마다 보내지
+  // 않도록 조금 미룬다. 작업을 만들지 않고 Provider 도 부르지 않는 호출이다.
+  const activeBatchId = searching
+    ? (searchUpload?.batch_id ?? null)
+    : (upload?.batch_id ?? null);
+  const activeClaim = searching ? searchClaimText : claimText;
+  useEffect(() => {
+    if (!providerId) {
+      setPreflight(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      api
+        .preflight({
+          job_kind: jobKind,
+          provider: providerId,
+          prompt_id: searching ? null : promptId || null,
+          claim_text: activeClaim,
+          batch_id: activeBatchId,
+          source_job_id: lineage?.sourceJobId ?? null,
+          relation_type: lineage?.relationType ?? null,
+          followup_instruction: followupInstruction,
+        })
+        .then((result) => {
+          if (!cancelled) setPreflight(result);
+        })
+        .catch(() => {
+          // 크기 안내는 편의 기능이다. 못 받으면 화면 추정치로 되돌아간다.
+          if (!cancelled) setPreflight(null);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    jobKind,
+    providerId,
+    promptId,
+    searching,
+    activeClaim,
+    activeBatchId,
+    lineage?.sourceJobId,
+    lineage?.relationType,
+    followupInstruction,
+  ]);
 
   const selectedUploadItems = useMemo(
     () => citationFiles.map((file) => ({ file, role: "CITATION" as const })),
@@ -729,6 +880,13 @@ export default function RunPage() {
                 )}
               </ul>
             </div>
+
+            <SizeNotice
+              preflight={preflight}
+              totalChars={totalChars}
+              budget={budget}
+              overBudget={overBudget}
+            />
           </>
         ) : (
           <>
@@ -985,26 +1143,22 @@ export default function RunPage() {
               );
             })}
 
-            <div
-              className={`notice ${overBudget ? "danger" : "info"}`}
-              style={{ marginTop: 12 }}
-            >
-              예상 입력 크기 {totalChars.toLocaleString()}자 /{" "}
-              {budget === null ? "허용 한도 확인 중" : `허용 ${budget.toLocaleString()}자`}
-              {overBudget &&
-                " — 예산을 초과하면 실행이 INPUT_TOO_LARGE 로 중단됩니다. ARIA 는 내용을 임의로 자르거나 요약하지 않습니다."}
-            </div>
+            <SizeNotice
+              preflight={preflight}
+              totalChars={totalChars}
+              budget={budget}
+              overBudget={overBudget}
+            />
           </div>
         )}
 
         {!upload && (
-          <div
-            className={`notice ${overBudget ? "danger" : "info"}`}
-            style={{ marginTop: 12 }}
-          >
-            현재 텍스트 입력 예상 크기 {totalChars.toLocaleString()}자 /{" "}
-            {budget === null ? "허용 한도 확인 중" : `허용 ${budget.toLocaleString()}자`}
-          </div>
+          <SizeNotice
+            preflight={preflight}
+            totalChars={totalChars}
+            budget={budget}
+            overBudget={overBudget}
+          />
         )}
           </>
         )}
@@ -1080,7 +1234,9 @@ export default function RunPage() {
             className="btn primary"
             onClick={run}
             disabled={
-              running ||
+              // 다른 축에서 실행 중이어도 막는다. 스트림이 하나뿐이라 두 작업을
+              // 동시에 띄우면 한쪽은 끝나도 화면이 갱신되지 않는다.
+              busy ||
               uploading ||
               submitting ||
               !providerId ||

@@ -64,7 +64,9 @@ def evaluate(
     # --- 종료 상태가 먼저다 -------------------------------------------------
     # 도구 상한을 넘겨 ARIA 가 프로세스를 끊은 경우에도 cancelled 는 참이다.
     # 그건 사용자가 누른 취소가 아니므로 여기서 삼키지 않고 아래로 넘긴다.
-    if outcome.cancelled and not outcome.tool_budget_exceeded:
+    if outcome.cancelled and not (
+        outcome.tool_budget_exceeded or outcome.content_read_budget_exceeded
+    ):
         return Verdict(JobStatus.CANCELLED, ErrorCode.CANCELLED, errors)
 
     if outcome.timed_out:
@@ -121,14 +123,26 @@ def evaluate(
                     + ", ".join(stray_advertised[:10])
                 )
                 return Verdict(JobStatus.FAILED, ErrorCode.TOOL_POLICY_VIOLATION, errors)
-        stray_used = policy.unexpected(outcome.tool_uses)
+        # 인자까지 봐야 허용 여부가 갈리는 도구가 있으면 호출 기록으로 판정한다.
+        # 기록이 없으면 이름만으로 판정한다 — 그쪽이 더 닫힌 판정이다.
+        if outcome.tool_calls:
+            stray_used = policy.unexpected_calls(outcome.tool_calls)
+        else:
+            stray_used = policy.unexpected(outcome.tool_uses)
         if stray_used:
+            scope_note = ""
+            if policy.content_read_tools:
+                scope_note = (
+                    " " + ", ".join(policy.content_read_tools) + " 은 이 실행에서 "
+                    "가져온 페이지의 저장본을 읽는 호출만 인정합니다."
+                )
             errors.append(
                 "허용되지 않은 도구가 호출되었습니다: "
                 + ", ".join(stray_used[:10])
                 + f". {policy.name} 정책은 "
                 + ", ".join(policy.allowed_tools)
                 + " 만 허용합니다."
+                + scope_note
             )
             return Verdict(JobStatus.FAILED, ErrorCode.TOOL_POLICY_VIOLATION, errors)
 
@@ -138,8 +152,18 @@ def evaluate(
     if outcome.tool_budget_exceeded:
         limit = policy.max_tool_calls if policy else 0
         errors.append(
-            f"도구 호출이 상한({limit}회)을 넘어 실행을 중단했습니다. "
+            f"검색 도구 호출이 상한({limit}회)을 넘어 실행을 중단했습니다. "
             "검색 범위를 좁혀서 다시 시도하십시오."
+        )
+        return Verdict(JobStatus.FAILED, ErrorCode.SEARCH_BUDGET_EXCEEDED, errors)
+
+    # 본문 읽기 상한은 검색 상한과 따로 센다. 사용자가 받아야 할 지시가 다르다 —
+    # "검색을 줄여라"가 아니라 "문헌 수를 줄여라"이다.
+    if outcome.content_read_budget_exceeded:
+        limit = policy.max_content_read_calls if policy else 0
+        errors.append(
+            f"페이지 본문 읽기 호출이 상한({limit}회)을 넘어 실행을 중단했습니다. "
+            "확인할 문헌 수를 줄여서 다시 시도하십시오."
         )
         return Verdict(JobStatus.FAILED, ErrorCode.SEARCH_BUDGET_EXCEEDED, errors)
 

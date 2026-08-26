@@ -394,6 +394,11 @@ def test_attachment_content_reaches_final_prompt(client, prompt) -> None:
 
 
 def test_input_too_large(client, prompt) -> None:
+    """사용자가 직접 건 글자 수 한도는 그대로 지킨다.
+
+    기본값은 제한 없음(0)이지만, 값을 넣어 두면 그 한도에서 막는다. 자르거나
+    요약하지 않고 INPUT_TOO_LARGE 로 끝낸다.
+    """
     client.put("/api/settings", json={"values": {"max_inline_chars": 1500}})
     try:
         upload = client.post(
@@ -412,15 +417,53 @@ def test_input_too_large(client, prompt) -> None:
         assert final["status"] == "FAILED"
         assert final["error_code"] == "INPUT_TOO_LARGE"
     finally:
-        client.put("/api/settings", json={"values": {"max_inline_chars": 800000}})
+        # 기본값으로 되돌린다. 0 = 제한 없음.
+        client.put("/api/settings", json={"values": {"max_inline_chars": 0}})
+
+
+def test_inline_char_limit_defaults_to_unlimited(client, prompt) -> None:
+    """ARIA 자체 글자 수 한도는 기본적으로 없다.
+
+    0 과 null 을 모두 '제한 없음'으로 받고, 그 상태에서는 큰 입력도 글자 수를
+    이유로 막지 않는다. 실행을 막아야 하는 한도는 Provider 전송 한도와 모델
+    컨텍스트 한도뿐이며, 그 둘은 이 설정과 무관하게 남는다
+    (test_provider_byte_budget_blocks_oversized_input 참조).
+    """
+    assert client.get("/api/settings").json()["values"]["max_inline_chars"] == 0
+
+    # null 도 같은 뜻으로 받는다.
+    values = client.put(
+        "/api/settings", json={"values": {"max_inline_chars": None}}
+    ).json()["values"]
+    assert values["max_inline_chars"] == 0
+
+    upload = client.post(
+        "/api/uploads",
+        files=[("files", ("big.txt", "가".encode("utf-8") * 300_000, "text/plain"))],
+    ).json()
+    # 업로드 응답의 한도도 "제한 없음"을 그대로 전한다.
+    assert upload["max_inline_chars"] is None
+
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1.",
+            "batch_id": upload["batch_id"],
+        },
+    ).json()
+    final = wait_for_job(client, job["id"])
+    assert final["status"] == "SUCCEEDED", final.get("error_message")
 
 
 def test_provider_byte_budget_blocks_oversized_input(client, prompt, monkeypatch) -> None:
     """문자수 한도는 통과해도 Provider 의 바이트 한도를 넘으면 실행 전에 막는다.
 
     agy 처럼 큰 입력을 조용히 자르는 Provider 를 위한 방어다. 자르기 전에 실패로
-    끝내, 앞부분만 분석하고 '성공'으로 남는 낭비를 없앤다. max_inline_chars
-    (문자수)는 통과하는 크기로도 UTF-8 바이트 한도는 넘길 수 있음을 고정한다.
+    끝내, 앞부분만 분석하고 '성공'으로 남는 낭비를 없앤다. ARIA 의 글자 수
+    한도를 꺼 두어도(기본값) 이 검사는 남는다는 것을 고정한다 — 사용자 입력
+    제한이 아니라 Provider 가 자료 전체를 손실 없이 전달할 수 있는 한도다.
     """
     from .fake_provider import DeterministicTestProvider
 
@@ -428,7 +471,7 @@ def test_provider_byte_budget_blocks_oversized_input(client, prompt, monkeypatch
     # 통과하고, 아래의 거대한 청구항만 이를 넘긴다.
     monkeypatch.setattr(DeterministicTestProvider, "max_input_bytes", 100_000)
 
-    # 200,000 자는 max_inline_chars(기본 800,000 자) 아래라 문자 검사는 통과한다.
+    # 글자 수 한도는 기본이 '제한 없음'이라 아무리 길어도 문자 검사는 통과한다.
     # 그러나 한글은 UTF-8 로 3 bytes 라서 ~600 KB, 100 KB 예산을 크게 넘는다.
     huge_claim = "청구항 1. " + "가" * 200_000
 

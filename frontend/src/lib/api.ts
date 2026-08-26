@@ -3,6 +3,7 @@ import type {
   HistoryItem,
   Job,
   JobKind,
+  Preflight,
   Prompt,
   PromptCatalogItem,
   PromptVersion,
@@ -144,6 +145,22 @@ export const api = {
     followup_instruction?: string;
     search_component_ids?: string[];
   }) => request<Job>("/api/jobs", { method: "POST", body: JSON.stringify(body) }),
+  /** 실행하지 않고 최종 조립 프롬프트의 크기만 받아 온다. 작업을 만들지 않고
+   *  Provider 도 부르지 않는다. */
+  preflight: (body: {
+    job_kind?: JobKind;
+    prompt_id?: string | null;
+    provider?: string | null;
+    claim_text?: string;
+    batch_id?: string | null;
+    source_job_id?: string | null;
+    relation_type?: RelationType | null;
+    followup_instruction?: string;
+  }) =>
+    request<Preflight>("/api/jobs/preflight", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   getJob: (id: string) => request<Job>(`/api/jobs/${id}`),
   cancelJob: (id: string) =>
     request<{ cancelled: boolean; reason?: string }>(`/api/jobs/${id}/cancel`, {

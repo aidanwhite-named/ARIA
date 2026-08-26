@@ -42,9 +42,24 @@ class InputTooLarge(Exception):
         self.total_chars = total_chars
         self.budget = budget
         super().__init__(
-            f"입력이 컨텍스트 예산을 초과했습니다: {total_chars:,}자 "
-            f"(허용 {budget:,}자)"
+            f"입력이 설정한 글자 수 한도를 초과했습니다: {total_chars:,}자 "
+            f"(한도 {budget:,}자). 조립 단계에서 막았으므로 Provider 를 호출하지 "
+            "않았고 토큰도 소모되지 않았습니다. ARIA 는 문서를 임의로 자르거나 "
+            "요약하지 않습니다. 문헌을 나눠 여러 번 실행하거나, 환경설정에서 이 "
+            "한도를 0(제한 없음)으로 두십시오."
         )
+
+
+def _char_gate(total: int, max_chars: int | None) -> None:
+    """설정한 글자 수 한도를 넘으면 막는다. None 이나 0 이면 한도가 없다.
+
+    글자 수 한도는 사용자가 스스로 걸어 두는 상한이라 끌 수 있다. 끄더라도
+    Provider 전송 한도(Provider.max_input_bytes)와 모델 컨텍스트 한도는 그대로
+    남는다 — 그 둘은 문자가 아니라 바이트/토큰으로 걸리는 별개의 검사이고,
+    사용자가 끌 수 없다.
+    """
+    if max_chars and total > max_chars:
+        raise InputTooLarge(total, max_chars)
 
 
 @dataclass
@@ -125,7 +140,7 @@ def assemble(
     attachments: list[IngestedFile],
     runtime_context: str,
     runtime_context_enabled: bool,
-    max_chars: int,
+    max_chars: int | None,
     claim_text: str = "",
     followup_instruction: str = "",
     prior_claim_text: str = "",
@@ -216,8 +231,7 @@ def assemble(
     system_prompt = runtime_context.strip() if runtime_context_enabled else ""
 
     total = len(user_message) + len(system_prompt)
-    if total > max_chars:
-        raise InputTooLarge(total, max_chars)
+    _char_gate(total, max_chars)
 
     digest = hashlib.sha256(
         (system_prompt + "\n\x00\n" + user_message).encode("utf-8")
@@ -236,7 +250,7 @@ def assemble(
 def assemble_search(
     search_prompt_body: str,
     runtime_context: str,
-    max_chars: int,
+    max_chars: int | None,
     attachments: list[IngestedFile] | None = None,
 ) -> AssembledPrompt:
     """유사 문헌 검색 실행의 최종 프롬프트.
@@ -256,8 +270,7 @@ def assemble_search(
     system_prompt = runtime_context.strip()
 
     total = len(user_message) + len(system_prompt)
-    if total > max_chars:
-        raise InputTooLarge(total, max_chars)
+    _char_gate(total, max_chars)
 
     digest = hashlib.sha256(
         (system_prompt + "\n\x00\n" + user_message).encode("utf-8")

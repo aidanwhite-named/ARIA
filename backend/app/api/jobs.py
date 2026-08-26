@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from .. import analysis_manifest, citation_mapping, settings_service
+from .. import analysis_manifest, citation_mapping, job_assembly, settings_service
 from ..config import PATHS
 from ..db import get_db
 from ..enums import (
@@ -27,14 +27,23 @@ from ..execution.runner import RUNNER, row_to_ingested
 from ..ingestion.security import UnsafeFilename
 from ..ingestion.service import (
     AttachmentCloneError,
+    IngestedFile,
     IngestionLimits,
     clone_attachment,
     ingest_many,
 )
 from ..models import Attachment, ExecutionJob, ResultArtifact
+from ..prompt_assembly import InputTooLarge
 from ..prompt_store import PROMPT_STORE, InvalidPromptFile, PromptNotFound
 from ..providers.registry import build_provider, probe_one
-from ..schemas import AttachmentAnalysis, JobCreate, JobOut, UploadResponse
+from ..schemas import (
+    AttachmentAnalysis,
+    JobCreate,
+    JobOut,
+    PreflightLane,
+    PreflightOut,
+    UploadResponse,
+)
 from ..search_prompt import (
     SEARCH_PROMPT_ID,
     SearchPromptError,
@@ -189,7 +198,11 @@ async def upload_files(
         ],
         rejected=result.rejected,
         total_chars=result.total_chars,
-        max_inline_chars=int(settings_service.get(session, "max_inline_chars")),
+        # None = ARIA 자체 글자 수 한도 없음(기본값). 실행을 실제로 막는 한도는
+        # 선택한 Provider 의 전송 한도이며, 그 값은 preflight 가 돌려준다.
+        max_inline_chars=settings_service.inline_char_budget(
+            settings_service.get(session, "max_inline_chars")
+        ),
     )
 
 
@@ -761,6 +774,180 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
 
     await RUNNER.submit(job.id)
     return _job_out(job)
+
+
+@router.post("/jobs/preflight", response_model=PreflightOut)
+def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> PreflightOut:
+    """실행하지 않고, 이 입력이 실제로 몇 바이트가 되는지 돌려준다.
+
+    runner 와 **같은 조립 함수**를 부른다(job_assembly.assemble_job). 화면이
+    따로 추정하면 안내한 숫자와 실행이 막히는 지점이 어긋나고, 그 어긋남은
+    실행이 실패한 뒤에야 드러난다.
+
+    작업을 만들지 않고 Provider 도 부르지 않는다. 인증 검사도 하지 않는다 —
+    크기를 알려주는 것이 전부이므로 로그인 전에도 답할 수 있어야 한다.
+    """
+    values = settings_service.get_all(session)
+    job_kind = JobKind(payload.job_kind)
+    max_chars = settings_service.inline_char_budget(values)
+    provider_id = payload.provider or str(values.get("default_provider") or "")
+
+    # --- 프롬프트 본문 ---------------------------------------------------
+    if job_kind is JobKind.SIMILARITY_SEARCH:
+        try:
+            prompt_body = load_search_prompt().body
+        except SearchPromptError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    else:
+        prompt_id = payload.prompt_id or str(values.get("default_prompt_id") or "")
+        prompt = None
+        if prompt_id:
+            try:
+                prompt = PROMPT_STORE.get(prompt_id)
+            except (PromptNotFound, InvalidPromptFile):
+                prompt = None
+        if prompt is None:
+            try:
+                prompt = next((item for item in PROMPT_STORE.list() if item.enabled), None)
+            except InvalidPromptFile as exc:
+                raise HTTPException(422, str(exc)) from exc
+        if prompt is None:
+            raise HTTPException(404, "프롬프트를 찾을 수 없습니다.")
+        prompt_body = prompt.body
+
+    # --- 이 실행에 들어갈 자료 -------------------------------------------
+    attachments: list[IngestedFile] = []
+    if payload.batch_id:
+        rows = (
+            session.query(Attachment)
+            .filter(Attachment.upload_batch == payload.batch_id)
+            .all()
+        )
+        attachments.extend(row_to_ingested(row) for row in rows)
+    source_job = (
+        session.get(ExecutionJob, payload.source_job_id)
+        if payload.source_job_id
+        else None
+    )
+    prior_claim_text = ""
+    prior_report = ""
+    prior_mapping = None
+    if source_job is not None:
+        relation = RelationType(payload.relation_type) if payload.relation_type else None
+        # 물려받는 자료도 실제 실행과 같이 센다. 복제 전이라 원본 행을 그대로
+        # 읽지만 본문 길이는 같다.
+        attachments.extend(row_to_ingested(row) for row in source_job.attachments)
+        if relation is not None and relation.inherits_mapping:
+            prior_claim_text = source_job.claim_text or ""
+            prior_mapping = source_job.prior_citation_mapping or source_job.citation_mapping
+        if relation is RelationType.CONTINUED:
+            prior_report = source_job.result_text or ""
+
+    # --- Provider 의 바이트 한도 ------------------------------------------
+    provider = (
+        build_provider(provider_id, values.get("provider_paths") or {})
+        if provider_id
+        else None
+    )
+    byte_budget = getattr(provider, "max_input_bytes", None)
+    tool_policy = getattr(provider, "search_tool_policy", None)
+    tool_policy_name = getattr(tool_policy, "name", "") or ""
+
+    # --- 실제 조립 --------------------------------------------------------
+    try:
+        assembly = job_assembly.assemble_job(
+            job_kind=job_kind,
+            master_prompt=prompt_body,
+            attachments=attachments,
+            runtime_context=str(values.get("runtime_context") or ""),
+            runtime_context_enabled=bool(values.get("runtime_context_enabled", True)),
+            max_chars=max_chars,
+            claim_text=payload.claim_text or "",
+            followup_instruction=payload.followup_instruction or "",
+            prior_claim_text=prior_claim_text,
+            prior_report=prior_report,
+            prior_citation_mapping=prior_mapping,
+            tool_policy_name=tool_policy_name,
+        )
+    except job_assembly.SpecUnreadable as exc:
+        return PreflightOut(
+            job_kind=job_kind.value,
+            provider=provider_id,
+            lanes=[],
+            chars=0,
+            bytes=0,
+            char_budget=max_chars,
+            byte_budget=byte_budget,
+            blocked=True,
+            error=(
+                f"출원발명 문서의 본문을 읽지 못했습니다: {exc.filename}. "
+                "명세서를 반영하지 못한 채로 검색하지 않습니다."
+            ),
+        )
+    except InputTooLarge as exc:
+        # 조립 단계에서 이미 문자 예산을 넘겼다. 크기를 재지 못했으므로
+        # 숫자 대신 이유를 돌려준다.
+        return PreflightOut(
+            job_kind=job_kind.value,
+            provider=provider_id,
+            lanes=[],
+            chars=0,
+            bytes=0,
+            char_budget=max_chars,
+            byte_budget=byte_budget,
+            over_chars=True,
+            blocked=True,
+            message=str(exc),
+        )
+    except SearchPromptError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    lane_bytes = assembly.lane_bytes()
+    lanes = [
+        PreflightLane(
+            id=name,
+            # 조립본이 이미 센 값을 쓴다. 여기서 따로 세면 저장되는
+            # final_prompt_chars 와 화면 안내가 어긋난다.
+            chars=lane.total_chars,
+            bytes=lane_bytes[name],
+        )
+        for name, lane in assembly.lanes.items()
+    ]
+    # 한도는 레인마다 따로 걸린다. 합계가 아니라 최댓값이 실행을 막는다.
+    chars = max((lane.chars for lane in lanes), default=0)
+    largest = max(lane_bytes.values(), default=0)
+    over_bytes = bool(byte_budget and largest > byte_budget)
+
+    over_chars = max_chars is not None and chars > max_chars
+    message = ""
+    if over_bytes:
+        message = (
+            f"지금 실행하면 시작하지 못합니다. 최종 프롬프트가 {largest:,} bytes 로 "
+            f"{provider_id} 가 자료 전체를 손실 없이 전달할 수 있는 한도 "
+            f"{byte_budget:,} bytes 를 넘습니다. ARIA 는 문서를 임의로 자르거나 "
+            "요약하지 않으므로 Provider 를 호출하기 전에 막습니다(토큰 소모 없음). "
+            "문헌을 나눠 여러 번 실행하거나, 입력 전송 한도가 더 큰 Provider 를 "
+            "선택하십시오."
+        )
+    elif over_chars:
+        message = (
+            f"지금 실행하면 시작하지 못합니다. 최종 프롬프트가 {chars:,}자로 "
+            f"환경설정의 글자 수 한도 {max_chars:,}자를 넘습니다. 문헌을 나눠 "
+            "실행하거나, 환경설정에서 이 한도를 0(제한 없음)으로 두십시오."
+        )
+    return PreflightOut(
+        job_kind=job_kind.value,
+        provider=provider_id,
+        lanes=lanes,
+        chars=chars,
+        bytes=largest,
+        char_budget=max_chars,
+        byte_budget=byte_budget,
+        over_chars=over_chars,
+        over_bytes=over_bytes,
+        blocked=over_bytes or over_chars,
+        message=message,
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)

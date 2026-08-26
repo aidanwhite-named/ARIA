@@ -800,3 +800,70 @@ def test_manifest_without_a_spec_says_so_explicitly() -> None:
     )
     assert manifest["input"]["spec_document"] is None
     assert manifest["input"]["spec_boundary_neutralized"] is False
+
+
+# --------------------------------------------------- 포인터와 본문 읽기의 구분
+
+
+def _pointer_calls(content_read):
+    """agy 식 열람 호출. content_read 가 본문을 읽었는지를 가른다."""
+    call = {
+        "id": "t1",
+        "name": "read_url_content",
+        "ts": "2026-08-25T00:00:00+00:00",
+        "input": {"url": CANDIDATE_URL},
+        "ok": True,
+        "error": None,
+    }
+    if content_read is not None:
+        call["content_read"] = content_read
+    return [call]
+
+
+def test_pointer_only_fetch_is_not_a_page_read() -> None:
+    """agy 의 read_url_content 는 성공해도 본문을 돌려주지 않는다.
+
+    이것을 열람으로 세면 아무도 읽지 않은 페이지가 근거가 된다. 2026-08-25
+    이전 실행이 전부 그랬다 — 열람 성공은 참인데 원문 확인 0건, 근거 문장 0건.
+    """
+    section = search_manifest.observed(_pointer_calls(False), ["read_url_content"])
+    assert section["attempted_fetch_urls"] == [CANDIDATE_URL]
+    assert section["succeeded_fetch_urls"] == []
+
+
+def test_fetch_whose_content_was_read_counts_as_a_page_read() -> None:
+    section = search_manifest.observed(_pointer_calls(True), ["read_url_content"])
+    assert section["succeeded_fetch_urls"] == [CANDIDATE_URL]
+
+
+def test_provider_that_returns_content_inline_keeps_the_old_contract() -> None:
+    """WebFetch 처럼 본문을 그대로 돌려주는 Provider 는 표시를 붙이지 않는다."""
+    section = search_manifest.observed(_pointer_calls(None), ["read_url_content"])
+    assert section["succeeded_fetch_urls"] == [CANDIDATE_URL]
+
+
+def test_candidate_from_a_pointer_only_fetch_is_quarantined() -> None:
+    """본문을 읽지 않았으면 그 후보는 그룹에도 대응표에도 들어가지 못한다."""
+    reported, notes = search_manifest.parse(
+        _block({"candidates": [_candidate()]}),
+        search_manifest.observed(_pointer_calls(False), ["read_url_content"]),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["page_fetch_succeeded"] is False
+    assert candidate["quarantined"] is True
+    assert candidate["group_eligible"] is False
+    assert candidate["mapping"] == []
+    assert any("열람 기록이 없습니다" in note for note in notes)
+
+
+def test_candidate_whose_page_was_read_keeps_its_page_supported_row() -> None:
+    reported, _ = search_manifest.parse(
+        _block({"candidates": [_candidate()]}),
+        search_manifest.observed(_pointer_calls(True), ["read_url_content"]),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["page_fetch_succeeded"] is True
+    assert candidate["mapping"][0]["support_source"] == "page_text"
+    # 본문을 읽었다고 해서 공식 원문 대조로 올라가지는 않는다.
+    assert candidate["provenance"] == "webfetch_summary"
+    assert candidate["original_verified"] is False

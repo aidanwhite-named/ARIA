@@ -117,6 +117,17 @@ def test_budget_exceeded_raises_instead_of_truncating() -> None:
     assert excinfo.value.total_chars > 1000
 
 
+def test_zero_or_none_budget_means_no_char_limit() -> None:
+    """글자 수 한도는 끌 수 있다. 0 과 None 이 모두 '제한 없음'이다.
+
+    끈다고 무제한으로 나가는 것은 아니다 — Provider 전송 한도(바이트)와 모델
+    컨텍스트 한도는 조립 뒤에 따로 걸리고, 그 둘은 사용자가 끌 수 없다.
+    """
+    body = "x" * 50_000
+    assert assemble(body, [], RULES, True, 0).total_chars > 50_000
+    assert assemble(body, [], RULES, True, None).total_chars > 50_000
+
+
 def test_budget_counts_system_prompt() -> None:
     long_rules = "r" * 1200
     with pytest.raises(InputTooLarge):

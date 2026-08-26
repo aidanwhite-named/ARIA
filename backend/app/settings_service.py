@@ -75,6 +75,27 @@ _LIMITS = {
     "max_search_tool_calls": (1, 200),
 }
 
+# 0 이나 null 을 "제한 없음"으로 받는 키. 다른 한도와 달리 이 값은 안전 장치가
+# 아니라 사용자가 스스로 걸어 두는 상한이라, 끄는 것을 허용한다. 끈다고 해서
+# 무제한으로 보내지는 것은 아니다 — Provider 전송 한도(Provider.max_input_bytes)
+# 와 모델 컨텍스트 한도는 그대로 남고, 그 둘은 사용자가 끌 수 없다.
+_UNLIMITED_KEYS = frozenset({"max_inline_chars"})
+
+
+def inline_char_budget(source: Any) -> int | None:
+    """ARIA 자체 글자 수 한도. None 이면 제한 없음.
+
+    설정 전체(dict)를 넘겨도 되고 그 키의 값만 넘겨도 된다. 0·null·정수 아닌
+    값의 해석을 한 군데로 모은다 — 호출부마다 `or 800_000` 같은 기본값을 적어
+    두면 "제한 없음"이 조용히 다른 숫자로 바뀐다.
+    """
+    raw = source.get("max_inline_chars") if isinstance(source, dict) else source
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
 
 def get_all(session: Session) -> dict[str, Any]:
     values = dict(DEFAULTS)
@@ -110,12 +131,23 @@ def get(session: Session, key: str) -> Any:
 
 def _coerce(key: str, value: Any) -> Any:
     if key in _INT_KEYS:
+        if key in _UNLIMITED_KEYS and (
+            value is None or (isinstance(value, str) and not value.strip())
+        ):
+            return 0
         try:
             number = int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{key} 는 정수여야 합니다.") from exc
+        if key in _UNLIMITED_KEYS and number <= 0:
+            # 0 = 제한 없음. 음수도 같은 뜻으로 받아 0 으로 정규화한다.
+            return 0
         low, high = _LIMITS[key]
         if not low <= number <= high:
+            if key in _UNLIMITED_KEYS:
+                raise ValueError(
+                    f"{key} 는 0(제한 없음)이거나 {low} 이상 {high} 이하여야 합니다."
+                )
             raise ValueError(f"{key} 는 {low} 이상 {high} 이하여야 합니다.")
         return number
     if key in (

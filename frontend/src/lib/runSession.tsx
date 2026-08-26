@@ -13,6 +13,7 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -52,8 +53,19 @@ const STORAGE_KEY = "aria.run-session.v1";
 const STORAGE_DEBOUNCE_MS = 250;
 const TERMINAL: JobStatus[] = ["SUCCEEDED", "FAILED", "CANCELLED"];
 
+/** 축마다 자기 실행 결과를 갖는다.
+ *
+ *  한 칸을 두 축이 나눠 쓰면, 검색을 돌린 뒤 구성대비 분석을 돌렸을 때 검색의
+ *  「결과 보기」에 분석 보고서가 뜬다. claimText/searchClaimText 와
+ *  upload/searchUpload 를 나눈 것과 같은 이유다 — 두 축은 다른 작업이고, 축을
+ *  오갈 때 한쪽 결과가 다른 쪽을 덮으면 안 된다.
+ */
+type JobSlots = Record<JobKind, Job | null>;
+
+const EMPTY_SLOTS: JobSlots = { patent_analysis: null, similarity_search: null };
+
 type Persisted = {
-  jobId: string | null;
+  jobIds: Partial<Record<JobKind, string | null>>;
   activeTab: RunTab;
   jobKind: JobKind;
   claimText: string;
@@ -63,6 +75,7 @@ type Persisted = {
 };
 
 export interface RunSession {
+  /** 지금 보고 있는 축의 실행. 축을 바꾸면 그 축의 실행으로 바뀐다. */
   job: Job | null;
   setJob: Dispatch<SetStateAction<Job | null>>;
   activeTab: RunTab;
@@ -96,7 +109,13 @@ export interface RunSession {
   required: Record<string, boolean>;
   setRequired: Dispatch<SetStateAction<Record<string, boolean>>>;
   stream: JobStreamState;
+  /** 지금 보고 있는 축의 실행이 진행 중인가. 이 화면의 spinner·비활성화용. */
   running: boolean;
+  /** 어느 축이든 실행이 진행 중인가.
+   *
+   *  스트림은 하나뿐이므로 동시에 두 작업을 띄우면 한쪽은 끝나도 화면이
+   *  갱신되지 않는다. 새 실행을 막는 판단은 보이는 축이 아니라 이 값으로 한다. */
+  busy: boolean;
   /** 새로고침 직후, 저장해 둔 작업을 백엔드에서 다시 읽는 중. */
   restoring: boolean;
 }
@@ -107,12 +126,26 @@ function readStored(): Persisted | null {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<Persisted>;
+    const parsed = JSON.parse(raw) as Partial<Persisted> & { jobId?: unknown };
+    const kind: JobKind =
+      parsed.jobKind === "similarity_search"
+        ? "similarity_search"
+        : "patent_analysis";
+    const jobIds: Partial<Record<JobKind, string | null>> = {};
+    if (parsed.jobIds && typeof parsed.jobIds === "object") {
+      for (const slot of ["patent_analysis", "similarity_search"] as JobKind[]) {
+        const value = parsed.jobIds[slot];
+        if (typeof value === "string") jobIds[slot] = value;
+      }
+    } else if (typeof parsed.jobId === "string") {
+      // 축을 나누기 전에 저장된 캐시. 그때 보고 있던 축의 실행으로 읽는다.
+      jobIds[kind] = parsed.jobId;
+    }
     return {
-      jobId: typeof parsed.jobId === "string" ? parsed.jobId : null,
+      jobIds,
       activeTab: parsed.activeTab === "result" ? "result" : "input",
       jobKind:
-        parsed.jobKind === "similarity_search"
+        kind === "similarity_search"
           ? "similarity_search"
           : "patent_analysis",
       claimText: typeof parsed.claimText === "string" ? parsed.claimText : "",
@@ -152,11 +185,30 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   if (stored.current === undefined) stored.current = readStored();
   const initial = stored.current;
 
-  const [job, setJob] = useState<Job | null>(null);
+  const [jobs, setJobs] = useState<JobSlots>(EMPTY_SLOTS);
   const [activeTab, setActiveTab] = useState<RunTab>(initial?.activeTab ?? "input");
   const [jobKind, setJobKind] = useState<JobKind>(
     initial?.jobKind ?? "patent_analysis",
   );
+  // setJob 은 상태 갱신 안에서 지금 보고 있는 축을 알아야 한다. jobKind 를 직접
+  // 닫아 두면 축을 바꾼 직후의 갱신이 옛 축으로 들어간다.
+  const kindRef = useRef(jobKind);
+  kindRef.current = jobKind;
+
+  const job = jobs[jobKind];
+  const setJob = useCallback<Dispatch<SetStateAction<Job | null>>>((action) => {
+    setJobs((prev) => {
+      const kind = kindRef.current;
+      const next =
+        typeof action === "function"
+          ? (action as (current: Job | null) => Job | null)(prev[kind])
+          : action;
+      // 작업 자신이 어느 축인지 알고 있다. 실행 기록에서 다른 축의 작업을 열어도
+      // 그 보고서가 지금 보고 있는 축의 칸을 덮지 않는다.
+      const slot = next?.job_kind ?? kind;
+      return { ...prev, [slot]: next };
+    });
+  }, []);
   const [claimText, setClaimText] = useState(initial?.claimText ?? "");
   const [searchClaimText, setSearchClaimText] = useState(
     initial?.searchClaimText ?? "",
@@ -170,25 +222,39 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   const [searchSpecFile, setSearchSpecFile] = useState<File | null>(null);
   const [searchUpload, setSearchUpload] = useState<UploadResponse | null>(null);
   const [required, setRequired] = useState<Record<string, boolean>>({});
+  const storedIds = Object.values(initial?.jobIds ?? {}).filter(Boolean);
   const [restoring, setRestoring] = useState(
-    Boolean(initial?.jobId) && !hashJobParam(),
+    storedIds.length > 0 && !hashJobParam(),
   );
 
   // 새로고침 복원. 본문은 저장하지 않았으므로 작업 id 로 다시 읽는다.
   useEffect(() => {
-    const jobId = initial?.jobId;
-    if (!jobId || hashJobParam()) {
+    const entries = Object.entries(initial?.jobIds ?? {}).filter(
+      ([, id]) => typeof id === "string" && id,
+    ) as [JobKind, string][];
+    if (entries.length === 0 || hashJobParam()) {
       setRestoring(false);
       return;
     }
     let cancelled = false;
-    api
-      .getJob(jobId)
-      .then((fresh) => {
-        if (!cancelled) setJob(fresh);
-      })
-      .catch(() => {
-        // 삭제됐거나 백엔드가 모르는 작업이면 캐시만 버린다.
+    Promise.all(
+      entries.map(([slot, id]) =>
+        api
+          .getJob(id)
+          .then((fresh) => [slot, fresh] as const)
+          // 삭제됐거나 백엔드가 모르는 작업이면 그 칸만 비운다.
+          .catch(() => null),
+      ),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        setJobs((prev) => {
+          const next = { ...prev };
+          for (const row of results) {
+            if (row) next[row[0]] = row[1];
+          }
+          return next;
+        });
       })
       .finally(() => {
         if (!cancelled) setRestoring(false);
@@ -199,23 +265,32 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     // 최초 1회만. initial 은 ref 에서 온 고정값이다.
   }, []);
 
-  const streamJobId = job && !TERMINAL.includes(job.status) ? job.id : null;
+  // 스트림은 하나뿐이므로 실행 중인 작업을 따라간다. 보고 있는 축을 먼저 보되,
+  // 다른 축에서 돌던 작업이 있으면 그쪽을 놓지 않는다 — 축을 바꿨다고 진행 중인
+  // 실행의 연결이 끊기면 그 작업은 끝나도 화면이 갱신되지 않는다.
+  const streamJob =
+    [jobs[jobKind], jobs[jobKind === "patent_analysis" ? "similarity_search" : "patent_analysis"]].find(
+      (candidate) => candidate && !TERMINAL.includes(candidate.status),
+    ) ?? null;
+  const streamJobId = streamJob?.id ?? null;
   const stream = useJobStream(streamJobId);
 
   // 실행이 끝나면 최종 상태를 다시 읽어 온다. 다른 메뉴에 있어도 돌아온다.
   useEffect(() => {
-    if (!job || !stream.finished) return;
+    if (!streamJobId || !stream.finished) return;
     let cancelled = false;
     api
-      .getJob(job.id)
+      .getJob(streamJobId)
       .then((fresh) => {
-        if (!cancelled) setJob(fresh);
+        // 끝난 작업 자신의 축에 넣는다. 그 사이 사용자가 축을 바꿨어도 결과가
+        // 엉뚱한 칸으로 가지 않는다.
+        if (!cancelled) setJobs((prev) => ({ ...prev, [fresh.job_kind]: fresh }));
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [stream.finished, job?.id]);
+  }, [stream.finished, streamJobId]);
 
   // 새로고침 대비 저장. 타이핑마다 쓰지 않도록 조금 미룬다.
   useEffect(() => {
@@ -223,7 +298,10 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     if (restoring) return;
     const timer = setTimeout(() => {
       const snapshot: Persisted = {
-        jobId: job?.id ?? null,
+        jobIds: {
+          patent_analysis: jobs.patent_analysis?.id ?? null,
+          similarity_search: jobs.similarity_search?.id ?? null,
+        },
         activeTab,
         jobKind,
         claimText,
@@ -240,7 +318,8 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [
     restoring,
-    job?.id,
+    jobs.patent_analysis?.id,
+    jobs.similarity_search?.id,
     activeTab,
     jobKind,
     claimText,
@@ -249,9 +328,14 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     lineage,
   ]);
 
-  const running = Boolean(
-    job && ["QUEUED", "RUNNING"].includes(job.status) && !stream.finished,
+  const busy = Boolean(
+    streamJob &&
+      ["QUEUED", "RUNNING"].includes(streamJob.status) &&
+      !stream.finished,
   );
+  // 보이는 축의 실행만 이 화면의 진행 표시다. 다른 축에서 도는 작업 때문에
+  // 이 축의 「결과 보기」에 spinner 가 도는 것이 축을 나눈 취지에 어긋난다.
+  const running = busy && streamJob?.id === job?.id;
 
   const value = useMemo<RunSession>(
     () => ({
@@ -281,10 +365,12 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       setRequired,
       stream,
       running,
+      busy,
       restoring,
     }),
     [
       job,
+      setJob,
       activeTab,
       jobKind,
       claimText,
@@ -298,6 +384,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       required,
       stream,
       running,
+      busy,
       restoring,
     ],
   );

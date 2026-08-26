@@ -64,6 +64,19 @@ _RATE_MARKERS = (
 _TOOL_INPUT_KEYS = {
     "search_web": ("query",),
     "read_url_content": ("url",),
+    # agy 의 read_url_content 는 페이지 본문을 돌려주지 않는다. 본문을 파일로
+    # 저장하고 그 경로만 알려주므로, 본문을 실제로 읽으려면 view_file 을 부르는
+    # 길밖에 없다. 어떤 파일을 읽었는지 남기지 않으면 그 호출이 가져온 페이지를
+    # 확인한 것인지 임의의 로컬 파일을 읽은 것인지 사후에 구분할 수 없다.
+    "view_file": ("path", "start_line", "end_line"),
+}
+
+# 같은 뜻의 인수를 CLI 가 도구마다 다른 표기로 내보낸다. 감사 필드는 canonical
+# 이름으로 통일해 남긴다 — 표기가 바뀌어도 대조 코드가 흔들리지 않아야 한다.
+_INPUT_ALIASES = {
+    "path": ("absolutepath", "path"),
+    "start_line": ("startline", "start_line"),
+    "end_line": ("endline", "end_line"),
 }
 _MAX_INPUT_VALUE = 500
 
@@ -85,9 +98,16 @@ def _summarize_input(name: str, raw) -> dict:
     casefolded = {str(key).casefold(): value for key, value in raw.items()}
     summary: dict = {}
     for key in keys:
-        value = casefolded.get(key.casefold())
-        if isinstance(value, str):
-            summary[key] = value[:_MAX_INPUT_VALUE]
+        for source in _INPUT_ALIASES.get(key, (key,)):
+            value = casefolded.get(source.casefold())
+            if isinstance(value, str):
+                summary[key] = value[:_MAX_INPUT_VALUE]
+                break
+            # 줄 범위는 정수로 온다. 문자열만 받으면 분할 읽기의 범위가
+            # 기록에서 사라진다.
+            if isinstance(value, int) and not isinstance(value, bool):
+                summary[key] = value
+                break
     return summary
 
 

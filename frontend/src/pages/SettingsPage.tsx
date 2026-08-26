@@ -719,9 +719,16 @@ export default function SettingsPage() {
             onSave={(n) => saveValue("max_files_per_job", n)}
           />
           <NumberField
-            label="모델에 전달할 최대 글자 수"
+            label="ARIA 자체 글자 수 한도 (0 = 제한 없음)"
             value={v.max_inline_chars}
-            hint="초과하면 INPUT_TOO_LARGE 로 중단합니다. 임의로 자르지 않습니다."
+            hint={
+              "기본값 0 — ARIA 는 글자 수로 막지 않습니다. 실행을 실제로 막는 " +
+              "한도는 선택한 Provider 가 자료 전체를 손실 없이 전달할 수 있는 " +
+              "크기와 모델 컨텍스트이며, 이 둘은 끌 수 없습니다. 어느 쪽을 " +
+              "넘든 ARIA 는 문서를 자르거나 요약하지 않고 INPUT_TOO_LARGE 로 " +
+              "중단합니다. 그때는 문헌을 나눠 여러 번 실행하거나 전송 한도가 " +
+              "더 큰 Provider 를 선택하십시오."
+            }
             onSave={(n) => saveValue("max_inline_chars", n)}
           />
           <NumberField

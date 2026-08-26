@@ -21,23 +21,19 @@ from sqlalchemy.orm import Session
 from .. import (
     analysis_manifest,
     citation_mapping,
+    job_assembly,
     search_manifest,
     search_prompt,
     search_report,
     settings_service,
 )
-from ..config import (
-    AGY_SEARCH_RUNTIME_CONTEXT,
-    CODEX_SEARCH_RUNTIME_CONTEXT,
-    PATHS,
-    SEARCH_RUNTIME_CONTEXT,
-)
+from ..config import PATHS
 from ..db import session_scope
-from ..enums import AttachmentRole, ErrorCode, JobKind, JobStatus
+from ..enums import ErrorCode, JobKind, JobStatus
 from ..evaluation.evaluator import Verdict, evaluate
-from ..ingestion.service import IngestedFile, preprocessing_versions, read_normalized
+from ..ingestion.service import IngestedFile, preprocessing_versions
 from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
-from ..prompt_assembly import InputTooLarge, assemble, assemble_search
+from ..prompt_assembly import InputTooLarge
 from ..providers.base import NO_TOOLS, ExecutionOutcome, ExecutionRequest, ToolPolicy
 from ..providers.registry import build_provider
 from . import process as proc
@@ -46,13 +42,11 @@ from .bus import BUS
 # UI 표시용 델타는 DB 에 남기지 않는다. 최종 결과 텍스트만 저장한다.
 _NON_PERSISTED = frozenset({"result_stream"})
 
-# 검색 실행의 런타임 규칙은 Provider 가 실제로 가진 도구에 맞춰야 한다.
-# 도구 이름이 다를 뿐 아니라, Codex 는 페이지를 여는 도구 자체가 없다.
-# 정책 이름으로 고르므로 Provider 가 늘어도 이 표만 채우면 된다.
-_SEARCH_CONTEXT_BY_POLICY = {
-    "agy_web_search": AGY_SEARCH_RUNTIME_CONTEXT,
-    "codex_web_search": CODEX_SEARCH_RUNTIME_CONTEXT,
-}
+# 조립은 job_assembly 가 한다. runner 와 preflight 가 같은 함수를 부르지 않으면
+# 화면이 안내한 크기와 실제로 나가는 크기가 어긋난다. 기존 import 경로를 쓰는
+# 코드가 있으므로 이름만 여기 남긴다.
+_SEARCH_CONTEXT_BY_POLICY = job_assembly.SEARCH_CONTEXT_BY_POLICY
+search_spec = job_assembly.search_spec
 
 
 def row_to_ingested(row: Attachment) -> IngestedFile:
@@ -75,18 +69,6 @@ def row_to_ingested(row: Attachment) -> IngestedFile:
         read_ok=row.read_ok,
         error=row.error,
     )
-
-
-def search_spec(attachments: list[IngestedFile]) -> IngestedFile | None:
-    """검색 실행에 넣은 출원발명 문서. 없으면 None.
-
-    검색 작업의 첨부는 이것 하나뿐이다. 여러 건이 들어오는 경우는 작업 생성
-    단계에서 이미 거절된다.
-    """
-    for item in attachments:
-        if item.role == AttachmentRole.APPLICATION:
-            return item
-    return None
 
 
 def render_search_focus(focus: dict | None) -> str:
@@ -182,6 +164,10 @@ def _merge_search_outcomes(
         combined.rate_limited = combined.rate_limited or outcome.rate_limited
         combined.tool_budget_exceeded = (
             combined.tool_budget_exceeded or outcome.tool_budget_exceeded
+        )
+        combined.content_read_budget_exceeded = (
+            combined.content_read_budget_exceeded
+            or outcome.content_read_budget_exceeded
         )
         combined.tools_uncontrollable = (
             combined.tools_uncontrollable or outcome.tools_uncontrollable
@@ -280,12 +266,16 @@ class JobRunner:
     async def _reject_if_over_byte_budget(
         self, job_id: str, provider, system_prompt: str, user_message: str
     ) -> bool:
-        """Provider 가 조용히 자르는 바이트 한도를 넘으면 실행 전에 실패시킨다.
+        """Provider 가 자료 전체를 손실 없이 전달할 수 있는 한도를 넘으면 막는다.
 
-        ARIA 의 max_inline_chars 는 *문자수* 검사라, 입력을 UTF-8 *바이트*로 재는
-        Provider 의 더 작은 한도를 대신하지 못한다. 넘긴 채로 보내면 Provider 가
-        뒷부분을 잘라 앞부분만 모델에 넘기고도(agy 실측) 종료 코드 0 으로 끝나,
-        절반이 빠진 분석이 '성공'으로 남는다. 여기서 미리 막는다.
+        이것은 사용자 입력 제한이 아니라 전달 경로의 한계다. 이 크기를 넘겨
+        보내면 Provider 가 뒷부분을 잘라 앞부분만 모델에 넘기고도(agy 실측)
+        종료 코드 0 으로 끝나, 절반이 빠진 분석이 '성공'으로 남는다.
+
+        그래서 ARIA 의 글자 수 한도(max_inline_chars)를 꺼도 이 검사는 남는다.
+        글자 수는 사용자가 스스로 거는 상한이지만 이 한도는 모델이 자료를 전부
+        보았는지를 좌우한다. 모델 컨텍스트가 크다거나 Provider 에 자동 압축이
+        있다는 이유로 완화해서는 안 된다 — 자르는 주체가 모델이 아니라 CLI 다.
 
         한도를 넘겨 실패시켰으면 True 를 돌려주고, 호출부는 즉시 반환한다.
         """
@@ -301,10 +291,13 @@ class JobRunner:
         await self._fail(
             job_id,
             ErrorCode.INPUT_TOO_LARGE,
-            f"입력이 {label} 의 한도를 넘습니다 "
-            f"({payload_bytes:,} bytes > {budget:,} bytes). 이 Provider 는 더 큰 "
-            "입력을 조용히 잘라 앞부분만 분석합니다. 첨부를 나눠 여러 번 실행하거나 "
-            "입력 한도가 더 큰 Provider 를 사용하십시오.",
+            f"이번 입력은 {label} 가 자료 전체를 손실 없이 전달할 수 있는 한도를 "
+            f"넘습니다 ({payload_bytes:,} bytes > {budget:,} bytes). 사용자 입력 "
+            f"제한이 아니라 {label} 가 모델에 넘기기 전에 뒷부분을 잘라 버리는 "
+            "지점입니다. ARIA 는 문서를 임의로 자르거나 요약하지 않으므로 "
+            "Provider 를 호출하기 전에 막았고, 토큰은 소모되지 않았습니다. "
+            "문헌을 나눠 여러 번 실행하거나, 입력 전송 한도가 더 큰 Provider 를 "
+            "선택하십시오.",
         )
         return True
 
@@ -345,7 +338,9 @@ class JobRunner:
 
         limit = int(values.get("max_concurrency_per_provider", 1))
         timeout = int(values.get("default_timeout_seconds", 900))
-        max_chars = int(values.get("max_inline_chars", 800_000))
+        # None = 제한 없음(기본값). Provider 전송 한도와 모델 컨텍스트 한도는
+        # 이것과 별개로 아래에서 그대로 걸린다.
+        max_chars = settings_service.inline_char_budget(values)
         runtime_context = str(values.get("runtime_context", ""))
         runtime_enabled = bool(values.get("runtime_context_enabled", True))
         keep_raw = bool(values.get("keep_raw_output", True))
@@ -411,82 +406,55 @@ class JobRunner:
             spec_document: dict | None = None
             search_assemblies: dict[str, object] = {}
             lane_budgets: dict[str, int] = {}
+            content_budget = 0
+            content_lane_budgets: dict[str, int] = {}
             try:
+                assembly = job_assembly.assemble_job(
+                    job_kind=job_kind,
+                    master_prompt=master_prompt,
+                    attachments=attachments,
+                    runtime_context=runtime_context,
+                    runtime_context_enabled=runtime_enabled,
+                    max_chars=max_chars,
+                    claim_text=claim_text,
+                    focus_text=render_search_focus(search_focus),
+                    followup_instruction=followup_instruction,
+                    prior_claim_text=prior_claim_text,
+                    prior_report=prior_report,
+                    prior_citation_mapping=prior_mapping,
+                    tool_policy_name=tool_policy.name,
+                )
+                assembled = assembly.representative
                 if job_kind is JobKind.SIMILARITY_SEARCH:
-                    # 검색 프롬프트는 실행 시점에 파일에서 다시 읽지 않는다.
-                    # 작업 생성 시 스냅샷한 본문으로 돈다 — 큐에서 기다리는
-                    # 동안 파일이 바뀌어도 이 실행의 계약은 흔들리지 않아야
-                    # 한다. 해시는 그 스냅샷에 대해 계산한다.
-                    #
-                    # 출원발명 문서(명세서)는 넣었을 때만 있다. 본문을 읽지
-                    # 못한 파일을 그냥 지나치지 않는다 — 그러면 사용자는
-                    # 명세서를 반영한 검색을 받았다고 믿게 된다.
-                    spec = search_spec(attachments)
-                    spec_text = read_normalized(spec) if spec is not None else ""
-                    if spec is not None and not spec_text.strip():
-                        await self._fail(
-                            job_id,
-                            ErrorCode.ATTACHMENT_ERROR,
-                            "출원발명 문서의 본문을 읽지 못했습니다: "
-                            f"{spec.original_filename}. 명세서를 반영하지 못한 채로 "
-                            "검색하지 않습니다.",
-                        )
-                        return
-                    # 가장 중요한 불변조건: 기본 검색 프롬프트에는 명세서 본문이
-                    # 단 한 글자도 들어가지 않는다. 같은 호출 안에서 "먼저 청구항만
-                    # 보라"고 부탁하는 대신 컨텍스트 자체를 격리한다.
-                    focus_text = render_search_focus(search_focus)
-                    claim_rendered = search_prompt.render(
-                        master_prompt, claim_text, "", focus_text
-                    )
-                    claim_boundary_neutralized = (
-                        claim_rendered.claim_boundary_neutralized
-                    )
-                    focus_boundary_neutralized = (
-                        claim_rendered.focus_boundary_neutralized
-                    )
-                    if spec is not None:
-                        spec_document = {
-                            "attachment_id": spec.attachment_id,
-                            "filename": spec.original_filename,
-                            "sha256": spec.sha256,
-                            "page_count": spec.page_count,
-                            "char_count": len(spec_text),
-                        }
-                    search_prompt_sha = search_prompt.sha256(master_prompt)
-                    search_context = _SEARCH_CONTEXT_BY_POLICY.get(
-                        tool_policy.name, SEARCH_RUNTIME_CONTEXT
-                    )
-                    search_assemblies[search_manifest.ORIGIN_CLAIM_ONLY] = (
-                        assemble_search(
-                            search_prompt_body=claim_rendered.body,
-                            runtime_context=search_context,
-                            max_chars=max_chars,
-                            # 파일 신원조차 모델 컨텍스트에는 들어가지 않지만,
-                            # 단독 실행의 조립 기록도 입력 파일과 분리해 둔다.
-                            attachments=[],
-                        )
-                    )
-
-                    if spec is not None:
-                        assisted_rendered = search_prompt.render(
-                            master_prompt, claim_text, spec_text, focus_text
-                        )
-                        spec_boundary_neutralized = (
-                            assisted_rendered.spec_boundary_neutralized
-                        )
-                        search_assemblies[search_manifest.ORIGIN_SPEC_ASSISTED] = (
-                            assemble_search(
-                                search_prompt_body=assisted_rendered.body,
-                                runtime_context=search_context,
-                                max_chars=max_chars,
-                                attachments=attachments,
-                            )
-                        )
+                    search_assemblies = dict(assembly.lanes)
+                    spec_document = assembly.spec_document
+                    search_prompt_sha = assembly.search_prompt_sha
+                    claim_boundary_neutralized = assembly.claim_boundary_neutralized
+                    spec_boundary_neutralized = assembly.spec_boundary_neutralized
+                    focus_boundary_neutralized = assembly.focus_boundary_neutralized
 
                     lane_budgets = _search_lane_budgets(
                         search_budget, spec_document is not None
                     )
+                    # 본문 읽기 상한은 사용자 설정이 아니라 정책 상수다. 검색
+                    # 횟수와 달리 비용·범위를 정하는 값이 아니라, 한 문헌을 몇
+                    # 조각으로 나눠 읽는지에 딸린 값이기 때문이다.
+                    content_budget = int(
+                        getattr(tool_policy, "max_content_read_calls", 0) or 0
+                    )
+                    content_lane_budgets = (
+                        _search_lane_budgets(
+                            content_budget, spec_document is not None
+                        )
+                        if content_budget
+                        else {}
+                    )
+                    if content_budget and not content_lane_budgets:
+                        # 나눌 수 없을 만큼 작은 상한. 0 은 '상한 없음'이라
+                        # 여기서 쓰면 정반대가 되므로 레인마다 1회로 둔다.
+                        content_lane_budgets = {
+                            origin: 1 for origin in search_assemblies
+                        }
                     if spec_document is not None and not lane_budgets:
                         await self._fail(
                             job_id,
@@ -496,25 +464,15 @@ class JobRunner:
                             "수를 2 이상으로 설정하십시오.",
                         )
                         return
-                    # 기존 단일 변수는 저장 메타데이터와 분석 경로의 공통 코드를
-                    # 위해 유지한다. 명세서가 있으면 전체 입력을 기록하는 보조
-                    # 조립본을 대표값으로 쓴다.
-                    assembled = search_assemblies.get(
-                        search_manifest.ORIGIN_SPEC_ASSISTED
-                    ) or search_assemblies[search_manifest.ORIGIN_CLAIM_ONLY]
-                else:
-                    assembled = assemble(
-                        master_prompt=master_prompt,
-                        attachments=attachments,
-                        runtime_context=runtime_context,
-                        runtime_context_enabled=runtime_enabled,
-                        max_chars=max_chars,
-                        claim_text=claim_text,
-                        followup_instruction=followup_instruction,
-                        prior_claim_text=prior_claim_text,
-                        prior_report=prior_report,
-                        prior_citation_mapping=prior_mapping,
-                    )
+            except job_assembly.SpecUnreadable as exc:
+                await self._fail(
+                    job_id,
+                    ErrorCode.ATTACHMENT_ERROR,
+                    "출원발명 문서의 본문을 읽지 못했습니다: "
+                    f"{exc.filename}. 명세서를 반영하지 못한 채로 검색하지 "
+                    "않습니다.",
+                )
+                return
             except InputTooLarge as exc:
                 await self._fail(job_id, ErrorCode.INPUT_TOO_LARGE, str(exc))
                 return
@@ -585,7 +543,7 @@ class JobRunner:
             # 검색 작업은 도구 호출이 곧 진행 상황이다. 화면이 "무엇을 검색하고
             # 어디를 열어 보는 중"인지 보여줄 수 있도록 관측한 호출을 단계로
             # 옮긴다. 보고서를 기다리는 동안 아무 일도 없어 보이면 안 된다.
-            search_state = {"searches": 0, "fetches": 0}
+            search_state = {"searches": 0, "fetches": 0, "reads": 0}
 
             def make_emit(search_origin: str | None = None):
                 async def emit(event_type: str, payload: dict) -> None:
@@ -640,6 +598,25 @@ class JobRunner:
                                 ),
                             },
                         )
+                    elif name in (tool_policy.content_read_tools or ()):
+                        # 본문을 나눠 읽는 구간. 검색도 열람도 늘지 않으므로
+                        # 표시하지 않으면 화면이 멈춘 것처럼 보인다.
+                        search_state["reads"] += 1
+                        await self._emit(
+                            job_id,
+                            "search_progress",
+                            {
+                                "phase": "read",
+                                "search_origin": search_origin,
+                                "searches": search_state["searches"],
+                                "fetches": search_state["fetches"],
+                                "reads": search_state["reads"],
+                                "message": (
+                                    f"{origin_label} 페이지 본문 확인 "
+                                    f"{search_state['reads']}회째"
+                                ),
+                            },
+                        )
 
                 return emit
 
@@ -659,7 +636,9 @@ class JobRunner:
                     ):
                         return
                     lane_policy = replace(
-                        tool_policy, max_tool_calls=lane_budgets[origin]
+                        tool_policy,
+                        max_tool_calls=lane_budgets[origin],
+                        max_content_read_calls=content_lane_budgets.get(origin, 0),
                     )
                     lane_request = ExecutionRequest(
                         job_id=job_id,
@@ -691,6 +670,9 @@ class JobRunner:
                                 ),
                                 "prompt_sha256": lane_assembled.sha256,
                                 "max_tool_calls": lane_budgets[origin],
+                                "max_content_read_calls": (
+                                    content_lane_budgets.get(origin, 0)
+                                ),
                                 "started_at": _utcnow().isoformat(),
                                 "completed_at": _utcnow().isoformat(),
                                 "status": JobStatus.CANCELLED.value,
@@ -734,6 +716,9 @@ class JobRunner:
                             ),
                             "prompt_sha256": lane_assembled.sha256,
                             "max_tool_calls": lane_budgets[origin],
+                            "max_content_read_calls": (
+                                content_lane_budgets.get(origin, 0)
+                            ),
                             "started_at": lane_started.isoformat(),
                             "completed_at": lane_completed.isoformat(),
                             "status": getattr(
@@ -903,6 +888,8 @@ class JobRunner:
                     search_lanes=search_lane_records,
                     max_tool_calls_total=search_budget,
                     lane_budgets=lane_budgets,
+                    max_content_reads_total=content_budget or None,
+                    content_read_lane_budgets=content_lane_budgets,
                     reported=reported,
                     notes=notes,
                     error=manifest_error,

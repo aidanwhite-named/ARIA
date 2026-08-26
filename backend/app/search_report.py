@@ -149,8 +149,8 @@ def _candidate_section(item: dict) -> list[str]:
             + " + ".join(_ORIGIN_LABEL.get(origin, origin) for origin in origins)
         )
     lines.append(
-        "- ARIA 관측: 페이지 열람 "
-        + ("성공" if item["page_fetch_succeeded"] else "성공 기록 없음")
+        "- ARIA 관측: 페이지 본문 "
+        + ("읽음" if item["page_fetch_succeeded"] else "읽은 기록 없음")
         + " · 원문 대조 "
         + ("완료" if item["original_verified"] else "안 됨")
         + " · 문헌번호-주소 대조 "
@@ -390,11 +390,11 @@ def render(manifest: dict) -> str:
             ]
         ),
         f"- 그룹 분류된 후보 {len(grouped)}건 · 미확인 검색 단서 {len(isolated)}건",
-        f"- 페이지 열람 성공이 확인된 후보 {reviewed}건",
+        f"- 페이지 본문을 읽은 것이 확인된 후보 {reviewed}건",
         f"- 원문 대조가 확인된 후보 {verified}건",
         f"- 실제 검색 호출 {len(observed.get('search_queries') or [])}회",
         f"- 페이지 열람 시도 {len(observed.get('attempted_fetch_urls') or [])}건 "
-        f"(성공 {len(observed.get('succeeded_fetch_urls') or [])}건)",
+        f"(본문 읽음 {len(observed.get('succeeded_fetch_urls') or [])}건)",
         "",
     ]
 

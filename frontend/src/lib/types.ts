@@ -399,7 +399,8 @@ export interface UploadResponse {
   files: AttachmentAnalysis[];
   rejected: { filename: string; reason: string }[];
   total_chars: number;
-  max_inline_chars: number;
+  /** ARIA 자체 글자 수 한도. null 이면 제한 없음(기본값). */
+  max_inline_chars: number | null;
 }
 
 export interface JobAttachment extends AttachmentAnalysis {
@@ -486,6 +487,7 @@ export interface AppSettings {
     max_file_size_bytes: number;
     max_total_upload_bytes: number;
     max_files_per_job: number;
+    /** 0 = 제한 없음(기본값). */
     max_inline_chars: number;
     default_timeout_seconds: number;
     max_concurrency_per_provider: number;
@@ -517,3 +519,37 @@ export interface StreamEvent {
   payload: Record<string, unknown>;
   ts: string;
 }
+
+/** 실행 전에 백엔드가 잰 최종 조립 프롬프트의 크기.
+ *
+ *  화면이 원본 첨부의 글자 수를 세는 것으로는 이 값을 맞힐 수 없다. 실제로
+ *  나가는 본문에는 런타임 컨텍스트·경계 표시·명세서 절이 모두 붙고, Provider
+ *  한도는 문자가 아니라 UTF-8 바이트로 걸린다. runner 와 같은 조립 함수가
+ *  계산한 값이다.
+ */
+export type PreflightLane = {
+  id: string;
+  chars: number;
+  bytes: number;
+};
+
+export type Preflight = {
+  job_kind: JobKind;
+  provider: string;
+  lanes: PreflightLane[];
+  chars: number;
+  bytes: number;
+  /** 사용자가 환경설정에서 스스로 건 글자 수 한도. null 이면 제한 없음. */
+  char_budget: number | null;
+  /**
+   * 이 Provider 가 자료 전체를 손실 없이 모델에 전달할 수 있는 바이트 한도.
+   * 사용자 입력 제한이 아니라 전달 경로의 한계이며 끌 수 없다. 한도를
+   * 선언하지 않은 Provider 는 null.
+   */
+  byte_budget: number | null;
+  over_chars: boolean;
+  over_bytes: boolean;
+  blocked: boolean;
+  message: string;
+  error: string | null;
+};

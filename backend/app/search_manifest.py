@@ -695,6 +695,10 @@ def _normalize_candidate(
         "evidence_status": evidence,
         "original_verified": original_verified,
         # ARIA 가 관측한 사실. 모델의 보고가 아니다.
+        #
+        # '이 주소를 열었다'가 아니라 '이 주소의 본문을 실제로 읽은 기록이
+        # 있다'는 뜻이다. 포인터만 돌려주는 Provider 에서는 열람 호출이
+        # 성공해도 본문을 읽기 전까지 거짓이다(observed() 주석 참조).
         "page_fetch_succeeded": fetched_ok,
         # 후보 식별 게이트의 결과. 모두 ARIA 가 계산한다.
         "url_is_document": url_is_document,
@@ -1011,11 +1015,21 @@ def observed(
         and isinstance(call.get("input"), dict)
         and call["input"].get("url")
     ]
+    # 열람 성공과 '본문을 실제로 읽었다'는 같은 말이 아니다. agy 의
+    # read_url_content 는 가져온 페이지를 파일에 저장하고 경로만 돌려주므로,
+    # 호출이 성공한 시점에는 아직 아무도 본문을 보지 않았다. 그 상태를 열람으로
+    # 세면 근거 없는 대응표가 page_text 등급을 받는다 — 2026-08-25 이전 실행이
+    # 전부 그랬다(원문 확인 0건, 근거 문장 0건인데 열람 성공은 참).
+    #
+    # 그래서 Provider 가 content_read 로 표시한 호출만 센다. 본문을 그대로
+    # 돌려주는 Provider(WebFetch) 는 이 필드를 붙이지 않으며, 그때는 예전
+    # 계약대로 성공 여부로 판단한다.
     succeeded = [
         call["input"]["url"]
         for call in calls
         if call.get("name") in _FETCH_TOOL_NAMES
         and call.get("ok") is True
+        and bool(call.get("content_read", True))
         and isinstance(call.get("input"), dict)
         and call["input"].get("url")
     ]
@@ -1039,6 +1053,7 @@ def observed(
         "search_queries": queries,
         # 연 주소가 아니라 '열려고 한' 주소다. 성공 여부는 아래에 따로 있다.
         "attempted_fetch_urls": attempted,
+        # 열람에 성공했고 그 본문을 실제로 읽은 것까지 확인된 주소.
         "succeeded_fetch_urls": succeeded,
         "tool_failures": failures,
     }
@@ -1089,6 +1104,8 @@ def build(
     search_lanes: list[dict] | None = None,
     max_tool_calls_total: int | None = None,
     lane_budgets: dict[str, int] | None = None,
+    max_content_reads_total: int | None = None,
+    content_read_lane_budgets: dict[str, int] | None = None,
 ) -> dict:
     """저장할 감사 기록을 만든다.
 
@@ -1146,6 +1163,10 @@ def build(
             "candidate_merge": "union" if strategy == "isolated_union" else "single",
             "max_tool_calls_total": max_tool_calls_total,
             "lane_budgets": dict(lane_budgets or {}),
+            # 페이지 본문 읽기는 검색 호출과 다른 예산으로 센다. 한 예산에
+            # 섞으면 본문을 성실히 읽을수록 검색 예산이 마른다.
+            "max_content_reads_total": max_content_reads_total,
+            "content_read_lane_budgets": dict(content_read_lane_budgets or {}),
             # ARIA 는 WebSearch 의 검색 도메인을 기술적으로 제한하지 못한다.
             # 기록에 남겨 두어야 나중에 이 실행의 범위를 오해하지 않는다.
             "search_domain_restriction": False,

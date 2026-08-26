@@ -108,8 +108,8 @@ function CandidateRow({
           className={`pill ${item.page_fetch_succeeded ? "ok" : "neutral"}`}
           title={
             item.page_fetch_succeeded
-              ? "이 주소로 성공한 페이지 열람 기록을 ARIA 가 확인했습니다."
-              : "이 주소로 성공한 페이지 열람 기록이 없습니다. 모델의 열람 주장은 인정되지 않았습니다."
+              ? "이 주소의 페이지 본문을 실제로 읽은 기록을 ARIA 가 확인했습니다."
+              : "이 주소의 페이지 본문을 읽은 기록이 없습니다. 페이지를 가져오기만 하고 본문을 읽지 않은 경우도 여기에 들어갑니다."
           }
         >
           {EVIDENCE_LABEL[item.evidence_status] ?? item.evidence_status}
@@ -134,8 +134,8 @@ function CandidateRow({
       </div>
       <div className="faint">직접 발췌: {item.verbatim_excerpt}</div>
       <div className="faint">
-        ARIA 관측: 페이지 열람{" "}
-        {item.page_fetch_succeeded ? "성공" : "성공 기록 없음"} · 원문 대조{" "}
+        ARIA 관측: 페이지 본문{" "}
+        {item.page_fetch_succeeded ? "읽음" : "읽은 기록 없음"} · 원문 대조{" "}
         {item.original_verified ? "완료" : "안 됨"} · 문헌번호-주소 대조{" "}
         {item.identifier_url_matched ? "완료" : "안 됨"}
       </div>
@@ -401,7 +401,7 @@ export default function SearchManifestView({ job }: { job: Job }) {
           <strong>미확인 단서</strong> {isolated.length}건
         </span>
         <span>
-          <strong>열람 성공 확인된 후보</strong>{" "}
+          <strong>본문 읽은 것이 확인된 후보</strong>{" "}
           {candidates.filter((c) => c.page_fetch_succeeded).length}건
         </span>
         <span>

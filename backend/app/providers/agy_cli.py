@@ -71,6 +71,11 @@ RISKS = (
     "ARIA 가 보장하는 경계가 아닙니다.",
     "도구 호출 탐지는 이벤트 이름에 기반합니다. 관찰하지 못한 이름이 있으면 "
     "놓칠 수 있습니다.",
+    "read_url_content 는 가져온 페이지를 파일로만 돌려줍니다. 그 파일을 읽는 "
+    "view_file 호출은 경로가 이번 대화의 산출물이고 단계 번호가 성공한 "
+    "read_url_content 와 일치할 때만 정상 열람으로 인정합니다. 다른 경로·다른 "
+    "대화·일반 로컬 파일은 위반으로 남습니다. 이 판정 역시 호출이 끝난 뒤에 "
+    "이뤄지는 사후 감사이며 읽기 자체를 막지는 못합니다.",
     "시스템 프롬프트를 분리할 수 없어 ARIA 런타임 컨텍스트가 사용자 메시지에 "
     "포함됩니다. 첨부 문서와 같은 층위라 프롬프트 인젝션 방어가 약합니다.",
     "신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.",
@@ -82,6 +87,104 @@ _KNOWN_INSTALL_DIRS = (
     Path.home() / "AppData" / "Local" / "agy" / "bin",
     Path.home() / ".agy" / "bin",
 )
+
+# agy 가 가져온 페이지를 저장하는 경로 규칙.
+#
+#   <brain>/<conversation_id>/.system_generated/steps/<n>/content.md
+#
+# read_url_content 는 본문을 돌려주지 않고 이 경로만 알려준다. 그래서 본문을
+# 읽으려면 view_file 을 부르는 수밖에 없고, 그 호출이 "가져온 페이지를 확인한
+# 것"인지 "임의의 로컬 파일을 읽은 것"인지는 경로로만 구분된다.
+#
+# 마지막 다섯 조각만 검사한다. brain 루트가 어디인지 알 필요가 없고, 대화 ID 는
+# 실행마다 새로 생기는 값이라 다른 실행의 파일을 가리키면 그 조각에서 걸린다.
+_ARTIFACT_MARKER = ".system_generated"
+_ARTIFACT_STEPS = "steps"
+_ARTIFACT_FILE = "content.md"
+# agy 의 페이지 열람 도구. 이 이름의 호출만 산출물 경로와 대조한다.
+_FETCH_TOOL = "read_url_content"
+
+
+def content_artifact_step(path: str, conversation_id: str | None) -> int | None:
+    """이 경로가 이번 대화의 read_url_content 산출물이면 그 단계 번호.
+
+    아니면 None. 판정은 사전 차단이 아니라 사후 감사다 — 이 함수가 None 을
+    돌려주는 시점에는 파일이 이미 읽힌 뒤다. agy 에는 도구 호출을 실행 전에
+    가로챌 지점이 없다. 그래도 기록에 남는 판정만은 정확해야 한다.
+    """
+    if not path or not conversation_id:
+        return None
+    try:
+        # 심볼릭 링크·재분석 지점·`..` 을 먼저 푼다. 링크로 우회하면 풀린 경로의
+        # 꼬리가 규칙과 어긋나 걸린다. 파일이 지워진 뒤에도 정규화는 된다.
+        resolved = Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    parts = resolved.parts
+    if len(parts) < 5:
+        return None
+    conversation, marker, steps, step, name = parts[-5:]
+    if marker != _ARTIFACT_MARKER or steps != _ARTIFACT_STEPS:
+        return None
+    if name.casefold() != _ARTIFACT_FILE:
+        return None
+    if conversation.casefold() != conversation_id.casefold():
+        return None
+    if not step.isdigit():
+        return None
+    return int(step)
+
+
+def split_tool_calls(calls, content_read_tools) -> tuple[int, int]:
+    """(검색 호출 수, 본문 읽기 호출 수).
+
+    한 예산에 섞으면 본문을 성실히 읽을수록 검색 예산이 마른다. 2026-08-25
+    실행이 그랬다 — 검색 4회·열람 3회에 본문 읽기 14회가 더해져 상한 20을 넘겼고,
+    사용자에게는 "검색 범위를 좁히라"는 엉뚱한 지시가 나갔다.
+
+    범위를 벗어난 열람 호출도 본문 읽기로 센다. 그 호출은 어차피 정책 위반으로
+    따로 잡히며, 위반을 검색 예산에 얹어서 두 번 벌줄 이유가 없다.
+    """
+    scoped = set(content_read_tools or ())
+    content = sum(1 for call in calls if call.get("name") in scoped)
+    return len(calls) - content, content
+
+
+def audit_content_reads(state, policy) -> None:
+    """아직 판정하지 않은 콘텐츠 열람 호출에 scope_ok 를 붙인다.
+
+    통과 조건은 두 가지다. 경로가 이번 대화의 산출물 규칙에 맞아야 하고, 그
+    단계 번호가 같은 실행에서 **성공한** read_url_content 의 단계와 일치해야
+    한다. 하나라도 어긋나면 위반으로 남는다.
+
+    통과한 호출은 그 페이지를 실제로 읽었다는 유일한 증거이기도 하다. 그래서
+    대응하는 read_url_content 호출에 content_read 를 함께 표시한다 — 감사
+    기록에서 '포인터를 받았다'와 '본문을 읽었다'를 가르는 값이다.
+    """
+    scoped = set(getattr(policy, "content_read_tools", ()) or ())
+    if not scoped:
+        return
+    for call in state.tool_calls:
+        if call.get("name") not in scoped or "scope_ok" in call:
+            continue
+        summary = call.get("input")
+        if not isinstance(summary, dict):
+            summary = {}
+        step = content_artifact_step(
+            str(summary.get("path") or ""), state.conversation_id
+        )
+        source = (
+            state.tool_calls_by_step.get(str(step)) if step is not None else None
+        )
+        in_scope = bool(
+            source is not None
+            and source.get("name") == _FETCH_TOOL
+            and source.get("ok") is True
+        )
+        call["scope_ok"] = in_scope
+        call["scope"] = f"{_FETCH_TOOL}:{step}" if in_scope else "out_of_scope"
+        if in_scope:
+            source["content_read"] = True
 
 
 def resolve_agy(override: str | None = None) -> ResolvedExecutable | None:
@@ -131,7 +234,13 @@ class AgyCliProvider(Provider):
     # 조용히 자르고 뒷부분을 `<truncated N bytes>` 로 대체한다. 실측(run
     # c7a0ab27): 745 KB 입력 중 앞 ~196 KB 만 모델에 전달돼 첨부 절반이 통째로
     # 빠진 채 종료 코드 0 으로 "성공"했다. 여유(약 16 KB)를 둔 값으로 실행 전에
-    # 막아 그 낭비를 없앤다. 실제 한도가 바뀌면 이 값만 조정하면 된다.
+    # 막아 그 낭비를 없앤다.
+    #
+    # 이 값은 *모델 컨텍스트 한도가 아니다*. agy CLI 가 모델에 넘기기 전에
+    # 입력을 자르는 지점이다. 그러므로 "모델 컨텍스트가 크다", "Provider 가
+    # 알아서 압축한다"는 이유로 올리거나 없애면 안 된다 — 그 어느 쪽도 CLI 가
+    # 자르는 것을 막지 못하고, 잘린 실행은 종료 코드 0 으로 "성공"해 버린다.
+    # CLI 자체의 잘림 지점이 실측으로 바뀌었을 때만 이 값을 조정한다.
     max_input_bytes = 180_000
     install_hint = (
         "agy CLI 를 설치하고 로그인하십시오. 설치되어 있으면 `agy models` 가 "
@@ -276,16 +385,26 @@ class AgyCliProvider(Provider):
             policy if policy is not None and policy.name == AGY_WEB_SEARCH.name else None
         )
         budget_exceeded = False
+        content_budget_exceeded = False
 
         async def on_stdout(line: str) -> None:
-            nonlocal budget_exceeded
+            nonlocal budget_exceeded, content_budget_exceeded
             for event_type, payload in parser.feed(line):
                 await emit(event_type, payload)
+            if search_policy is None:
+                return
+
+            # 판정을 먼저 붙인다. 아래 예산 계산이 "검색 호출"과 "본문 읽기"를
+            # 나누려면 각 호출이 어느 쪽인지 정해져 있어야 한다.
+            audit_content_reads(parser.state, search_policy)
+            search_calls, content_calls = split_tool_calls(
+                parser.state.tool_calls, search_policy.content_read_tools
+            )
+
             if (
-                search_policy is not None
-                and search_policy.max_tool_calls
+                search_policy.max_tool_calls
                 and not budget_exceeded
-                and len(parser.state.tool_uses) > search_policy.max_tool_calls
+                and search_calls > search_policy.max_tool_calls
             ):
                 budget_exceeded = True
                 await emit(
@@ -293,7 +412,27 @@ class AgyCliProvider(Provider):
                     {
                         "limit": search_policy.max_tool_calls,
                         "message": (
-                            f"도구 호출이 상한({search_policy.max_tool_calls}회)을 넘어 "
+                            f"검색 도구 호출이 상한({search_policy.max_tool_calls}회)을 "
+                            "넘어 실행을 중단합니다."
+                        ),
+                    },
+                )
+                await proc.cancel_job(request.job_id)
+                return
+
+            if (
+                search_policy.max_content_read_calls
+                and not content_budget_exceeded
+                and content_calls > search_policy.max_content_read_calls
+            ):
+                content_budget_exceeded = True
+                await emit(
+                    "content_read_budget_exceeded",
+                    {
+                        "limit": search_policy.max_content_read_calls,
+                        "message": (
+                            "페이지 본문 읽기 호출이 상한"
+                            f"({search_policy.max_content_read_calls}회)을 넘어 "
                             "실행을 중단합니다."
                         ),
                     },
@@ -318,6 +457,19 @@ class AgyCliProvider(Provider):
         )
 
         state = parser.state
+        if search_policy is not None:
+            # 마지막 줄에서 들어온 호출이나 프로세스를 끊으면서 남은 호출까지
+            # 판정한다. 판정이 빠진 호출은 아래 evaluator 에서 위반으로 잡히므로
+            # 여기서 빠뜨리면 정상 열람이 위반으로 기록된다.
+            audit_content_reads(state, search_policy)
+            for call in state.tool_calls:
+                if call.get("name") == _FETCH_TOOL:
+                    # 이 Provider 는 본문을 돌려주지 않는다. 아무도 읽지 않은
+                    # 열람은 '포인터를 받았다'까지가 전부이므로 명시적으로
+                    # 거짓이다 — 표시가 없으면 감사 쪽이 예전 계약대로
+                    # '성공했으면 읽은 것'으로 읽는다.
+                    call.setdefault("content_read", False)
+
         outcome.raw_stdout = run.stdout
         outcome.raw_stderr = run.stderr
         outcome.exit_code = run.exit_code
@@ -342,6 +494,7 @@ class AgyCliProvider(Provider):
         outcome.tools_advertised = list(state.tools_advertised)
         outcome.tool_calls = list(state.tool_calls)
         outcome.tool_budget_exceeded = budget_exceeded
+        outcome.content_read_budget_exceeded = content_budget_exceeded
         # 기존 분석은 예전과 같은 사후 탐지 경로(None)를 유지한다. 검색에만 agy
         # 전용 정책을 붙여 search_web/read_url_content 호출을 정상 처리한다.
         outcome.tool_policy = search_policy

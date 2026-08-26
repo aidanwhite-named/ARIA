@@ -113,7 +113,9 @@ class UploadResponse(BaseModel):
     files: list[AttachmentAnalysis]
     rejected: list[dict[str, str]]
     total_chars: int
-    max_inline_chars: int
+    # ARIA 자체 글자 수 한도. null 이면 제한 없음(기본값)이며, 실행을 실제로
+    # 막는 것은 Provider 전송 한도와 모델 컨텍스트 한도다.
+    max_inline_chars: int | None = None
 
 
 class JobCreate(BaseModel):
@@ -170,6 +172,44 @@ class JobAttachmentOut(BaseModel):
     extraction_method: str
     delivery_mode: str
     read_ok: bool
+    error: str | None = None
+
+
+class PreflightLane(BaseModel):
+    """독립 실행 하나가 실제로 보낼 크기. 검색은 두 개, 분석은 한 개다."""
+
+    id: str
+    chars: int
+    bytes: int
+
+
+class PreflightOut(BaseModel):
+    """실행 전에 잰 최종 조립 프롬프트의 크기.
+
+    화면이 원본 첨부의 글자 수를 세는 것으로는 이 값을 맞힐 수 없다. 실제로
+    나가는 본문에는 런타임 컨텍스트·경계 표시·명세서 절이 모두 붙고, Provider
+    한도는 문자가 아니라 UTF-8 바이트로 걸린다.
+    """
+
+    job_kind: str
+    provider: str
+    lanes: list[PreflightLane]
+    # 한도와 비교할 대표값. 레인이 여럿이면 가장 큰 레인이다 — 한도는 레인마다
+    # 따로 걸리므로 합계가 아니라 최댓값이 실행을 막는다.
+    chars: int
+    bytes: int
+    # 사용자가 환경설정에서 스스로 건 글자 수 한도. None 이면 제한 없음.
+    char_budget: int | None = None
+    # 이 Provider 가 자료 전체를 손실 없이 모델에 전달할 수 있는 바이트 한도.
+    # 사용자 입력 제한이 아니라 전달 경로의 한계이며, 끌 수 없다. 한도를
+    # 선언하지 않은 Provider 는 None.
+    byte_budget: int | None = None
+    over_chars: bool = False
+    over_bytes: bool = False
+    # 지금 실행하면 Provider 호출 전에 막힌다.
+    blocked: bool = False
+    message: str = ""
+    # 조립 자체가 불가능한 상태(명세서 본문을 읽지 못함 등). 크기는 재지 못한다.
     error: str | None = None
 
 

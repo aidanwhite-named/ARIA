@@ -322,17 +322,94 @@ WebFetch 는 페이지 원문을 그대로 주는 도구가 아닙니다. 페이
 # read_url_content 는 실측으로 동작하지만, ARIA 가 나머지 수십 개 도구를 모델의
 # 컨텍스트에서 제거할 수 없고 시스템 프롬프트도 별도 계층으로 전달할 수 없다.
 # 검색 산출물은 동일하게 스크리닝 자료로만 취급하며 직접 인용은 인정하지 않는다.
-AGY_SEARCH_RUNTIME_CONTEXT = (
-    SEARCH_RUNTIME_CONTEXT.replace("WebSearch", "search_web")
-    .replace("WebFetch", "read_url_content")
-    .replace(
-        "read_url_content 는 페이지 원문을 그대로 주는 도구가 아닙니다. 페이지를 "
-        "변환한 뒤\n별도의 작은 모델이 요약·추출한 결과를 돌려줍니다.",
-        "ARIA 는 read_url_content 결과가 공식 원문과 일치하는지 독립적으로 "
-        "검증할 수 없습니다.\n따라서 이 실행에서 받은 내용은 원문 직접 인용으로 "
-        "취급하지 않습니다.",
-    )
+#
+# 그리고 결정적으로, **read_url_content 는 페이지 내용을 응답으로 돌려주지
+# 않는다.** 파일에 저장하고 경로만 알려준다. 이걸 알려주지 않으면 모델은 포인터를
+# 받고 "페이지를 봤다"고 착각한 채 스니펫으로 대응표를 채운다. 2026-08-25 06:34
+# 실행에서 실제로 그랬다 — 5건을 가져와 2건만 읽었고, 읽지 않은 3건에 쓴 대응표
+# 15행(감사 블록 출력의 36%)을 ARIA 가 통째로 버렸다. 출력 토큰 낭비와 후보 손실이
+# 같은 원인에서 나왔다.
+#
+# 치환이 하나라도 빗나가면 조용히 틀린 계약이 나가므로 import 시점에 터뜨린다.
+_AGY_CONTEXT_EDITS = (
+    (
+        """- WebSearch 와 WebFetch 두 가지뿐입니다. 다른 도구는 제공되지 않으며, 파일
+  읽기·쓰기·명령 실행을 시도하지 마십시오.""",
+        """- WebSearch, WebFetch, 그리고 view_file 입니다. view_file 은 아래에서 설명하는
+  WebFetch 산출물을 읽을 때만 쓸 수 있습니다. 그 밖의 파일을 열거나 파일 쓰기·명령
+  실행을 시도하지 마십시오. ARIA 가 탐지해 이 실행을 실패로 처리합니다.""",
+    ),
+    (
+        """WebFetch 는 페이지 원문을 그대로 주는 도구가 아닙니다. 페이지를 변환한 뒤
+별도의 작은 모델이 요약·추출한 결과를 돌려줍니다. 따라서 다음을 지키십시오.""",
+        """WebFetch 는 페이지 내용을 응답으로 돌려주지 않습니다. 가져온 내용을 파일에
+저장하고 그 경로만 알려줍니다. 이런 형태입니다.
+
+    The full content of the article at <주소> has been saved to:
+    ...\\.system_generated\\steps\\<n>\\content.md
+
+이 메시지를 받은 시점에 당신은 그 페이지의 내용을 아직 아무것도 읽지 않았습니다.
+내용을 읽으려면 그 경로를 view_file 로 열어야 합니다. ARIA 는 view_file 로 실제로
+읽은 기록이 있는 주소만 "페이지를 열었다"로 인정합니다. 가져오기만 하고 읽지 않은
+주소는 열지 않은 것과 같게 취급됩니다.
+
+ARIA 는 WebFetch 로 받은 내용이 공식 원문과 일치하는지 독립적으로 검증할 수
+없습니다. 따라서 이 실행에서 받은 내용은 원문 직접 인용으로 취급하지 않습니다.
+그 위에서 다음을 지키십시오.""",
+    ),
+    (
+        "3. 관련성이 높은 후보의 실제 페이지를 WebFetch 로 확인 시도",
+        """3. 관련성이 높은 후보의 실제 페이지를 WebFetch 로 가져오고, 이어서 그 산출물
+   경로를 view_file 로 읽어 확인. 가져오기만 하고 읽지 않으면 본 것이 없습니다.""",
+    ),
+    (
+        "7. 페이지를 확인한 후보만 A/B/C 그룹과 청구항 구성 대응표 작성",
+        """7. view_file 로 본문을 실제로 읽은 후보에만 A/B/C 그룹과 청구항 구성 대응표를
+   작성. 읽지 못한 후보는 evidence_status 를 "candidate_only" 로 두고 mapping 을
+   빈 배열 [] 로 남기십시오. 모든 후보를 다 열어야 한다는 뜻이 아닙니다 — 열지
+   못한 후보는 미확인 단서로 남기는 것이 정상입니다. 다만 읽지 않은 후보의
+   대응표를 쓰면 ARIA 가 그 행을 통째로 버리므로, 쓰는 만큼 그대로 낭비입니다.""",
+    ),
+    (
+        """- url 에는 그 후보를 확인한 실제 주소를 적으십시오. ARIA 는 이 주소를 당신이
+  실제로 성공시킨 WebFetch 호출과 대조합니다. 열어 보지 않은 주소에
+  source_page_reviewed 를 붙이면 자동으로 candidate_only 로 내려갑니다.""",
+        """- url 에는 그 후보를 확인한 실제 주소를 적으십시오. ARIA 는 이 주소를 당신이
+  WebFetch 로 가져온 뒤 view_file 로 본문까지 읽은 주소와 대조합니다. 가져오기만
+  하고 읽지 않은 주소에 source_page_reviewed 를 붙이면 자동으로 candidate_only
+  로 내려가고, 그 후보의 mapping 은 출력에서 제외됩니다.""",
+    ),
+    (
+        "    webfetch_summary    WebFetch 로 페이지를 열어 요약을 받았다",
+        "    webfetch_summary    WebFetch 로 가져와 view_file 로 본문을 읽었다",
+    ),
+    (
+        "    page_text   이 후보의 전용 페이지를 열어 받은 내용에서 읽었다",
+        "    page_text   이 후보의 전용 페이지를 가져와 view_file 로 읽은 내용에서 읽었다",
+    ),
 )
+
+
+def _agy_search_context() -> str:
+    text = SEARCH_RUNTIME_CONTEXT
+    for old, new in _AGY_CONTEXT_EDITS:
+        if text.count(old) != 1:
+            raise RuntimeError(
+                "agy 검색 컨텍스트 치환이 빗나갔습니다. "
+                f"{text.count(old)}회 일치: {old[:60]!r}"
+            )
+        text = text.replace(old, new)
+    # 도구 이름은 편집이 끝난 뒤 한 번에 바꾼다. 위 편집문에 실제 도구 이름을
+    # 미리 적어 두면 원문과 대조가 되지 않아 치환이 빗나간다.
+    text = text.replace("WebSearch", "search_web").replace(
+        "WebFetch", "read_url_content"
+    )
+    if "WebFetch" in text or "WebSearch" in text:
+        raise RuntimeError("agy 검색 컨텍스트에 Claude 도구 이름이 남았습니다.")
+    return text
+
+
+AGY_SEARCH_RUNTIME_CONTEXT = _agy_search_context()
 
 # Codex 는 도구 이름도 다르고, 무엇보다 **페이지를 여는 도구가 없다.**
 # 설정의 [tools] 표에 있는 것은 web_search 하나뿐이고, WebFetch/read_url_content
@@ -418,7 +495,14 @@ DEFAULTS: dict[str, object] = {
     "max_file_size_bytes": 25 * 1024 * 1024,
     "max_total_upload_bytes": 100 * 1024 * 1024,
     "max_files_per_job": 20,
-    "max_inline_chars": 800_000,
+    # ARIA 자체의 글자 수 한도. 0(또는 null)이면 제한 없음이며 기본값이다.
+    # 이 값은 안전 장치가 아니라 사용자가 스스로 걸어 두는 상한이다. 실행을
+    # 실제로 막아야 하는 한도는 두 가지뿐이고, 둘 다 사용자가 끌 수 없다.
+    #   1. Provider 전송 한도(Provider.max_input_bytes) — 그 CLI 가 자료 전체를
+    #      손실 없이 모델에 전달할 수 있는 크기.
+    #   2. 모델 컨텍스트 한도 — Provider 호출이 스스로 거절한다.
+    # 어느 쪽을 넘든 ARIA 는 문서를 자르거나 요약하지 않고 중단한다.
+    "max_inline_chars": 0,
     "default_timeout_seconds": 900,
     "max_concurrency_per_provider": 1,
     "runtime_context": DEFAULT_RUNTIME_CONTEXT,

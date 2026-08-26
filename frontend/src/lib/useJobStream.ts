@@ -96,7 +96,10 @@ export function useJobStream(jobId: string | null): JobStreamState {
             next.stage = String(payload.message ?? "검색 중");
             break;
           case "tool_budget_exceeded":
-            next.stage = String(payload.message ?? "도구 호출 상한 초과");
+            next.stage = String(payload.message ?? "검색 호출 상한 초과");
+            break;
+          case "content_read_budget_exceeded":
+            next.stage = String(payload.message ?? "페이지 본문 읽기 상한 초과");
             break;
           case "provider_done":
             next.stage = "결과 수신 완료";
