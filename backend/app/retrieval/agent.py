@@ -54,6 +54,9 @@ DEFAULT_MAX_PAGE_READS = 40
 # 남는 크기로 잡았다. 여기를 올리면 preflight 가 계산하는 최댓값이 그만큼 커져서
 # 전송 한도가 작은 Provider 에서 실행이 막힐 수 있다.
 DEFAULT_EVIDENCE_CHARS = 40_000
+# 근거 구간이 실린 페이지의 앞뒤로 더 담을 페이지 수. 0 이면 페이지 확장을
+# 하지 않고 예전처럼 청크와 앞뒤 청크만 담는다.
+DEFAULT_NEIGHBOR_PAGES = 1
 DEFAULT_HITS_PER_DOCUMENT = 6
 
 # 한 라운드에서 모델에게 돌려주는 검색 결과 본문의 총 상한. 라운드 예산과 다른
@@ -79,6 +82,9 @@ class RetrievalBudget:
     max_evidence_chars: int = DEFAULT_EVIDENCE_CHARS
     hits_per_document: int = DEFAULT_HITS_PER_DOCUMENT
     max_round_result_chars: int = MAX_ROUND_RESULT_CHARS
+    # 근거 구간이 실린 페이지의 앞뒤로 더 담을 페이지 수. 페이지 전문은
+    # max_evidence_chars 안에서 자리를 얻고, 모자라면 가장 먼저 줄어든다.
+    neighbor_pages: int = DEFAULT_NEIGHBOR_PAGES
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +93,7 @@ class RetrievalBudget:
             "max_evidence_chars": self.max_evidence_chars,
             "hits_per_document": self.hits_per_document,
             "max_round_result_chars": self.max_round_result_chars,
+            "neighbor_pages": self.neighbor_pages,
         }
 
 
@@ -988,6 +995,14 @@ class RetrievalAgent:
             if result.hits:
                 document_entry["omitted_by_budget"] = len(result.hits)
 
+            # 채널별 순위는 **모델에게 보내지 않고** 감사 기록에만 남긴다.
+            # 라운드 payload 는 예산이 걸린 자리라, 모델이 쓰지 않는 값을 넣으면
+            # 그만큼 실제 근거가 밀린다. 반대로 "어느 채널이 몇 위로 올렸는가"는
+            # 나중에 후보 선정을 되짚을 때 필요하다.
+            ranks_by_chunk = {
+                hit.row.chunk_id: dict(hit.ranks) for hit in result.hits
+            }
+
             candidate_aliases = [
                 alias for alias in omitted_aliases if alias != result.document.alias
             ]
@@ -1036,6 +1051,7 @@ class RetrievalAgent:
                         "alias": row.get("alias") or result.document.alias,
                         "chunk_id": chunk_id,
                         "channels": list(row.get("channels") or []),
+                        "ranks": ranks_by_chunk.get(chunk_id, {}),
                     }
                     if row.get("page_number"):
                         component.record_page(attachment_id, int(row["page_number"]))

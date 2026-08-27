@@ -265,6 +265,7 @@ def _job_out(job: ExecutionJob) -> JobOut:
         search_manifest_error=job.search_manifest_error,
         search_focus=job.search_focus,
         delivery_plan=job.delivery_plan or DeliveryPlan.FULL_INLINE,
+        delivery_manifest=job.delivery_manifest,
         retrieval_manifest=job.retrieval_manifest,
         retrieval_manifest_error=job.retrieval_manifest_error,
         provider=job.provider,
@@ -953,10 +954,14 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             tool_policy_name=tool_policy_name,
             retrieval_mode=str(values.get("retrieval_mode") or "auto"),
             provider_byte_budget=byte_budget,
-            retrieval_auto_threshold_bytes=int(
-                values.get("retrieval_auto_threshold_bytes") or 0
-            ),
             retrieval_budget=retrieval_budget,
+            provider_id=provider_id,
+            model=str(payload.model or values.get("default_models", {}).get(provider_id, "")),
+            provider_measure=getattr(provider, "payload_bytes", None),
+            claim_element_count=job_assembly.claim_element_count(
+                payload.claim_text or ""
+            ),
+            **job_assembly.delivery_policy_from_settings(values),
         )
     except job_assembly.SpecUnreadable as exc:
         return PreflightOut(
@@ -991,7 +996,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
     except SearchPromptError as exc:
         raise HTTPException(422, str(exc)) from exc
 
-    lane_bytes = assembly.lane_bytes()
+    lane_bytes = assembly.lane_bytes(provider)
     lanes = [
         PreflightLane(
             id=name,
@@ -1065,7 +1070,10 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         over_bytes=over_bytes,
         blocked=no_material or over_bytes or over_chars,
         delivery_plan=assembly.delivery_plan,
+        selection_reason=assembly.selection_reason,
         full_inline_bytes=assembly.full_inline_bytes,
+        full_inline_chars=assembly.full_inline_chars,
+        delivery_manifest=assembly.delivery_manifest(provider),
         evidence_budget_chars=(
             retrieval_budget.max_evidence_chars if retrieval_plan else None
         ),

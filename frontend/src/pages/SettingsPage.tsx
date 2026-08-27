@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { api } from "../lib/api";
 import { isLogoutSession } from "../lib/types";
 import type {
   AppSettings,
+  CredentialCheck,
   Prompt,
   ProviderInfo,
   ProviderLoginSession,
@@ -69,6 +70,12 @@ export default function SettingsPage() {
   } | null>(null);
   // 사용자가 직접 접거나 편 Provider. 여기에 없으면 아래 기본값을 쓴다.
   const [detailsOpen, setDetailsOpen] = useState<Record<string, boolean>>({});
+  // EPO OPS 자격증명 입력 초안. Secret 은 서버가 되돌려주지 않으므로 저장된
+  // 값에서 채우지 않고, 저장에 성공하면 비운다.
+  const [epoKey, setEpoKey] = useState("");
+  const [epoSecret, setEpoSecret] = useState("");
+  const [epoChecking, setEpoChecking] = useState(false);
+  const [epoCheck, setEpoCheck] = useState<CredentialCheck | null>(null);
 
   useEffect(() => {
     Promise.all([api.settings(), api.listPrompts(), api.listProviders()])
@@ -85,9 +92,18 @@ export default function SettingsPage() {
         setDefaultPromptId(configuredPrompt?.id ?? fallbackPrompt?.id ?? "");
         setDefaultProvider(s.values.default_provider ?? "agy");
         setDefaultModels(s.values.default_models ?? {});
+        setEpoKey(s.values.epo_consumer_key ?? "");
       })
       .catch((e) => setError(e.message));
   }, []);
+
+  // 저장에 성공하면 서버가 준 값으로 초안을 되맞춘다. Secret 은 서버가 빈
+  // 문자열만 주므로 여기서 건드리지 않는다 — 되맞추면 방금 저장한 값이 화면에서
+  // 사라진 것처럼 보이는 게 아니라, 초안이 빈 값으로 덮여 '지우기'와 구별되지
+  // 않게 된다.
+  useEffect(() => {
+    if (settings) setEpoKey(settings.values.epo_consumer_key ?? "");
+  }, [settings?.values.epo_consumer_key]);
 
   useEffect(() => {
     if (!loginSession || !loginSession.can_cancel) return;
@@ -175,6 +191,33 @@ export default function SettingsPage() {
       notify("저장했습니다.");
     } catch (e) {
       setError((e as Error).message);
+    }
+  };
+
+  // 자격증명 저장. 값이 바뀌면 이전 확인 결과는 더 이상 그 값에 대한 판정이
+  // 아니므로 지운다 — 남겨 두면 실패한 키를 새 키로 바꾼 화면에 옛 실패가
+  // 계속 붙어 있는다(반대도 마찬가지라 더 위험하다).
+  const saveEpoCredential = async (key: string, value: string, done: string) => {
+    try {
+      const updated = await api.updateSettings({ [key]: value });
+      setSettings(updated);
+      setEpoCheck(null);
+      if (key === "epo_consumer_secret") setEpoSecret("");
+      notify(done);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const checkEpo = async () => {
+    setEpoChecking(true);
+    setError("");
+    try {
+      setEpoCheck(await api.checkEpoCredentials());
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setEpoChecking(false);
     }
   };
 
@@ -325,6 +368,8 @@ export default function SettingsPage() {
   }
 
   const v = settings.values;
+  // Secret 은 values 로 내려오지 않는다. 저장 여부의 근거는 이쪽뿐이다.
+  const epoSecretSaved = settings.secrets_set?.epo_consumer_secret === true;
   const selectedProvider = providers.find((p) => p.provider === defaultProvider);
   const modelOptions = Array.isArray(selectedProvider?.capabilities.models)
     ? selectedProvider.capabilities.models
@@ -775,13 +820,49 @@ export default function SettingsPage() {
       </div>
 
       <div className="card settings-limits">
+        <div className="settings-limit-options">
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={v.keep_raw_output}
+              onChange={(e) => saveValue("keep_raw_output", e.target.checked)}
+            />
+            raw stdout/stderr 를 파일로 보존
+          </label>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={v.fail_on_tool_use}
+              onChange={(e) => saveValue("fail_on_tool_use", e.target.checked)}
+            />
+            도구 호출이 감지되면 실패로 처리
+          </label>
+          <div className="hint">
+            특허 구성대비 분석에서는 이 설정과 무관하게 도구 호출을 실패로
+            처리합니다. 유사 문헌 검색은 Provider별 검색 도구만 허용하는 별도
+            정책을 사용합니다.
+          </div>
+        </div>
+      </div>
+
+      <div className="card settings-limits">
         <h2>대용량 인용발명 전달 방식</h2>
         <p className="muted">
-          인용발명 PDF 를 최종 분석 모델에게 어떻게 전달할지 정합니다. 어느
-          방식이든 ARIA 는 문서를 임의로 자르거나 요약하지 않습니다. 로컬 검색은
-          문헌을 페이지·문단 단위로 색인한 뒤 AI 가 청구항 구성별로 검색한
-          구간만 근거 패키지로 전달하고, 검색되지 않은 구간은 「확인하지 못한
-          범위」로 보고서에 남깁니다. OCR 은 수행하지 않습니다.
+          인용발명 PDF 를 최종 분석 모델에게 어떻게 전달할지 정합니다. 폭은
+          둘입니다 — <strong>전체 인라인</strong> 또는{" "}
+          <strong>로컬 검색</strong>. 로컬 검색은 찾은 구간만 넣지 않고, 그 구간이
+          실린 <strong>페이지 전문과 앞뒤 페이지</strong>를 예산이 허락하는 만큼
+          함께 넣습니다. 어느 방식이든 ARIA 는 문서를 임의로 자르거나 요약하지
+          않습니다. 넣지 못한 범위는 「미확인 페이지」로 보고서에 남습니다. OCR 은
+          수행하지 않습니다.
+        </p>
+        <p className="muted">
+          좁힐지 말지를 정하는 한도는 Provider 마다 다릅니다.{" "}
+          <strong>agy 는 CLI 가 180,000 bytes 에서 입력을 자릅니다</strong> — 이
+          값은 사용자가 끌 수 없고, 넘겨 보내면 뒷부분이 조용히 사라진 채
+          「성공」으로 끝납니다. <strong>Codex·Claude 는 CLI 가 자르지 않고 모델
+          컨텍스트 토큰이 한계</strong>이므로, 아래에서 그 한도를 정합니다. 둘은
+          다른 축이며 운영체제의 명령행 길이 제한과도 관계가 없습니다.
         </p>
         <div className="settings-limit-grid">
           <div className="field">
@@ -791,16 +872,15 @@ export default function SettingsPage() {
               value={v.retrieval_mode}
               onChange={(e) => saveValue("retrieval_mode", e.target.value)}
             >
-              <option value="auto">
-                auto — 전송 한도를 넘을 때만 로컬 검색 (권장)
-              </option>
+              <option value="auto">auto — 넣을 수 있으면 전체 (권장)</option>
               <option value="full">full — 항상 전체 인라인</option>
               <option value="retrieval">retrieval — 항상 로컬 검색</option>
             </select>
             <div className="hint">
-              auto 는 선택한 Provider 가 자료 전체를 손실 없이 전달할 수 있는지만
-              봅니다. full 로 두면 한도를 넘는 문헌이 예전처럼 INPUT_TOO_LARGE 로
-              거절됩니다.
+              auto 는 자료 전체를 손실 없이 전달할 수 있으면 그렇게 하고, 못 하면
+              로컬 검색으로 바꿉니다. full 로 두면 한도를 넘는 문헌이 예전처럼
+              INPUT_TOO_LARGE 로 거절됩니다. 어느 쪽으로 갔는지와 그 사유는 실행
+              기록에 남습니다.
             </div>
           </div>
           <NumberField
@@ -808,11 +888,20 @@ export default function SettingsPage() {
             value={v.retrieval_evidence_chars}
             hint={
               "실행 전 크기 안내가 이 값으로 최댓값을 계산하고, 실행은 그 값을 " +
-              "넘지 못합니다. 한글 1자는 UTF-8 3 bytes 이므로 40,000자는 최대 " +
-              "120,000 bytes 입니다. 전송 한도가 작은 Provider 에서 실행이 " +
-              "막히면 이 값을 낮추십시오."
+              "넘지 못합니다. 페이지 전문도 이 예산 안에서 자리를 얻습니다. " +
+              "한글 1자는 UTF-8 3 bytes 이므로 40,000자는 최대 120,000 bytes 입니다."
             }
             onSave={(n) => saveValue("retrieval_evidence_chars", n)}
+          />
+          <NumberField
+            label="근거 페이지 앞뒤로 더 담을 페이지 수"
+            value={v.retrieval_neighbor_pages}
+            hint={
+              "특허 문언은 한 구성의 설명이 페이지 경계에서 끊기는 일이 흔합니다. " +
+              "예산이 모자라면 주변 페이지부터 줄고, 뺀 페이지는 미확인으로 " +
+              "기록됩니다. 0 이면 페이지 확장을 하지 않습니다."
+            }
+            onSave={(n) => saveValue("retrieval_neighbor_pages", n)}
           />
           <NumberField
             label="AI 검색 라운드 상한"
@@ -836,14 +925,83 @@ export default function SettingsPage() {
             onSave={(n) => saveValue("retrieval_hits_per_document", n)}
           />
           <NumberField
-            label="auto 전환 크기 (bytes, 0 = 사용 안 함)"
-            value={v.retrieval_auto_threshold_bytes}
+            label="임베딩 캐시 상한 (MB, 0 = 정리 안 함)"
+            value={v.embedding_cache_max_mb}
             hint={
-              "Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기입니다. " +
-              "전송 한도를 선언하지 않은 Provider(claude, codex)에서 큰 문헌을 " +
-              "로컬 검색으로 돌리고 싶을 때만 씁니다."
+              "의미 검색 임베딩 캐시가 이보다 커지면 최근 사용 시각이 오래된 " +
+              "것부터 지웁니다. 정리에 실패해도 검색은 그대로 돕니다."
             }
-            onSave={(n) => saveValue("retrieval_auto_threshold_bytes", n)}
+            onSave={(n) => saveValue("embedding_cache_max_mb", n)}
+          />
+        </div>
+
+        <h3 style={{ marginTop: 18 }}>모델 컨텍스트 입력 예산</h3>
+        <p className="muted">
+          전송 하드 한도를 선언하지 않은 Provider(codex, claude)에만 적용됩니다.{" "}
+          <strong>ARIA 는 모델 한도를 추측하지 않습니다.</strong> 아래 표에 값이
+          없으면 보수적 대체값을 쓰고, 그 사실이 실행 기록의 판정 사유에 남습니다.
+          입력 예산 = 컨텍스트 − 출력·추론 예약이며, 토큰 수는 UTF-8 바이트에서
+          보수적으로(실제보다 많게) 추정합니다.
+        </p>
+        <div className="settings-limit-grid">
+          <NumberField
+            label="출력·추론 예약 토큰"
+            value={v.model_output_reserve_tokens}
+            hint="입력이 컨텍스트를 꽉 채우면 모델이 답을 쓸 자리가 없습니다."
+            onSave={(n) => saveValue("model_output_reserve_tokens", n)}
+          />
+          <NumberField
+            label="모델 한도를 모를 때의 대체 컨텍스트 토큰"
+            value={v.unknown_model_context_tokens}
+            hint={
+              "실제보다 작게 잡습니다 — 틀렸을 때 좁아지는 쪽이, 다 넣었다가 " +
+              "모델에 거절당해 검색 비용을 날리는 쪽보다 낫습니다."
+            }
+            onSave={(n) => saveValue("unknown_model_context_tokens", n)}
+          />
+        </div>
+        <div className="hint" style={{ marginTop: 8 }}>
+          모델별 컨텍스트 한도(<code>model_context_tokens</code>)는 아직 이 화면에서
+          편집할 수 없습니다. 설정 API 로 <code>{'{"codex:gpt-5-codex": 400000}'}</code>{" "}
+          형태의 표를 넣으면 그 값이 대체값보다 우선합니다. 현재 등록된 모델:{" "}
+          {Object.entries(v.model_context_tokens || {}).length === 0
+            ? "없음 (전부 대체값 사용)"
+            : Object.entries(v.model_context_tokens)
+                .map(([key, tokens]) => `${key} ${Number(tokens).toLocaleString()}`)
+                .join(" · ")}
+        </div>
+
+        <h3 style={{ marginTop: 18 }}>사건 규모 품질 기준</h3>
+        <p className="muted">
+          여기부터는 <strong>전송 한도가 아닙니다.</strong> 전송 하드 한도를
+          선언하지 않은 Provider 에서만 판정에 쓰이며, 「이 정도 규모면 좁혀 읽는
+          편이 낫다」는 판단입니다. 0 으로 두면 쓰지 않습니다. 권장 시작값은 문헌
+          5건 · 총 300페이지 · 구성 15개입니다.
+        </p>
+        <div className="settings-limit-grid">
+          <NumberField
+            label="문헌 수 기준 (0 = 사용 안 함)"
+            value={v.delivery_scale_documents}
+            hint={
+              "켜면 전송 한도 안에 들어오는 실행도 좁아지고, 준비 화면이 안내하는 " +
+              "크기는 그때부터 실측이 아니라 예산 상한이 됩니다."
+            }
+            onSave={(n) => saveValue("delivery_scale_documents", n)}
+          />
+          <NumberField
+            label="총 페이지 수 기준 (0 = 사용 안 함)"
+            value={v.delivery_scale_pages}
+            hint="문헌의 페이지 수 합계입니다."
+            onSave={(n) => saveValue("delivery_scale_pages", n)}
+          />
+          <NumberField
+            label="청구항 구성 수 기준 (0 = 사용 안 함)"
+            value={v.delivery_scale_claim_elements}
+            hint={
+              "구성 수는 조립 시점의 어림값입니다(구분자로 셉니다). 정확한 분해는 " +
+              "검색 단계 AI 가 하며, 이 값은 전달 폭을 정할 때만 쓰입니다."
+            }
+            onSave={(n) => saveValue("delivery_scale_claim_elements", n)}
           />
         </div>
         <div className="settings-limit-options">
@@ -888,6 +1046,149 @@ export default function SettingsPage() {
           <div className="notice info" style={{ marginTop: 10 }}>
             연동이 켜져 있으나 접속·인증이 아직 구현되지 않아 실제 검색은
             수행되지 않습니다. 외부 접속을 시도하지 않습니다.
+          </div>
+        )}
+      </div>
+
+      <div className="card settings-epo">
+        <h2>EPO OPS 특허 검색 연동</h2>
+        <p className="muted">
+          유럽특허청 Open Patent Services 의 자격증명(Consumer Key / Consumer
+          Secret)을 보관합니다. 지금 동작하는 것은 <b>자격증명 확인</b>까지이고,
+          유사 문헌 검색 경로에는 아직 연결되어 있지 않습니다 — 검색을 붙이려면
+          응답 원본 보존과 출처 검증 배선이 먼저 필요합니다.
+        </p>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={v.epo_integration_enabled}
+            onChange={(e) =>
+              saveValue("epo_integration_enabled", e.target.checked)
+            }
+          />
+          EPO OPS 연동 사용
+        </label>
+
+        {v.epo_integration_enabled && (
+          <div style={{ marginTop: 14 }}>
+            <div className="field">
+              <label>Consumer Key</label>
+              <div className="btn-row">
+                <input
+                  value={epoKey}
+                  onChange={(e) => setEpoKey(e.target.value)}
+                  placeholder="EPO 개발자 포털에서 발급한 Consumer Key"
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ flex: "1 1 320px", minWidth: 0 }}
+                />
+                <button
+                  className="btn small"
+                  disabled={epoKey.trim() === (v.epo_consumer_key ?? "")}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_key",
+                      epoKey.trim(),
+                      "Consumer Key 를 저장했습니다.",
+                    )
+                  }
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>
+                Consumer Secret{" "}
+                <span
+                  className={`pill ${epoSecretSaved ? "ok" : "neutral"}`}
+                  style={{ marginLeft: 6 }}
+                >
+                  {epoSecretSaved ? "저장됨" : "미설정"}
+                </span>
+              </label>
+              <div className="btn-row">
+                <input
+                  type="password"
+                  value={epoSecret}
+                  onChange={(e) => setEpoSecret(e.target.value)}
+                  placeholder={
+                    epoSecretSaved
+                      ? "저장되어 있습니다. 바꾸려면 새 값을 입력하십시오."
+                      : "EPO 개발자 포털에서 발급한 Consumer Secret Key"
+                  }
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  style={{ flex: "1 1 320px", minWidth: 0 }}
+                />
+                <button
+                  className="btn small"
+                  disabled={!epoSecret.trim()}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_secret",
+                      epoSecret.trim(),
+                      "Consumer Secret 를 저장했습니다.",
+                    )
+                  }
+                >
+                  저장
+                </button>
+                <button
+                  className="btn small"
+                  disabled={!epoSecretSaved}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_secret",
+                      "",
+                      "Consumer Secret 를 지웠습니다.",
+                    )
+                  }
+                >
+                  지우기
+                </button>
+              </div>
+              <div className="hint">
+                저장한 Secret 은 화면으로 다시 내려오지 않습니다. 값이 맞는지는
+                아래 「연결 테스트」로 확인하십시오. 앞뒤 공백이나 줄바꿈이 섞여
+                있으면 저장이 거절됩니다.
+              </div>
+            </div>
+
+            <div className="btn-row">
+              <button
+                className="btn small"
+                disabled={epoChecking || !v.epo_consumer_key || !epoSecretSaved}
+                onClick={checkEpo}
+              >
+                {epoChecking ? "확인 중…" : "연결 테스트"}
+              </button>
+              <span className="hint">
+                EPO 에 토큰 발급을 한 번 요청합니다. 특허 데이터는 받지 않고,
+                받은 토큰은 저장하지 않습니다. 실행(분석·검색)은 이 자격증명을
+                쓰지 않습니다.
+              </span>
+            </div>
+
+            {epoCheck && (
+              <div
+                className={`notice ${epoCheck.ok ? "ok" : "danger"}`}
+                style={{ marginTop: 10 }}
+              >
+                {epoCheck.detail}
+                {epoCheck.ok && epoCheck.expires_in
+                  ? ` (토큰 수명 ${epoCheck.expires_in}초)`
+                  : ""}
+              </div>
+            )}
+
+            <div className="notice info" style={{ marginTop: 10 }}>
+              확인에 성공해도 유사 문헌 검색은 지금까지와 똑같이 동작합니다.
+              EPO 후보가 보고서에 들어가려면 검색 어댑터와 증거 검증 배선이
+              추가되어야 하며, 그 전까지 ARIA 는 이 자격증명으로 검색을 시도하지
+              않습니다.
+            </div>
           </div>
         )}
       </div>
@@ -1185,11 +1486,15 @@ function NumberField(props: {
   const [draft, setDraft] = useState(String(props.value));
   useEffect(() => setDraft(String(props.value)), [props.value]);
   const dirty = draft !== String(props.value);
+  // 라벨과 입력을 실제로 연결한다. 연결이 없으면 화면 낭독기가 이 칸의 이름을
+  // 읽어 주지 못하고, 라벨로 칸을 찾는 테스트도 쓸 수 없다.
+  const fieldId = useId();
   return (
     <div className="field">
-      <label>{props.label}</label>
+      <label htmlFor={fieldId}>{props.label}</label>
       <div className="btn-row">
         <input
+          id={fieldId}
           type="number"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}

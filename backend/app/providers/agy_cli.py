@@ -348,6 +348,30 @@ class AgyCliProvider(Provider):
             args += ["--model", request.model]
         return args
 
+    def payload_bytes(self, system_prompt: str, user_message: str) -> int:
+        """agy 에 실제로 나가는 stream-json 한 줄의 UTF-8 바이트 수.
+
+        두 문자열을 그냥 더하면 실제보다 작게 잡힌다. 자르는 주체는 이 CLI 이고
+        그것이 보는 것은 **직렬화된 메시지**이기 때문이다. 더해지는 것:
+
+          - `compose_message` 가 앞에 붙이는 [ARIA RUNTIME CONTEXT] 머리말
+            (agy 는 시스템 프롬프트를 분리할 수단이 없다)
+          - JSON 이스케이프. 개행 하나가 `
+` 2 bytes 가 되므로, 줄이 많은
+            문서일수록 차이가 커진다. 따옴표·역슬래시도 마찬가지다.
+          - `{"event":"user","message":{...}}` 래퍼
+
+        그래서 여기서는 재지 않고 **실제로 만들어서 잰다.** 계산식으로 근사하면
+        이스케이프 규칙이 바뀌었을 때 조용히 어긋난다.
+        """
+        request = ExecutionRequest(
+            job_id="",
+            work_dir=Path("."),
+            system_prompt=system_prompt,
+            user_message=user_message,
+        )
+        return len(build_stdin_message(self.compose_message(request)).encode("utf-8"))
+
     def compose_message(self, request: ExecutionRequest) -> str:
         """시스템 프롬프트를 분리할 수 없으므로 맨 앞에 붙인다."""
         if not request.system_prompt.strip():

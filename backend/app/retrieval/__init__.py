@@ -32,6 +32,7 @@ from .service import (
 )
 from .versions import EXTRACTOR_VERSION, INDEX_VERSION, library_versions
 
+
 __all__ = [
     "BUNDLE_STATUSES",
     "EXTRACTOR_VERSION",

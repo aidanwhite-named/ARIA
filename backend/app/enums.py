@@ -89,10 +89,17 @@ class DeliveryPlan(StrEnum):
     축이 다르므로 섞지 않는다 — 로컬 검색으로 전달한 실행에서도 각 첨부의
     delivery_mode 는 "본문을 읽었는가"를 그대로 뜻한다.
 
-      FULL_INLINE      정규화 텍스트 전체를 프롬프트에 넣는다. v0.1 의 유일한
-                       경로였고 작은 문헌에서는 지금도 기본이다.
+      FULL_INLINE      정규화 텍스트 전체를 프롬프트에 넣는다.
       LOCAL_RETRIEVAL  ARIA 가 로컬 색인하고, AI 가 구조화된 검색 action 으로
-                       찾은 구간만 근거 패키지로 넣는다.
+                       찾은 구간을 근거 패키지로 넣는다. 근거 패키지에는 찾은
+                       구간뿐 아니라 **그 구간이 있는 페이지 전문과 앞뒤
+                       페이지**가 예산이 허락하는 만큼 함께 들어간다
+                       (retrieval.pages).
+
+    폭이 둘뿐인 것은 의도다. 한때 그 사이에 「페이지 단위」 전달을 따로 두었는데,
+    같은 검색을 돌리고 담는 단위만 다른 것이라 전달 방식이 아니라 **근거 패키지의
+    확장 방식**이 맞았다. 모드로 두면 사용자가 고를 축이 하나 늘어날 뿐이고,
+    "검색은 했는데 어느 폭으로 담겼나"를 두 군데서 설명하게 된다.
 
     값이 비어 있는 과거 실행은 FULL_INLINE 이다.
     """
@@ -100,17 +107,50 @@ class DeliveryPlan(StrEnum):
     FULL_INLINE = "full_inline"
     LOCAL_RETRIEVAL = "local_retrieval"
 
+    @classmethod
+    def coerce(cls, value: str | None) -> "DeliveryPlan":
+        """저장된 값을 읽는다. 모르는 값은 좁은 쪽으로 해석한다.
+
+        폐기된 focused_pages 같은 옛 값이 남아 있을 수 있다. 그 실행도 검색을
+        돌린 실행이므로 LOCAL_RETRIEVAL 로 읽는 편이 사실에 가깝다 — 전체
+        인라인으로 읽으면 "문헌 전체를 모델이 봤다"가 되어 거짓이 된다.
+        """
+        text = str(value or "").strip()
+        if not text:
+            return cls.FULL_INLINE
+        try:
+            return cls(text)
+        except ValueError:
+            return cls.LOCAL_RETRIEVAL
+
 
 class RetrievalMode(StrEnum):
     """사용자가 고른 전달 방식 정책.
 
     AUTO 는 크기를 보고 고른다. 문서를 조용히 자르거나 요약하지 않으므로,
-    고르는 기준은 "Provider 가 자료 전체를 손실 없이 전달할 수 있는가" 하나다.
+    고르는 기준은 "이 Provider 와 모델이 자료 전체를 손실 없이 받을 수 있는가"
+    하나다. 넣지 못한 범위는 미확인으로 기록된다.
     """
 
     AUTO = "auto"
     FULL = "full"
     RETRIEVAL = "retrieval"
+
+    @classmethod
+    def coerce(cls, value: str | None) -> "RetrievalMode":
+        """설정에서 읽는다. 폐기된 값은 뜻이 가장 가까운 쪽으로 옮긴다.
+
+        focused 는 「페이지 단위로 담아라」였고 그 동작은 지금 RETRIEVAL 안에
+        들어가 있다. AUTO 로 되돌리면 사용자가 명시적으로 좁혀 두었던 설정이
+        조용히 넓어지므로 RETRIEVAL 로 옮긴다.
+        """
+        text = str(value or "").strip().lower()
+        if text == "focused":
+            return cls.RETRIEVAL
+        try:
+            return cls(text or cls.AUTO)
+        except ValueError:
+            return cls.AUTO
 
 
 class AttachmentRole(StrEnum):

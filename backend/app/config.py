@@ -522,17 +522,15 @@ DEFAULTS: dict[str, object] = {
     "max_search_tool_calls": 40,
     # 인용발명 문헌을 최종 분석 모델에게 어떻게 전달할 것인가.
     #
-    #   auto      기본값. 전체 인라인으로 넣을 수 있으면 그렇게 하고, Provider
-    #             전송 한도를 넘을 때만 로컬 검색으로 바꾼다. 어느 쪽으로
-    #             갔는지는 History 와 manifest 에 기록되며, 문서를 조용히
-    #             자르거나 요약하는 경로는 어느 쪽에도 없다.
+    #   auto      기본값. 자료 전체를 손실 없이 전달할 수 있으면 그렇게 하고,
+    #             못 하면 로컬 검색으로 바꾼다. 어느 쪽으로 갔는지와 그 사유는
+    #             History 와 manifest 에 기록되며, 문서를 조용히 자르거나
+    #             요약하는 경로는 어디에도 없다.
     #   full      항상 전체 인라인. 한도를 넘으면 예전처럼 INPUT_TOO_LARGE.
     #   retrieval 항상 로컬 검색. 작은 문헌에서도 근거 패키지만 전달한다.
+    #
+    # 폐기된 값 focused 는 settings_service 가 retrieval 로 옮긴다.
     "retrieval_mode": "auto",
-    # auto 모드에서 Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기.
-    # 0 = 사용하지 않음(기본값). 전송 한도를 선언하지 않은 Provider(claude,
-    # codex)에서 큰 문헌을 로컬 검색으로 돌리고 싶을 때만 쓴다.
-    "retrieval_auto_threshold_bytes": 0,
     # 로컬 검색 예산. preflight 와 실행이 같은 값을 쓴다
     # (retrieval.budget_from_settings).
     "retrieval_max_rounds": 6,
@@ -545,6 +543,51 @@ DEFAULTS: dict[str, object] = {
     # 한 구성 × 한 문헌에서 확보하는 후보 수. 전역 top-k 가 아니라 문헌마다
     # 따로 걸리므로, 문헌이 늘어도 한 문헌이 결과를 독점하지 않는다.
     "retrieval_hits_per_document": 6,
+    # 근거 구간이 있는 페이지의 앞뒤로 몇 페이지를 더 담을 것인가.
+    #
+    # 근거 패키지는 찾은 청크만 담지 않는다. 그 청크가 있는 **페이지 전문**과
+    # 앞뒤 페이지를 예산이 허락하는 만큼 함께 담는다. 특허 문언은 한 구성의
+    # 설명이 문단 여럿에 걸치고 페이지 경계에서 끊기므로, 발췌 몇 줄로는
+    # 「이 문헌에 대응 구성이 없다」를 단정할 수 없다.
+    #
+    # 예산을 넘으면 **주변 페이지부터** 줄인다(retrieval.pages). 0 이면 페이지
+    # 확장을 하지 않고 예전처럼 청크와 앞뒤 청크만 담는다.
+    "retrieval_neighbor_pages": 1,
+    # ---- 모델 컨텍스트 기반 입력 예산 --------------------------------------
+    #
+    # 전송 하드 한도(Provider.max_input_bytes)를 선언하지 않은 Provider
+    # (codex, claude)의 실제 한도는 **모델별 토큰 컨텍스트**다. 그 한도를 문자
+    # 수로 근사하면 언어에 따라 크게 어긋나므로 토큰으로 잰다.
+    #
+    # 입력 예산 = 컨텍스트 - 출력·추론 예약
+    #
+    # 값의 출처는 providers/model_limits.py 를 보라. ARIA 는 모델 한도를
+    # **추측하지 않는다.** 아는 값이 없으면 보수적 대체값을 쓰고 그 사실을
+    # 판정 사유에 남긴다.
+    #
+    # provider:model 또는 model 을 키로 하는 재정의. 예:
+    #   {"claude:claude-sonnet-4-6": 200000, "gpt-5-codex": 400000}
+    "model_context_tokens": {},
+    # 답변과 추론에 남겨 둘 토큰. 입력이 컨텍스트를 꽉 채우면 모델이 답을 쓸
+    # 자리가 없다.
+    "model_output_reserve_tokens": 32_000,
+    # 모델 컨텍스트를 알 수 없을 때 쓰는 보수적 대체값. 실제보다 작게 잡는다 —
+    # 틀렸을 때 좁아지는 쪽이 잘린 채 "성공"하는 것보다 낫다.
+    "unknown_model_context_tokens": 128_000,
+    # ---- 사건 규모 품질 기준 (전송 한도가 아니다) ---------------------------
+    #
+    # 전송 하드 한도를 선언하지 않은 Provider 에만 적용된다. "이 정도 규모면
+    # 좁혀 읽는 편이 낫다"는 판단이며 조정할 수 있다. 기본은 0 = 쓰지 않음이다 —
+    # 켜면 한도 안에 들어오는 실행까지 좁아지고, 준비 화면이 안내하는 크기가 그
+    # 순간부터 실측이 아니라 예산 상한이 된다.
+    #
+    # 권장 시작값: 문헌 5건 · 총 300페이지 · 구성 15개.
+    "delivery_scale_documents": 0,
+    "delivery_scale_pages": 0,
+    "delivery_scale_claim_elements": 0,
+    # 임베딩 캐시 상한(MB). 넘으면 최근 사용 시각이 오래된 것부터 지운다.
+    # 0 = 정리하지 않음. 정리 실패는 검색을 막지 않는다.
+    "embedding_cache_max_mb": 512,
     # 의미 검색(sentence-transformers). 기본 꺼짐이고 requirements.txt 에도
     # 없다. 켜도 라이브러리·모델이 없으면 키워드 검색만으로 진행하고 그 사실을
     # 보고서와 실행 기록에 남긴다. docs/adr-0001-local-retrieval.md 참조.
@@ -552,4 +595,10 @@ DEFAULTS: dict[str, object] = {
     # Kiwee 특허 검색 연동. 기본 꺼짐. 켜도 지금은 연동 지점(모듈)만 준비된
     # 상태라 실제 외부 검색은 수행하지 않는다. app.patent_search 참조.
     "kiwee_integration_enabled": False,
+    # EPO OPS 연동. 기본 꺼짐. 키 이름은 app.patent_search.epo_backend 에도
+    # 적혀 있다(순환 import 회피). 두 곳이 어긋나면 tests/test_epo_ops.py 가
+    # 걸린다.
+    "epo_integration_enabled": False,
+    "epo_consumer_key": "",
+    "epo_consumer_secret": "",
 }

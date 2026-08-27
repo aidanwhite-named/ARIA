@@ -76,6 +76,9 @@ _RETRIEVAL_COLUMNS = (
     ),
     ("retrieval_manifest", "retrieval_manifest JSON"),
     ("retrieval_manifest_error", "retrieval_manifest_error TEXT"),
+    # 전달 판정 기록. 없던 시절의 실행은 NULL 이고 화면은 delivery_plan 만으로
+    # 예전처럼 표시한다 — 없는 사유를 지어내지 않는다.
+    ("delivery_manifest", "delivery_manifest JSON"),
 )
 
 

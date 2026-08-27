@@ -226,11 +226,17 @@ class PreflightOut(BaseModel):
     over_bytes: bool = False
     # 지금 실행하면 Provider 호출 전에 막힌다.
     blocked: bool = False
-    # 이 입력이 실제로 어떤 방식으로 전달되는가(full_inline / local_retrieval).
-    # runner 와 같은 판정 함수(job_assembly.decide_delivery_plan)를 쓴다.
+    # 이 입력이 실제로 어떤 방식으로 전달되는가
+    # (full_inline / local_retrieval).
+    # runner 와 같은 판정 함수(job_assembly.decide_delivery)를 쓴다.
     delivery_plan: str = "full_inline"
-    # 전체 인라인으로 넣었을 때의 크기. auto 가 왜 로컬 검색을 골랐는지 설명한다.
+    # 왜 그 방식을 골랐는가. 화면이 문장을 새로 만들지 않고 이 값을 그대로 쓴다.
+    selection_reason: str = ""
+    # 전체 인라인으로 넣었을 때의 크기. auto 가 왜 좁혔는지 설명한다.
     full_inline_bytes: int = 0
+    full_inline_chars: int = 0
+    # 전달 판정 한 벌. 필드 목록은 job_assembly.AssemblyResult.delivery_manifest.
+    delivery_manifest: dict[str, Any] | None = None
     # local_retrieval 일 때 위 chars/bytes 는 예산 상한으로 계산한 **최댓값**이다.
     # 실제 근거 패키지는 이 값을 넘지 못한다.
     evidence_budget_chars: int | None = None
@@ -267,6 +273,9 @@ class JobOut(BaseModel):
     search_focus: dict[str, Any] | None = None
     # 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline.
     delivery_plan: str = "full_inline"
+    # 그 판정의 근거와 실제 전송 크기. 이 기능 이전 실행은 null 이며, 화면은
+    # 없는 사유를 지어내지 않고 delivery_plan 만 표시한다.
+    delivery_manifest: dict[str, Any] | None = None
     # 로컬 검색 실행의 감사 기록. 전체 인라인 실행에서는 null.
     retrieval_manifest: dict[str, Any] | None = None
     retrieval_manifest_error: str | None = None
@@ -320,7 +329,20 @@ class SettingsOut(BaseModel):
     data_dir: str
     runs_dir: str
     env_filtering: dict[str, Any] = Field(default_factory=dict)
+    # 비밀 값은 values 에서 지워져 나간다. 화면이 "설정됨/미설정"을 그릴 근거는
+    # 이쪽뿐이다 — values 의 빈 문자열로는 '지워졌다'와 '가려졌다'를 구별할 수
+    # 없다.
+    secrets_set: dict[str, bool] = Field(default_factory=dict)
 
 
 class SettingsUpdate(BaseModel):
     values: dict[str, Any]
+
+
+class CredentialCheckOut(BaseModel):
+    """외부 데이터 소스 자격증명 확인 결과. 토큰 값은 담지 않는다."""
+
+    ok: bool
+    detail: str
+    http_status: int | None = None
+    expires_in: int | None = None

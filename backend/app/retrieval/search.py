@@ -256,23 +256,34 @@ def search_document(
 def _semantic_channel(
     index: DocumentIndex, queries: list[str], encoder, limit: int
 ) -> ChannelResult:
-    """임베딩 코사인 상위 N. 실패해도 다른 채널을 막지 않는다."""
+    """임베딩 코사인 상위 N. 실패해도 다른 채널을 막지 않는다.
+
+    청크 임베딩은 (pdf_sha256 · 인덱스/추출기 버전 · 모델 · revision) 로 캐시되고
+    검색어 임베딩은 실행 안에서 기억된다. 그 판단은 전부 SemanticEncoder 안에
+    있다 — 여기서 캐시를 분기하면 캐시 있는 경로와 없는 경로가 서로 다른 후보를
+    내놓아도 알아채지 못한다.
+    """
     result = ChannelResult(channel=CHANNEL_SEMANTIC, queries=list(queries))
     try:
-        from .semantic import cosine
+        from .semantic import best_scores
 
         chunks = index.all_chunks()
         if not chunks:
             result.executed = False
             result.skipped_reason = "색인된 청크가 없습니다."
             return result
-        vectors = encoder.encode([chunk.text for chunk in chunks])
-        query_vectors = encoder.encode(queries)
+        vectors = encoder.document_vectors(index.fingerprint(), chunks)
+        query_vectors = encoder.query_vectors(list(queries))
+        # 순위 계산은 한 번에 한다. 청크마다 파이썬 루프를 돌면 임베딩을 캐시해
+        # 아낀 시간을 여기서 다시 쓴다(semantic.best_scores 주석의 실측 참조).
+        scores = best_scores(vectors, query_vectors)
         scored: list[tuple[float, SearchRow]] = []
-        for chunk, vector in zip(chunks, vectors):
-            best = max((cosine(vector, q) for q in query_vectors), default=0.0)
+        for chunk, best in zip(chunks, scores):
+            chunk.score = best
             scored.append((best, chunk))
-        scored.sort(key=lambda pair: -pair[0])
+        # 점수가 같으면 페이지 순서를 지킨다. 정렬이 흔들리면 같은 입력에서
+        # 라운드마다 다른 후보가 나와 실행이 재현되지 않는다.
+        scored.sort(key=lambda pair: (-pair[0], pair[1].page_number, pair[1].page_order))
         result.rows = [row for _score, row in scored[:limit]]
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"

@@ -33,14 +33,28 @@ EDITABLE_KEYS = frozenset(
         "fail_on_tool_use",
         "max_search_tool_calls",
         "retrieval_mode",
-        "retrieval_auto_threshold_bytes",
         "retrieval_max_rounds",
         "retrieval_max_page_reads",
         "retrieval_evidence_chars",
         "retrieval_hits_per_document",
         "retrieval_semantic_enabled",
         "kiwee_integration_enabled",
-    }
+        "epo_integration_enabled",
+        "epo_consumer_key",
+        "epo_consumer_secret",
+            # 근거 패키지의 페이지 확장.
+        "retrieval_neighbor_pages",
+        # 모델 컨텍스트 기반 입력 예산. Provider 전송 하드 한도는 여기에 없다 —
+        # 사용자가 끌 수 없는 값이기 때문이다.
+        "model_context_tokens",
+        "model_output_reserve_tokens",
+        "unknown_model_context_tokens",
+        "embedding_cache_max_mb",
+        # 사건 규모 품질 기준.
+        "delivery_scale_documents",
+        "delivery_scale_pages",
+        "delivery_scale_claim_elements",
+}
 )
 
 _PROVIDER_IDS = frozenset({"agy", "claude", "codex"})
@@ -69,11 +83,17 @@ _INT_KEYS = frozenset(
         "default_timeout_seconds",
         "max_concurrency_per_provider",
         "max_search_tool_calls",
-        "retrieval_auto_threshold_bytes",
         "retrieval_max_rounds",
         "retrieval_max_page_reads",
         "retrieval_evidence_chars",
         "retrieval_hits_per_document",
+        "retrieval_neighbor_pages",
+        "model_output_reserve_tokens",
+        "unknown_model_context_tokens",
+        "embedding_cache_max_mb",
+        "delivery_scale_documents",
+        "delivery_scale_pages",
+        "delivery_scale_claim_elements",
     }
 )
 
@@ -85,24 +105,96 @@ _LIMITS = {
     "default_timeout_seconds": (10, 86_400),
     "max_concurrency_per_provider": (1, 8),
     "max_search_tool_calls": (1, 200),
-    "retrieval_auto_threshold_bytes": (10_000, 20_000_000),
     "retrieval_max_rounds": (1, 30),
     "retrieval_max_page_reads": (1, 500),
     "retrieval_evidence_chars": (2_000, 400_000),
     "retrieval_hits_per_document": (1, 20),
+    "retrieval_neighbor_pages": (0, 5),
+    "model_output_reserve_tokens": (1_000, 500_000),
+    "unknown_model_context_tokens": (10_000, 5_000_000),
+    "embedding_cache_max_mb": (16, 100_000),
+    "delivery_scale_documents": (1, 200),
+    "delivery_scale_pages": (1, 100_000),
+    "delivery_scale_claim_elements": (1, 200),
 }
 
 # 인용발명 문헌 전달 방식. enums.RetrievalMode 와 같은 값이며, 여기서 import
 # 하지 않는 이유는 settings_service 가 enums 에 의존하지 않기 때문이다.
 _RETRIEVAL_MODES = ("auto", "full", "retrieval")
 
+# 폐기한 전달 방식 값 → 지금의 어느 값으로 읽을 것인가.
+#
+# focused 는 「페이지 단위로 담아라」였고, 그 동작은 지금 retrieval 의 근거
+# 패키지 안에 들어가 있다(retrieval.pages). auto 로 되돌리면 사용자가 명시적으로
+# 좁혀 두었던 설정이 조용히 넓어지므로 retrieval 로 옮긴다.
+_RETIRED_RETRIEVAL_MODES = {"focused": "retrieval"}
+
 # 0 이나 null 을 "제한 없음"으로 받는 키. 다른 한도와 달리 이 값은 안전 장치가
 # 아니라 사용자가 스스로 걸어 두는 상한이라, 끄는 것을 허용한다. 끈다고 해서
 # 무제한으로 보내지는 것은 아니다 — Provider 전송 한도(Provider.max_input_bytes)
 # 와 모델 컨텍스트 한도는 그대로 남고, 그 둘은 사용자가 끌 수 없다.
 _UNLIMITED_KEYS = frozenset(
-    {"max_inline_chars", "retrieval_auto_threshold_bytes"}
+    {
+        "max_inline_chars",
+        # 사건 규모 품질 기준은 전부 0 = 쓰지 않음을 받는다. 이 값들은 전송
+        # 한도가 아니라 "이 정도면 좁혀 읽는 편이 낫다"는 판단이므로, 끄는
+        # 선택이 있어야 한다. 화면도 「0 = 사용 안 함」이라고 안내한다 — 둘이
+        # 어긋나면 사용자가 안내대로 0 을 넣었을 때 저장이 거절된다.
+        "delivery_scale_documents",
+        "delivery_scale_pages",
+        "delivery_scale_claim_elements",
+        # 캐시 정리도 끌 수 있어야 한다. 0 = 정리하지 않음.
+        "embedding_cache_max_mb",
+    }
 )
+
+
+# 외부 데이터 소스의 자격증명. Provider(AI 실행 도구)의 API Key 와는 다른
+# 축이다 — 그쪽은 각 CLI 의 로그인 세션을 쓰므로 ARIA 가 받지 않는다. EPO OPS
+# 는 CLI 가 없고 OAuth client_credentials 뿐이라 저장 외에 방법이 없다.
+_CREDENTIAL_KEYS = frozenset({"epo_consumer_key", "epo_consumer_secret"})
+
+# 응답에서 값 자체를 내보내지 않는 키. 화면에는 "설정됨/미설정"만 준다.
+SECRET_KEYS = frozenset({"epo_consumer_secret"})
+
+# OPS 자격증명은 base64 로 안전하게 실릴 수 있는 짧은 문자열이다. 상한을 두는
+# 이유는 실수로 파일 내용이나 로그를 통째로 붙여 넣는 것을 막기 위해서다.
+_CREDENTIAL_MAX_LEN = 256
+
+
+def _coerce_credential(key: str, value: Any) -> str:
+    """자격증명 문자열을 정리한다. 빈 값은 '지움'이라는 정상 입력이다."""
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ""
+    if len(text) > _CREDENTIAL_MAX_LEN:
+        raise ValueError(f"{key} 는 {_CREDENTIAL_MAX_LEN}자 이하여야 합니다.")
+    # 복사·붙여넣기로 딸려 들어온 공백·줄바꿈은 Basic 인증 헤더를 조용히
+    # 망가뜨린다. 잘라내지 말고 거절해서 사용자가 알아채게 한다.
+    if any(ch.isspace() for ch in text):
+        raise ValueError(f"{key} 에 공백이나 줄바꿈이 들어 있습니다.")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+        raise ValueError(f"{key} 에 사용할 수 없는 문자가 들어 있습니다.")
+    return text
+
+
+def secrets_set(values: dict[str, Any]) -> dict[str, bool]:
+    """비밀 값이 저장되어 있는가. 화면이 상태를 그릴 유일한 근거."""
+    return {key: bool(str(values.get(key) or "").strip()) for key in sorted(SECRET_KEYS)}
+
+
+def redact_for_api(values: dict[str, Any]) -> dict[str, Any]:
+    """API 응답에서 비밀 값을 지운다.
+
+    저장은 하되 돌려주지는 않는다. 앞 몇 글자를 남기는 절충도 하지 않는다 —
+    부분 노출은 보안상 이득이 없고, 화면이 그 조각을 편집 초안으로 되쓰면
+    사용자가 저장을 누르는 순간 잘린 값이 진짜 값을 덮어쓴다.
+    """
+    redacted = dict(values)
+    for key in SECRET_KEYS:
+        if key in redacted:
+            redacted[key] = ""
+    return redacted
 
 
 def inline_char_budget(source: Any) -> int | None:
@@ -179,10 +271,16 @@ def _coerce(key: str, value: Any) -> Any:
         "fail_on_tool_use",
         "retrieval_semantic_enabled",
         "kiwee_integration_enabled",
+        "epo_integration_enabled",
     ):
         return bool(value)
+    if key in _CREDENTIAL_KEYS:
+        return _coerce_credential(key, value)
     if key == "retrieval_mode":
         text = str(value).strip().lower()
+        # 폐기한 값은 뜻이 가장 가까운 쪽으로 옮긴다. 거절하면 그 값이 저장된
+        # 기존 설정에서 화면이 열리지 않는다.
+        text = _RETIRED_RETRIEVAL_MODES.get(text, text)
         if text not in _RETRIEVAL_MODES:
             raise ValueError(
                 "retrieval_mode 는 "
@@ -276,7 +374,7 @@ def warnings_for(values: dict[str, Any]) -> list[str]:
     # 연동을 켜도 지금은 실제 검색이 안 된다는 사실을 화면에 정직하게 남긴다.
     # "URL 이 보인다"와 "공식 API 다"는 다른 문제이므로, 접속 구현은 공급자
     # 승인 뒤로 미뤄져 있다.
-    kiwee = patent_search.describe(values)
-    if kiwee.enabled and not kiwee.configured:
-        notes.append(f"{kiwee.display_name} 연동: {kiwee.detail}")
+    for status in patent_search.describe_all(values):
+        if status.enabled and not status.configured:
+            notes.append(f"{status.display_name} 연동: {status.detail}")
     return notes

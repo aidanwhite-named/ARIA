@@ -23,10 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..citation_mapping import assign_aliases, ordered_attachments
-from ..enums import ErrorCode, is_local_search_target
+from ..enums import DeliveryPlan, ErrorCode, is_local_search_target
 from ..ingestion.service import IngestedFile, read_normalized
 from . import evidence as evidence_module
 from .agent import (
+    DEFAULT_NEIGHBOR_PAGES,
     DEFAULT_EVIDENCE_CHARS,
     DEFAULT_HITS_PER_DOCUMENT,
     DEFAULT_MAX_PAGE_READS,
@@ -74,6 +75,9 @@ def budget_from_settings(values: dict) -> RetrievalBudget:
         hits_per_document=_int(
             "retrieval_hits_per_document", DEFAULT_HITS_PER_DOCUMENT, 1, 20
         ),
+        neighbor_pages=_int(
+            "retrieval_neighbor_pages", DEFAULT_NEIGHBOR_PAGES, 0, 5
+        )
     )
 
 
@@ -222,6 +226,8 @@ async def run_retrieval(
     claim_text: str,
     budget: RetrievalBudget,
     semantic_enabled: bool = False,
+    # 임베딩 캐시 상한(bytes). 0 = 정리하지 않음. 실행이 끝날 때 한 번만 본다.
+    embedding_cache_max_bytes: int = 0,
     emit=None,
     is_cancelled=None,
     layout_check_max_pages: int = 400,
@@ -317,7 +323,14 @@ async def run_retrieval(
         is_cancelled=is_cancelled,
         semantic_encoder=encoder,
     )
-    run = await agent.run()
+    try:
+        run = await agent.run()
+    finally:
+        # 임베딩 캐시 연결을 놓아준다. 실행이 끝나면 더 검색하지 않는다.
+        # 정리도 여기서 한 번만 한다 — 검색 경로에 넣으면 캐시가 아끼려던
+        # 시간을 정리가 다시 쓴다. 정리 실패는 검색 결과를 바꾸지 않는다.
+        if encoder is not None:
+            encoder.close(embedding_cache_max_bytes)
 
     result.cancelled = run.cancelled
     result.timed_out = run.timed_out
@@ -346,9 +359,10 @@ async def run_retrieval(
         bundle["evidence_chars"] = len(rendered)
         bundle["evidence_bytes"] = len(rendered.encode("utf-8"))
 
+
     manifest = {
         "version": MANIFEST_VERSION,
-        "delivery_mode": "local_retrieval",
+        "delivery_mode": DeliveryPlan.LOCAL_RETRIEVAL,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "claim_sha256": _sha256(claim_text),
         "agent_prompt_sha256": _sha256(AGENT_SYSTEM_PROMPT),
@@ -364,6 +378,9 @@ async def run_retrieval(
         "repeat_page_reads": run.repeat_page_reads,
         # 예산에 맞추려고 무엇을 줄였는가. 비어 있어야 정상이다.
         "package_reductions": list((bundle or {}).get("package_reductions") or []),
+        # 예산 때문에 뺀 페이지. package_reductions 와 다른 채널이다 — 페이지를
+        # 뺀 것은 근거를 뺀 것이 아니므로 구성 판정을 흔들지 않는다.
+        "page_reductions": list((bundle or {}).get("page_reductions") or []),
         "evidence_chars": (bundle or {}).get("evidence_chars", 0),
         "components": [
             {

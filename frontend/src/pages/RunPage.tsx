@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import GapSearchPanel from "../components/GapSearchPanel";
 import ResultView from "../components/ResultView";
+import DeliverySummary from "../components/DeliverySummary";
 import RetrievalManifestView from "../components/RetrievalManifestView";
 import SearchManifestView from "../components/SearchManifestView";
 import StatusPill, { ERROR_LABEL } from "../components/StatusPill";
@@ -14,6 +15,7 @@ import {
   selectedAttachmentIds,
 } from "../lib/attachmentSelection";
 import { useRunSession } from "../lib/runSession";
+import { DELIVERY_LABEL, isNarrowed } from "../lib/types";
 import type {
   AttachmentAnalysis,
   AttachmentRole,
@@ -121,6 +123,7 @@ function SizeNotice({
     );
   }
   const lanes = preflight.lanes.length > 1 ? preflight.lanes : [];
+  const narrowed = isNarrowed(preflight.delivery_plan);
   const retrieval = preflight.delivery_plan === "local_retrieval";
   return (
     <div
@@ -128,19 +131,29 @@ function SizeNotice({
       style={{ marginTop: 12 }}
     >
       <div>
-        <span className={`pill ${retrieval ? "accent" : "neutral"}`}>
-          {retrieval ? "로컬 검색 전달" : "전체 인라인 전달"}
+        <span className={`pill ${narrowed ? "accent" : "neutral"}`}>
+          {DELIVERY_LABEL[preflight.delivery_plan]}
         </span>{" "}
-        최종 프롬프트 {retrieval ? "최대 " : ""}
+        최종 프롬프트 {narrowed ? "최대 " : ""}
         {preflight.chars.toLocaleString()}자 ·{" "}
         {preflight.bytes.toLocaleString()} bytes
       </div>
-      {retrieval && (
+      {/* 왜 이 폭인지는 판정부가 만든 문장을 그대로 쓴다. 화면이 문장을 새로
+          지으면 실행 기록과 다른 설명이 생긴다. */}
+      {narrowed && preflight.selection_reason && (
+        <div className="faint">{preflight.selection_reason}</div>
+      )}
+      {narrowed && (
         <div className="faint">
           인용발명 전체를 넣으면 {preflight.full_inline_bytes.toLocaleString()}{" "}
-          bytes · 근거 패키지 예산{" "}
-          {(preflight.evidence_budget_chars ?? 0).toLocaleString()}자 — 위
-          숫자는 예산을 모두 썼을 때의 최댓값이고 실제 실행은 이보다 작습니다.
+          bytes
+          {retrieval && (
+            <>
+              {" · 근거 패키지 예산 "}
+              {(preflight.evidence_budget_chars ?? 0).toLocaleString()}자
+            </>
+          )}
+          {" — 위 숫자는 예산을 모두 썼을 때의 최댓값이고 실제 실행은 이보다 작습니다."}
         </div>
       )}
       <div className="faint">
@@ -168,7 +181,7 @@ function SizeNotice({
         </div>
       )}
       {preflight.message && <div style={{ marginTop: 6 }}>{preflight.message}</div>}
-      {!preflight.blocked && !retrieval && (
+      {!preflight.blocked && !narrowed && (
         <div className="faint">
           ARIA 는 내용을 임의로 자르거나 요약하지 않습니다. 한도를 넘으면 Provider
           를 호출하기 전에 막으므로 토큰이 소모되지 않고, 그때는 문헌을 나눠 여러
@@ -1553,9 +1566,7 @@ export default function RunPage() {
 
           {job.job_kind === "patent_analysis" &&
             !running &&
-            job.delivery_plan === "local_retrieval" && (
-              <RetrievalManifestView job={job} />
-            )}
+            isNarrowed(job.delivery_plan) && <RetrievalManifestView job={job} />}
 
           <details className="no-print" style={{ marginTop: 16 }}>
             <summary className="faint" style={{ cursor: "pointer" }}>
@@ -1586,23 +1597,12 @@ export default function RunPage() {
                     <tr>
                       <th>인용발명 전달 방식</th>
                       <td>
-                        {job.delivery_plan === "local_retrieval" ? (
-                          <>
-                            로컬 검색 (근거 패키지)
-                            {job.retrieval_manifest && (
-                              <div className="faint">
-                                색인 {job.retrieval_manifest.documents.length}건 ·
-                                라운드 {job.retrieval_manifest.rounds.length}회 ·
-                                읽은 페이지 {job.retrieval_manifest.pages_read}쪽 ·
-                                근거{" "}
-                                {job.retrieval_manifest.evidence_chars.toLocaleString()}
-                                자
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          "전체 인라인"
-                        )}
+                        <DeliverySummary
+                          plan={job.delivery_plan}
+                          provider={job.provider}
+                          manifest={job.delivery_manifest}
+                          retrieval={job.retrieval_manifest}
+                        />
                       </td>
                     </tr>
                   )}

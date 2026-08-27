@@ -16,14 +16,75 @@ export type JobKind = "patent_analysis" | "similarity_search";
 
 /** 인용발명 문헌을 최종 분석 모델에게 어떻게 전달했는가.
  *
- *  full_inline      정규화 텍스트 전체를 프롬프트에 넣었다 (v0.1 의 유일한 경로).
- *  local_retrieval  ARIA 가 로컬 색인하고, AI 가 구조화된 검색으로 찾은 구간만
- *                   근거 패키지로 넣었다.
+ *  full_inline      정규화 텍스트 전체를 프롬프트에 넣었다.
+ *  local_retrieval  ARIA 가 로컬 색인하고, AI 가 구조화된 검색으로 찾은 구간을
+ *                   근거 패키지로 넣었다. 근거 패키지에는 찾은 구간뿐 아니라
+ *                   **그 구간이 있는 페이지 전문과 앞뒤 페이지**가 예산이
+ *                   허락하는 만큼 함께 들어간다.
  *
- *  첨부 하나의 상태(delivery_mode)와 축이 다르다. 로컬 검색으로 전달한 실행에서도
- *  각 첨부의 delivery_mode 는 "본문을 읽었는가"를 그대로 뜻한다.
+ *  폐기: focused_pages. 한때 「페이지 단위」를 독립 전달 모드로 두었는데, 같은
+ *  검색을 돌리고 담는 단위만 다른 것이라 전달 방식이 아니라 근거 패키지의 확장
+ *  방식이 맞았다. 옛 실행 기록의 그 값은 local_retrieval 로 읽는다 —
+ *  full_inline 으로 읽으면 「문헌 전체를 모델이 봤다」가 되어 거짓이 된다.
+ *
+ *  첨부 하나의 상태(delivery_mode)와 축이 다르다.
  */
 export type DeliveryPlan = "full_inline" | "local_retrieval";
+
+/** 저장된 값을 읽는다. 모르는 값은 좁은 쪽으로 해석한다. */
+export function toDeliveryPlan(value: string | null | undefined): DeliveryPlan {
+  if (!value) return "full_inline";
+  if (value === "full_inline") return "full_inline";
+  return "local_retrieval";
+}
+
+/** 화면에 그대로 쓰는 전달 방식 이름. 세 곳이 각자 문자열을 만들면 같은 실행이
+ *  화면마다 다르게 불린다. */
+export const DELIVERY_LABEL: Record<DeliveryPlan, string> = {
+  full_inline: "전체 인라인 전달",
+  local_retrieval: "로컬 검색 전달",
+};
+
+/** 원문 전체가 들어가지 않은 전달인가. */
+export function isNarrowed(plan: DeliveryPlan | string): boolean {
+  return toDeliveryPlan(plan as string) !== "full_inline";
+}
+
+/** 모델 컨텍스트 기반 입력 예산.
+ *
+ *  Provider 전송 하드 한도(agy 의 180,000 bytes)와 **다른 축**이다. 앞쪽은 CLI 가
+ *  자르는 지점이고 이쪽은 모델이 거절하는 지점이라, 사용자가 할 일이 다르다.
+ *
+ *  source 가 "fallback" 이면 모델 한도를 확인하지 못하고 보수적 대체값을 쓴
+ *  것이다. 화면은 그 사실을 반드시 보여 준다.
+ */
+export type ModelTokenBudget = {
+  model: string;
+  context_tokens: number;
+  reserve_tokens: number;
+  input_tokens: number;
+  source: "configured" | "fallback";
+};
+
+/** 전달 판정 한 벌. 화면·History·감사 기록이 같은 값을 쓴다. */
+export type DeliveryManifest = {
+  provider: string;
+  selected_delivery_mode: DeliveryPlan;
+  selection_reason: string;
+  full_inline_chars: number;
+  full_inline_bytes: number;
+  full_inline_tokens: number;
+  actual_payload_chars: number;
+  actual_payload_bytes: number;
+  /** Provider 전송 하드 한도. 선언하지 않은 Provider 는 null. */
+  provider_byte_limit: number | null;
+  /** 모델 컨텍스트 입력 예산. 하드 한도가 있는 Provider 는 null. */
+  model_token_budget: ModelTokenBudget | null;
+  /** 이 크기가 실측인가 예산 상한인가. 준비 화면은 상한을 보여 준다. */
+  payload_is_budget_ceiling: boolean;
+  /** 사건 규모 기준 때문에 좁혔는가. 전송 한도와 다른 축이다. */
+  scale_downgraded: boolean;
+};
 
 /** 근거 패키지에서 구성 하나에 ARIA 가 확정한 상태.
  *
@@ -156,6 +217,9 @@ export interface RetrievalManifest {
    *  원문은 절대 자르지 않는다. 여기 적히는 것은 서지 발췌 제거, 구성
    *  메타데이터 축약, 근거 구간 제거뿐이며 전부 검토 범위 제한으로도 올라간다. */
   package_reductions: string[];
+  /** 예산 때문에 뺀 페이지. package_reductions 와 **다른 채널**이다 — 페이지를
+   *  뺀 것은 근거를 뺀 것이 아니므로 구성 판정을 흔들지 않는다. */
+  page_reductions?: string[];
   error: string;
   error_code: string;
   status: "complete" | "partial" | "failed";
@@ -591,6 +655,7 @@ export interface Job {
   search_focus: GapSearchFocus | null;
   /** 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline. */
   delivery_plan: DeliveryPlan;
+  delivery_manifest?: DeliveryManifest | null;
   /** 로컬 검색 실행의 감사 기록. 전체 인라인 실행에서는 null. */
   retrieval_manifest: RetrievalManifest | null;
   /** 로컬 검색이 근거 패키지를 만들지 못한 사유. */
@@ -638,6 +703,7 @@ export interface HistoryItem {
   descendant_count: number;
   /** 인용발명 문헌을 어떻게 전달했는가. */
   delivery_plan: DeliveryPlan;
+  delivery_manifest?: DeliveryManifest | null;
 }
 
 export interface AppSettings {
@@ -658,17 +724,41 @@ export interface AppSettings {
     keep_raw_output: boolean;
     fail_on_tool_use: boolean;
     max_search_tool_calls: number;
-    /** 인용발명 전달 방식 정책. auto = 크기를 보고 고른다. */
+    /** 인용발명 전달 방식 정책. auto = 넣을 수 있는 만큼 넓게. */
     retrieval_mode: "auto" | "full" | "retrieval";
-    /** 0 = 사용 안 함. Provider 전송 한도와 별개로 로컬 검색으로 넘어가는 크기. */
-    retrieval_auto_threshold_bytes: number;
     retrieval_max_rounds: number;
     retrieval_max_page_reads: number;
     retrieval_evidence_chars: number;
     retrieval_hits_per_document: number;
+    /** 근거 구간이 있는 페이지의 앞뒤로 더 담을 페이지 수. */
+    retrieval_neighbor_pages: number;
+    /**
+     * 모델 컨텍스트 한도 재정의. `provider:model` 또는 `model` 이 키다.
+     * 비어 있으면 아래 대체값을 쓴다 — ARIA 는 모델 한도를 추측하지 않는다.
+     */
+    model_context_tokens: Record<string, number>;
+    model_output_reserve_tokens: number;
+    unknown_model_context_tokens: number;
+    /**
+     * 사건 규모 품질 기준. **전송 한도가 아니다.** 전송 하드 한도를 선언하지
+     * 않은 Provider 에서만 판정에 쓰이고, 0 이면 쓰지 않는다.
+     */
+    delivery_scale_documents: number;
+    delivery_scale_pages: number;
+    delivery_scale_claim_elements: number;
+    /** 임베딩 캐시 상한(MB). 0 = 정리하지 않음. */
+    embedding_cache_max_mb: number;
     /** 기본 꺼짐. 켜도 라이브러리·모델이 없으면 키워드 검색만으로 진행한다. */
     retrieval_semantic_enabled: boolean;
     kiwee_integration_enabled: boolean;
+    /** EPO OPS 연동 토글. 켜고 자격증명을 넣어도 아직 검색 경로에는 연결되지 않는다. */
+    epo_integration_enabled: boolean;
+    epo_consumer_key: string;
+    /**
+     * 응답에서는 **항상 빈 문자열**이다. 저장은 되지만 되돌려주지 않는다.
+     * 저장 여부는 secrets_set 을 봐야 한다.
+     */
+    epo_consumer_secret: string;
   };
   warnings: string[];
   data_dir: string;
@@ -679,6 +769,16 @@ export interface AppSettings {
     removed_count: number;
     removed_sample: string[];
   };
+  /** 비밀 값이 저장되어 있는가. values 의 빈 문자열로는 구별할 수 없다. */
+  secrets_set: Record<string, boolean>;
+}
+
+/** 외부 데이터 소스 자격증명 확인 결과. 토큰 값은 오지 않는다. */
+export interface CredentialCheck {
+  ok: boolean;
+  detail: string;
+  http_status: number | null;
+  expires_in: number | null;
 }
 
 export interface StreamEvent {
@@ -720,8 +820,12 @@ export type Preflight = {
   blocked: boolean;
   /** 이 입력이 실제로 어떻게 전달되는가. runner 와 같은 판정 함수를 쓴다. */
   delivery_plan: DeliveryPlan;
-  /** 전체 인라인으로 넣었을 때의 크기. auto 가 왜 로컬 검색을 골랐는지 설명한다. */
+  /** 왜 그 방식을 골랐는가. 화면이 문장을 새로 만들지 않고 이 값을 그대로 쓴다. */
+  selection_reason: string;
+  /** 전체 인라인으로 넣었을 때의 크기. auto 가 왜 좁혔는지 설명한다. */
   full_inline_bytes: number;
+  full_inline_chars: number;
+  delivery_manifest: DeliveryManifest | null;
   /**
    * local_retrieval 일 때 위 chars/bytes 는 근거 패키지 예산으로 계산한
    * **최댓값**이다. 실제 실행은 이 값을 넘지 못한다. full_inline 이면 null.

@@ -1,3 +1,14 @@
+﻿# 이 파일은 UTF-8 **BOM 포함**으로 저장한다. 지우지 마십시오.
+#
+# pip 24 이하(파이썬 3.11 이 기본으로 들고 오는 버전)는 requirements 파일에
+# BOM 이 없으면 로케일 인코딩으로 읽는다. 한국어 Windows(cp949)에서는 아래
+# 주석의 한글이 디코딩되지 않아 설치 자체가 실패한다. 실측:
+#
+#   UnicodeDecodeError: 'cp949' codec can't decode byte 0xec in position 2
+#
+# 새 pip 는 UTF-8 로 읽으므로 이 프로젝트의 venv 에서는 문제가 드러나지 않는다.
+# 즉 **깨끗한 새 환경에서만** 실패한다 — 배포 경로에서 가장 나쁜 형태다.
+
 # 선택 기능: 로컬 의미 검색 (opt-in)
 #
 # 기본 requirements.txt 에 넣지 않는다. 이유는

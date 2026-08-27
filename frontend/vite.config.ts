@@ -27,4 +27,13 @@ export default defineConfig({
     outDir: "dist",
     sourcemap: false,
   },
+  // 렌더링 테스트는 DOM 이 필요하다. 순수 로직 테스트만 있을 때는 node 환경으로
+  // 충분했지만, 「설정 화면에 이 옵션이 실제로 그려지는가」는 컴포넌트를 실제로
+  // 그려 봐야만 답할 수 있다 — 표시 문자열을 만드는 함수만 검증하면 JSX 구조가
+  // 깨져도 테스트는 통과한다.
+  test: {
+    environment: "jsdom",
+    globals: false,
+    restoreMocks: true,
+  },
 });

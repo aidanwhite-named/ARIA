@@ -16,6 +16,7 @@
 import { useState } from "react";
 
 import { api } from "../lib/api";
+import { isNarrowed } from "../lib/types";
 import type { Job, RetrievalDocument } from "../lib/types";
 
 const EXTRACTION_LABEL: Record<string, string> = {
@@ -95,7 +96,7 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
   const [open, setOpen] = useState(false);
   const manifest = job.retrieval_manifest;
 
-  if (job.delivery_plan !== "local_retrieval" && !manifest) return null;
+  if (!isNarrowed(job.delivery_plan) && !manifest) return null;
 
   const reviewNeeded =
     manifest?.documents.filter(
@@ -109,7 +110,10 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
       <h2>로컬 검색 기록</h2>
       <p className="faint">
         이 실행은 인용발명 문헌의 <strong>전체 본문을 프롬프트에 넣지
-        않았습니다.</strong> ARIA 가 페이지·문단 단위로 로컬 색인한 뒤, AI 가
+        않았습니다.</strong> 근거 패키지에는 찾은 구간과 함께 그 구간이 실린
+        페이지 전문·앞뒤 페이지가 예산이 허락하는 만큼 들어갑니다. 거기에 없는
+        페이지는 이번 검토 범위 밖입니다.{" "}
+        ARIA 가 페이지·문단 단위로 로컬 색인한 뒤, AI 가
         청구항 구성별로 검색·열람한 구간만 근거 패키지로 전달했습니다. 아래에
         없는 페이지는 이번 검토 범위 밖이며, 검토하지 않은 것과 문헌에 없는
         것은 다릅니다.
@@ -188,6 +192,20 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
               검색 라운드 또는 페이지 읽기 예산을 모두 사용해 검토를
               중단했습니다. 확인하지 못한 범위가 근거 패키지에 그대로
               기록되어 있습니다.
+            </div>
+          )}
+
+          {(manifest.page_reductions ?? []).length > 0 && (
+            <div className="notice" style={{ marginTop: 12 }}>
+              <strong>예산 때문에 뺀 페이지</strong>
+              <div className="faint" style={{ marginTop: 4 }}>
+                {(manifest.page_reductions ?? []).join(", ")}
+              </div>
+              <div className="faint" style={{ marginTop: 4 }}>
+                근거 구간과 그 발췌는 그대로입니다. 빠진 것은 앞뒤 문맥이며, 해당
+                페이지는 「미확인 페이지」로 기록됩니다. 환경설정의 「근거 패키지
+                최대 문자 수」를 올리면 더 담습니다.
+              </div>
             </div>
           )}
 

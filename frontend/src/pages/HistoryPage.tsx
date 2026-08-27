@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 import StatusPill from "../components/StatusPill";
 import { api } from "../lib/api";
+import { DELIVERY_LABEL, isNarrowed } from "../lib/types";
 import type { HistoryItem, JobKind, RelationType } from "../lib/types";
 
 /** 두 축은 결과물이 다르다. 목록에서도 한 눈에 갈라 보이게 한다. */
@@ -239,9 +240,12 @@ export default function HistoryPage() {
                     </td>
                     <td>
                       {item.attachment_count}
-                      {item.delivery_plan === "local_retrieval" && (
-                        <div className="faint" title="인용발명 문헌 전체가 아니라 검색으로 확인한 구간만 전달했습니다.">
-                          로컬 검색 전달
+                      {isNarrowed(item.delivery_plan) && (
+                        <div
+                          className="faint"
+                          title="인용발명 문헌 전체가 아니라 검색으로 확인한 구간과 그 페이지 전문만 전달했습니다."
+                        >
+                          {DELIVERY_LABEL[item.delivery_plan]}
                         </div>
                       )}
                     </td>

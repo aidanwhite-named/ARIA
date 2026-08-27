@@ -30,6 +30,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 
 class PatentSearchError(Exception):
@@ -164,6 +165,18 @@ class PatentSearchBackend(abc.ABC):
 
     id: str = ""
     display_name: str = ""
+
+    def configure(self, values: Mapping[str, Any]) -> None:
+        """설정값을 주입한다. 기본은 아무것도 하지 않는다.
+
+        자격증명이 설정에 저장되는 백엔드(EPO OPS)만 재정의한다. 팩토리를
+        무인자로 유지하기 위한 훅이다 — 팩토리 시그니처를 바꾸면 이미 등록된
+        백엔드와 register_backend 호출부가 전부 깨진다.
+
+        여기로 들어오는 값은 settings_service.get_all 의 원본이다. API 응답용
+        가림(redact) 을 거친 값을 넘기면 자격증명이 빈 문자열이 되어 조용히
+        '미설정'으로 보인다.
+        """
 
     @abc.abstractmethod
     def status(self) -> BackendStatus:

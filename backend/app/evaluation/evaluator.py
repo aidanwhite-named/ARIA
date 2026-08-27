@@ -27,8 +27,53 @@ from ..ingestion.service import IngestedFile
 from ..providers.base import NO_TOOLS, ExecutionOutcome, ToolPolicy
 
 # Provider 가 입력을 잘랐을 때 삽입하는 마커. agy 는 `<truncated 548974 bytes>`
-# 형태로 남긴다. 이 정확한 형태만 잡아 오탐(문서에 우연히 든 유사 문구)을 줄인다.
-_PROVIDER_TRUNCATION = re.compile(r"<truncated\s+\d+\s+bytes>")
+# 형태로 남긴다.
+#
+# 같은 마커가 **세 가지 모양**으로 나타난다. 셋 다 같은 사건이고, 하나라도
+# 놓치면 앞부분만 본 분석이 성공으로 남는다.
+#
+#   1. 평문            <truncated 548974 bytes>
+#   2. JSON 이스케이프  <truncated 548974 bytes>
+#      (stream-json 한 줄을 그대로 로그에 남기면 꺾쇠가 이 형태로 온다.
+#       JSON 은 < 대문자 표기도 허용하므로 둘 다 받는다.)
+#   3. 파싱 후 복원형   1번과 같아진다 — result_text 에서 잡힌다.
+#
+# 오탐 방지는 모양이 한다. 꺾쇠(또는 그 이스케이프)로 감싸고 그 안이
+# `truncated <숫자> bytes` 인 것만 잡으므로, "truncated signed distance
+# function" 같은 정상 기술 문구는 걸리지 않는다. 숫자가 없기 때문이다.
+_PROVIDER_TRUNCATION = re.compile(
+    r"(?:<|\\u003[cC])truncated\s+(\d+)\s+bytes(?:>|\\u003[eE])"
+)
+
+
+def truncation_bytes(*texts: str) -> int | None:
+    """절삭 마커가 있으면 잘린 바이트 수. 없으면 None.
+
+    **출처마다 따로 세고 그중 최댓값을 쓴다.** 합치지 않는다.
+
+    호출부는 원시 출력과 파싱된 답변을 함께 넘긴다. 그런데 파싱된 답변은 원시
+    출력에서 나온 것이라, 같은 절삭이 두 곳에 같은 모양으로 남는 것이 정상이다.
+    합치면 500 bytes 잘린 실행이 1,000 bytes 로 보고된다 — 실패 판정은 그대로
+    맞지만 사용자에게 보여 주는 숫자가 틀린다.
+
+    한 출처 안에서 마커가 여러 번 나오는 것은 다른 이야기다. 그것은 실제로
+    여러 덩어리가 잘린 것이므로 그때는 더한다.
+    """
+    best: int | None = None
+    for text in texts:
+        if not text:
+            continue
+        total = 0
+        found = False
+        for match in _PROVIDER_TRUNCATION.finditer(text):
+            found = True
+            try:
+                total += int(match.group(1))
+            except (TypeError, ValueError):
+                pass
+        if found:
+            best = total if best is None else max(best, total)
+    return best
 
 
 @dataclass
@@ -36,6 +81,24 @@ class Verdict:
     status: str
     error_code: str | None = None
     errors: list[str] = field(default_factory=list)
+
+
+def _input_tokens(usage: dict | None) -> int | None:
+    """이 실행이 모델에 넘긴 입력 토큰 수. 모르면 None.
+
+    Provider 마다 키 이름이 다르다. 0 과 "보고하지 않음"을 구분해야 하므로
+    `or` 로 기본값을 주지 않는다 — 0 을 못 본 것으로 처리하면 입력이 닿지
+    않은 실행이 성공으로 남는다.
+    """
+    if not isinstance(usage, dict):
+        return None
+    for key in ("input_tokens", "prompt_tokens", "inputTokens", "promptTokens"):
+        value = usage.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+    return None
 
 
 def effective_policy(outcome: ExecutionOutcome) -> ToolPolicy | None:
@@ -220,9 +283,16 @@ def evaluate(
 
     # --- exit code 0 이지만 결과가 비어 있는 경우 ---------------------------
     if not outcome.result_text.strip():
-        errors.append(
-            "실행은 정상 종료했지만 결과 텍스트가 비어 있습니다."
-        )
+        errors.append("실행은 정상 종료했지만 결과 텍스트가 비어 있습니다.")
+        # 입력 토큰이 0 이면 프롬프트가 모델에 **닿지 않은** 것이다. 빈 답변과
+        # 원인이 다르므로 함께 적는다 — 사용자가 "모델이 답을 못 했다"와 "입력이
+        # 전달되지 않았다" 중 어느 쪽을 고쳐야 할지가 달라진다.
+        if _input_tokens(outcome.usage) == 0:
+            errors.append(
+                "입력 토큰이 0 입니다. 프롬프트가 모델에 전달되지 않았습니다. "
+                "종료 코드와 상태는 성공이지만 이 실행에서 자료는 한 글자도 "
+                "읽히지 않았으므로 성공으로 기록하지 않습니다."
+            )
         return Verdict(JobStatus.FAILED, ErrorCode.EMPTY_RESULT, errors)
 
     # --- Provider 가 입력을 조용히 자른 흔적 --------------------------------
@@ -230,10 +300,15 @@ def evaluate(
     # 0 에 답변까지 내놓지만, 그 답변은 앞부분만 보고 쓴 것이다. 사전 바이트
     # 검사(runner)가 1차 방어지만, 그것을 빠져나간 경우의 안전망으로 출력에 남은
     # 마커를 잡아 성공으로 넘기지 않는다.
-    if outcome.raw_stdout and _PROVIDER_TRUNCATION.search(outcome.raw_stdout):
+    # 원시 출력과 파싱된 답변을 모두 본다. 마커는 stream-json 원문에서는
+    # 이스케이프된 모양으로, 파싱 뒤에는 평문으로 나타난다.
+    missing = truncation_bytes(outcome.raw_stdout, outcome.result_text)
+    if missing is not None:
+        amount = f" 누락 {missing:,} bytes." if missing else ""
         errors.append(
-            "Provider 가 입력을 잘랐습니다(<truncated ... bytes>). 앞부분만 모델에 "
-            "전달되어 나머지 자료가 분석에서 빠졌습니다. 입력을 나눠 다시 "
+            "Provider 가 입력을 잘랐습니다(<truncated ... bytes>)."
+            f"{amount} 앞부분만 모델에 전달되어 나머지 자료가 분석에서 "
+            "빠졌습니다. 이 실행의 보고서는 폐기하십시오. 입력을 나눠 다시 "
             "실행하거나 입력 한도가 더 큰 Provider 를 사용하십시오."
         )
         return Verdict(JobStatus.FAILED, ErrorCode.INPUT_TOO_LARGE, errors)

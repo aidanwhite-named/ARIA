@@ -1,5 +1,6 @@
 import type {
   AppSettings,
+  CredentialCheck,
   HistoryItem,
   Job,
   JobKind,
@@ -213,4 +214,8 @@ export const api = {
     }),
   resetRuntimeContext: () =>
     request<AppSettings>("/api/settings/runtime-context/reset", { method: "POST" }),
+  // 저장된 자격증명으로 토큰 발급을 한 번 시도한다. 키를 본문으로 보내지
+  // 않는다 — 백엔드가 저장된 값을 읽는다.
+  checkEpoCredentials: () =>
+    request<CredentialCheck>("/api/settings/epo/check", { method: "POST" }),
 };

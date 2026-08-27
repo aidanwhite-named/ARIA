@@ -30,7 +30,7 @@ from .. import (
 )
 from ..config import PATHS
 from ..db import session_scope
-from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus
+from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus, RetrievalMode
 from ..evaluation.evaluator import Verdict, evaluate
 from ..ingestion.service import IngestedFile, preprocessing_versions
 from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
@@ -284,9 +284,16 @@ class JobRunner:
         budget = getattr(provider, "max_input_bytes", None)
         if budget is None:
             return False
-        payload_bytes = len(system_prompt.encode("utf-8")) + len(
-            user_message.encode("utf-8")
-        )
+        # 크기는 Provider 에게 묻는다. 여기서 두 문자열을 더하면 감싸기·이스케이프
+        # 이후의 크기를 알 수 없다 — agy 는 stream-json 한 줄로 직렬화한 뒤 그것을
+        # 자르므로, 개행이 많은 문서일수록 합산값이 실제보다 작다.
+        measure = getattr(provider, "payload_bytes", None)
+        if callable(measure):
+            payload_bytes = measure(system_prompt, user_message)
+        else:
+            payload_bytes = len(system_prompt.encode("utf-8")) + len(
+                user_message.encode("utf-8")
+            )
         if payload_bytes <= budget:
             return False
         label = getattr(provider, "display_name", "") or getattr(provider, "id", "")
@@ -358,10 +365,11 @@ class JobRunner:
         # 실행이 강제하는 상한이 어긋난다.
         retrieval_mode = str(values.get("retrieval_mode") or "auto")
         retrieval_budget = retrieval.budget_from_settings(values)
-        retrieval_auto_threshold = int(
-            values.get("retrieval_auto_threshold_bytes") or 0
-        )
         semantic_enabled = bool(values.get("retrieval_semantic_enabled", False))
+        embedding_cache_max_bytes = (
+            max(0, int(values.get("embedding_cache_max_mb") or 0)) * 1024 * 1024
+        )
+        delivery_policy = job_assembly.delivery_policy_from_settings(values)
 
         # Provider 를 만든 뒤 그 Provider 가 선언한 검색 정책으로 교체한다.
         tool_policy: ToolPolicy = NO_TOOLS
@@ -452,8 +460,12 @@ class JobRunner:
                     tool_policy_name=tool_policy.name,
                     retrieval_mode=retrieval_mode,
                     provider_byte_budget=getattr(provider, "max_input_bytes", None),
-                    retrieval_auto_threshold_bytes=retrieval_auto_threshold,
                     retrieval_budget=retrieval_budget,
+                    provider_id=provider_id,
+                    model=model or "",
+                    provider_measure=getattr(provider, "payload_bytes", None),
+                    claim_element_count=job_assembly.claim_element_count(claim_text),
+                    **delivery_policy,
                 )
                 assembled = assembly.representative
                 if job_kind is JobKind.SIMILARITY_SEARCH:
@@ -517,6 +529,12 @@ class JobRunner:
             # 함수**로 최종 프롬프트를 다시 만든다. preflight 가 잰 크기는 예산
             # 상한이고, 여기서 만드는 실제 패키지는 그 상한을 넘지 못한다.
             delivery_plan = assembly.delivery_plan
+            # 왜 이 폭을 골랐는가는 **여기서 정해진다.** 아래에서 근거 묶음을
+            # 넣어 다시 조립할 때는 이미 정해진 폭을 고정 모드로 넘기므로, 그때
+            # 나오는 사유는 "사용자가 고정했다"가 되어 버린다. 원래 판정을 들고
+            # 가서 최종 기록에 되돌린다 — 화면이 안내한 문장과 실행이 남긴
+            # 문장이 달라지면 같은 실행을 두 가지로 설명하게 된다.
+            delivery_decision = assembly.decision
             retrieval_manifest: dict | None = None
             retrieval_error: str | None = None
             retrieval_artifacts: list[tuple[str, Path]] = []
@@ -548,6 +566,7 @@ class JobRunner:
                     claim_text=claim_text,
                     budget=retrieval_budget,
                     semantic_enabled=semantic_enabled,
+                    embedding_cache_max_bytes=embedding_cache_max_bytes,
                     emit=retrieval_emit,
                     is_cancelled=lambda: job_id in self._cancel_requested,
                 )
@@ -587,7 +606,7 @@ class JobRunner:
                             prior_claim_text=prior_claim_text,
                             prior_report=prior_report,
                             prior_citation_mapping=prior_mapping,
-                            retrieval_mode="retrieval",
+                            retrieval_mode=RetrievalMode.RETRIEVAL,
                             retrieval_budget=retrieval_budget,
                             evidence_bundle=found.bundle,
                         )
@@ -616,6 +635,15 @@ class JobRunner:
                         ),
                     },
                 )
+
+            # 전달 기록은 **최종 조립본**으로 만든다. 로컬 검색이 돌았으면 위에서
+            # 다시 조립했으므로, 그 전에 만들면 자리표 크기가 실제로 나간 크기로
+            # 기록된다.
+            if delivery_decision is not None:
+                assembly.decision = delivery_decision
+                assembly.full_inline_bytes = delivery_decision.full_inline_bytes
+                assembly.full_inline_chars = delivery_decision.full_inline_chars
+            delivery_manifest = assembly.delivery_manifest(provider)
 
             prompt_path = work_dir / "final_prompt.txt"
             if job_kind is JobKind.SIMILARITY_SEARCH and len(search_assemblies) > 1:
@@ -1142,6 +1170,7 @@ class JobRunner:
                 job.search_manifest = manifest
                 job.search_manifest_error = manifest_error
                 job.delivery_plan = delivery_plan
+                job.delivery_manifest = delivery_manifest
                 job.retrieval_manifest = retrieval_manifest
                 job.retrieval_manifest_error = retrieval_error
                 job.exit_code = outcome.exit_code

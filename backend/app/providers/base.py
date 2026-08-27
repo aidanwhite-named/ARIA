@@ -300,6 +300,17 @@ class Provider(abc.ABC):
     def supports_tool_policy(self, policy: ToolPolicy) -> bool:
         return policy.name in self.supported_tool_policies
 
+    def payload_bytes(self, system_prompt: str, user_message: str) -> int:
+        """이 실행이 **실제로 전송선에 올릴** UTF-8 바이트 수.
+
+        max_input_bytes 와 비교되는 값이므로 두 값은 같은 축이어야 한다. 기본은
+        두 문자열의 단순 합이지만, 그것은 프롬프트를 그대로 보내는 Provider 에서만
+        맞다. 전송 전에 감싸거나 이스케이프하는 Provider 는 이 메서드를 재정의해
+        **감싼 뒤의 크기**를 돌려준다 — 감싸기 전 크기로 통과시키면 검사를 지나간
+        입력이 Provider 안에서 한도를 넘는다.
+        """
+        return len(system_prompt.encode("utf-8")) + len(user_message.encode("utf-8"))
+
     @abc.abstractmethod
     async def probe(self) -> ProbeResult:
         """설치/실행 가능/버전/인증 상태를 확인한다. 모델 호출은 하지 않는다."""

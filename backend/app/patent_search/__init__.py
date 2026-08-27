@@ -54,6 +54,14 @@ from .base import (
     PatentSearchQuery,
     PatentSearchResponse,
 )
+from .epo_backend import (
+    SETTING_CONSUMER_KEY as EPO_SETTING_CONSUMER_KEY,
+    SETTING_CONSUMER_SECRET as EPO_SETTING_CONSUMER_SECRET,
+    SETTING_ENABLED as EPO_SETTING_ENABLED,
+    CredentialCheck,
+    EpoOpsBackend,
+    check_credentials,
+)
 from .kiwee_backend import KiweePatentSearchBackend
 from .parsers import (
     PROFILE_GENERIC_JSON,
@@ -74,19 +82,38 @@ from .provenance import (
     verify_record_excerpt,
 )
 
-# 설정 키. 이름의 단일 출처.
-SETTING_KEY = "kiwee_integration_enabled"
+# 백엔드마다 켜고 끄는 설정 키. 하나로 묶으면 EPO 를 켜는 순간 Kiwee 도 켜진다.
+_ENABLE_KEYS: dict[str, str] = {
+    "kiwee": "kiwee_integration_enabled",
+    "epo": EPO_SETTING_ENABLED,
+}
 
-# 활성 백엔드. Kiwee 재구축·교체 시 여기와 _REGISTRY 만 바뀐다.
+# 설정 키. 이름의 단일 출처. 백엔드가 하나뿐이던 시절의 이름이라 Kiwee 를
+# 가리킨다. 새 코드는 _ENABLE_KEYS 를 쓴다.
+SETTING_KEY = _ENABLE_KEYS["kiwee"]
+
+# 기본 백엔드. 인자 없이 부르는 호출부가 가리키는 대상이다.
 DEFAULT_BACKEND_ID = "kiwee"
+
+# 화면이 상태를 보여 줄 백엔드 전체. 등록 순서가 표시 순서다.
+BACKEND_IDS = ("kiwee", "epo")
 
 _REGISTRY: dict[str, Callable[[], PatentSearchBackend]] = {
     "kiwee": KiweePatentSearchBackend,
+    "epo": EpoOpsBackend,
 }
 
 __all__ = [
     "SETTING_KEY",
     "DEFAULT_BACKEND_ID",
+    "BACKEND_IDS",
+    "EPO_SETTING_ENABLED",
+    "EPO_SETTING_CONSUMER_KEY",
+    "EPO_SETTING_CONSUMER_SECRET",
+    "CredentialCheck",
+    "EpoOpsBackend",
+    "check_credentials",
+    "describe_all",
     "BackendStatus",
     "PatentRecord",
     "PatentSearchBackend",
@@ -130,15 +157,27 @@ __all__ = [
 
 
 def register_backend(
-    backend_id: str, factory: Callable[[], PatentSearchBackend]
+    backend_id: str,
+    factory: Callable[[], PatentSearchBackend],
+    enable_key: str | None = None,
 ) -> None:
-    """새 백엔드를 등록한다. 나중에 Kiwee 를 새로 만들 때의 진입점."""
+    """새 백엔드를 등록한다. 나중에 Kiwee 를 새로 만들 때의 진입점.
+
+    enable_key 를 주지 않으면 기본 백엔드의 토글을 함께 쓴다(옛 호출부 호환).
+    독립적으로 켜고 꺼야 하는 백엔드는 반드시 자기 키를 넘겨야 한다.
+    """
     _REGISTRY[backend_id] = factory
+    _ENABLE_KEYS[backend_id] = enable_key or SETTING_KEY
 
 
-def is_enabled(values: Mapping[str, Any]) -> bool:
-    """설정 토글 상태. values 는 settings_service.get_all 결과."""
-    return bool(values.get(SETTING_KEY, False))
+def is_enabled(
+    values: Mapping[str, Any], backend_id: str = DEFAULT_BACKEND_ID
+) -> bool:
+    """그 백엔드의 설정 토글 상태. values 는 settings_service.get_all 결과."""
+    key = _ENABLE_KEYS.get(backend_id)
+    if key is None:
+        return False
+    return bool(values.get(key, False))
 
 
 def get_backend(
@@ -149,19 +188,21 @@ def get_backend(
     None 을 돌려주는 것은 '연동 안 함'이라는 정상 상태다. 호출부는 None 이면
     예전 경로(웹 검색만)를 그대로 쓴다.
     """
-    if not is_enabled(values):
+    if not is_enabled(values, backend_id):
         return None
     factory = _REGISTRY.get(backend_id)
     if factory is None:
         return None
-    return factory()
+    backend = factory()
+    backend.configure(values)
+    return backend
 
 
 def describe(
     values: Mapping[str, Any], backend_id: str = DEFAULT_BACKEND_ID
 ) -> BackendStatus:
     """백엔드 상태를 네트워크 없이 보고한다. Settings 경고 문구의 출처."""
-    enabled = is_enabled(values)
+    enabled = is_enabled(values, backend_id)
     factory = _REGISTRY.get(backend_id)
     if factory is None:
         return BackendStatus(
@@ -172,6 +213,7 @@ def describe(
             detail="등록되지 않은 백엔드입니다.",
         )
     backend = factory()
+    backend.configure(values)
     if not enabled:
         return BackendStatus(
             backend_id=backend.id,
@@ -181,3 +223,8 @@ def describe(
             detail="연동이 꺼져 있습니다.",
         )
     return backend.status()
+
+
+def describe_all(values: Mapping[str, Any]) -> tuple[BackendStatus, ...]:
+    """등록된 백엔드 전체의 상태. 화면과 경고 문구가 같은 것을 본다."""
+    return tuple(describe(values, backend_id) for backend_id in BACKEND_IDS)

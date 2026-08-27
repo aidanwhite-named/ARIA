@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from . import pages as pages_module
 from .agent import MIN_EXPANSION_TERMS, ComponentState, RetrievalBudget, RetrievalRun
 from .extraction import (
     DOC_UNUSABLE,
@@ -285,6 +286,10 @@ class EvidenceBuilder:
             "context_before": before,
             "context_after": after,
             "channels": list((observed or {}).get("channels") or []),
+            # 어느 채널이 몇 위로 올렸는가. 의미 검색이 실제로 이 구간을
+            # 올렸는지 나중에 되짚을 수 있어야 한다 — 채널 이름만으로는
+            # "함께 걸렸다"와 "이 채널이 끌어올렸다"를 구분하지 못한다.
+            "channel_ranks": dict((observed or {}).get("ranks") or {}),
             "found_by_search": observed is not None,
             # AI 가 쓴 판단. 원문과 같은 칸에 두지 않는다.
             "ai_relevance": str(ref.relevance or "").strip(),
@@ -495,10 +500,27 @@ class EvidenceBuilder:
                 }
             )
 
+        finding_pages: dict[str, set[int]] = {}
+        for component in components:
+            for finding in component.get("findings", []):
+                attachment_id = str(finding.get("attachment_id") or "")
+                page = finding.get("pdf_page")
+                if attachment_id and page:
+                    finding_pages.setdefault(attachment_id, set()).add(int(page))
+
         return {
             "version": BUNDLE_VERSION,
             "generated_at": _utcnow(),
             "delivery_mode": "local_retrieval",
+            # 예산 때문에 뺀 페이지. package_reductions 와 다른 채널이다 —
+            # 위 pages 모듈 주석 참조.
+            "page_reductions": [],
+            "evidence_pages": pages_module.build(
+                corpus=self.corpus,
+                finding_pages=finding_pages,
+                neighbours=self.budget.neighbor_pages,
+                char_budget=max(0, self.budget.max_evidence_chars - self._used_chars),
+            ),
             "ocr_performed": False,
             "claim_chars": len(self.claim_text or ""),
             "documents": [
@@ -709,6 +731,13 @@ def render(bundle: dict) -> str:
                 f"{item.get('chunk_id') or ''}: {item.get('reason')}"
             )
 
+    # 근거 구간이 실린 페이지의 전문. 발췌만으로는 앞뒤 문맥이 끊기므로,
+    # 예산이 허락하는 만큼 페이지를 통째로 덧붙인다. 예산이 모자라면 fit() 이
+    # 여기서부터 줄인다 — 덧붙임이므로 압박이 오면 가장 먼저 사라진다.
+    lines += pages_module.render(
+        bundle.get("evidence_pages") or [], bundle.get("page_reductions") or []
+    )
+
     lines += [
         "",
         "[판정 제한]",
@@ -850,9 +879,12 @@ def fit(bundle: dict, budget: RetrievalBudget) -> str:
 
     그래서 **완성된 문자열을 직접 재고**, 넘으면 아래 순서로 줄인다.
 
-      1. 서지 확인용 첫 페이지 발췌 — 문헌 번호를 붙이는 편의이지 근거가 아니다
-      2. 구성 메타데이터(검색어 목록, 이름, 내용) 축약 — AI 가 쓴 문구다
-      3. 구성마다 근거 구간을 하나만 남긴다
+      1. 페이지 확장 — 근거 구간 앞뒤 문맥 페이지부터, 그다음 근거 페이지 전문.
+         덧붙임이므로 가장 먼저 사라진다. 다 빠지면 예전의 청크 단위 패키지와
+         같아지고, 뺀 페이지는 미확인으로 기록된다.
+      2. 서지 확인용 첫 페이지 발췌 — 문헌 번호를 붙이는 편의이지 근거가 아니다
+      3. 구성 메타데이터(검색어 목록, 이름, 내용) 축약 — AI 가 쓴 문구다
+      4. 구성마다 근거 구간을 하나만 남긴다
 
     줄일 때마다 그 사실을 bundle 에 **반영한 뒤 다시 렌더링해서 잰다.** 반영이
     렌더링을 키우기 때문이다 — 반영 전 문자열을 재고 그 값을 믿으면, 최종
@@ -876,6 +908,27 @@ def fit(bundle: dict, budget: RetrievalBudget) -> str:
     text, ok = current()
     if ok:
         return text
+
+    # 1단계: 페이지 확장부터 줄인다. 덧붙임이므로 가장 먼저 사라져야 한다.
+    #        문맥 페이지(후보에서 먼 것) → 근거 페이지 순이다.
+    #
+    # 이 축약은 package_reductions 에 넣지 않는다. 그쪽에 넣으면
+    # _apply_reductions 가 모든 구성의 상태 사유에 같은 문장을 붙이고 not_found
+    # 를 coverage 로 내리는데, **페이지를 뺀 것은 근거를 뺀 것이 아니다.**
+    # 근거 구간과 발췌는 그대로이고 빠진 것은 앞뒤 문맥뿐이다. 빠진 페이지는
+    # 「미확인 페이지」에 자동으로 나타난다.
+    dropped = bundle.setdefault("page_reductions", [])
+    for only_context in (True, False):
+        while True:
+            removed = pages_module.drop_one(
+                bundle.get("evidence_pages") or [], only_context=only_context
+            )
+            if removed is None:
+                break
+            dropped.append(removed["label"])
+            text, ok = current()
+            if ok:
+                return text
 
     for step in (_drop_identity_excerpts, _trim_component_metadata):
         if step(bundle):

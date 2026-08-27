@@ -91,6 +91,11 @@ class ExecutionJob(Base):
     # enums.DeliveryPlan 을 보라. 값이 비어 있는 과거 실행은 full_inline 이다.
     delivery_plan = Column(String(30), nullable=False, default="full_inline")
 
+    # 전달 판정 한 벌: Provider, 고른 폭과 사유, 전체 인라인이었다면의 크기,
+    # 실제로 나간 크기, Provider 전송 한도. 화면과 감사 기록이 같은 값을 쓴다.
+    # 값이 없는 과거 실행은 전체 인라인이며 사유가 기록되기 전이다.
+    delivery_manifest = Column(JSON, nullable=True)
+
     # 로컬 검색(retrieval) 실행의 감사 기록. 인덱스 재현 정보, 라운드별 LLM
     # 입출력 해시, 실행된 검색어, 예산, 라이브러리 버전이 들어간다. 전체 인라인
     # 실행에서는 NULL 이다.

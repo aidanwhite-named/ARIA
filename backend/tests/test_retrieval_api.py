@@ -44,7 +44,15 @@ def settings_guard(client):
         "retrieval_max_page_reads",
         "retrieval_hits_per_document",
         "retrieval_semantic_enabled",
-        "retrieval_auto_threshold_bytes",
+        # 전달 폭 정책. 여기 빠뜨리면 한 테스트가 바꾼 예산이 다음 테스트로
+        # 새어, 관계없는 테스트가 다른 전달 방식으로 돌면서 실패한다.
+        "retrieval_neighbor_pages",
+        "model_context_tokens",
+        "model_output_reserve_tokens",
+        "unknown_model_context_tokens",
+        "delivery_scale_documents",
+        "delivery_scale_pages",
+        "delivery_scale_claim_elements",
     )
     yield
     client.put(
