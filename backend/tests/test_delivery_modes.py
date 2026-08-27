@@ -76,6 +76,22 @@ def test_agy_over_the_byte_limit_goes_straight_to_retrieval() -> None:
     assert "종료 코드 0" in decision.reason
 
 
+def test_agy_forced_full_one_byte_over_is_left_for_the_final_gate() -> None:
+    """같은 180,001 bytes라도 full 고정만 INPUT_TOO_LARGE 계약이다.
+
+    auto는 위 테스트처럼 검색으로 전환한다. full은 선택을 유지하되 실행 직전
+    provider 바이트 게이트가 호출 없이 막는다.
+    """
+
+    decision = _decide(
+        retrieval_mode=RetrievalMode.FULL,
+        full_inline_bytes=AGY_LIMIT + 1,
+        provider_byte_budget=AGY_LIMIT,
+    )
+    assert decision.plan == DeliveryPlan.FULL_INLINE
+    assert "INPUT_TOO_LARGE" in decision.reason
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -124,6 +140,18 @@ def test_over_the_token_budget_switches_to_retrieval() -> None:
     decision = _decide(full_inline_tokens=200_000, token_budget=_budget(200_000))
     assert decision.plan == DeliveryPlan.LOCAL_RETRIEVAL
     assert "168,000 토큰을 넘습니다" in decision.reason
+
+
+def test_zero_token_budget_never_falls_through_to_full_inline() -> None:
+    """예약 >= 컨텍스트인 잘못된 설정이 안전장치를 꺼서는 안 된다."""
+
+    decision = _decide(
+        full_inline_bytes=5_000_000,
+        full_inline_tokens=2_500_000,
+        token_budget=_budget(32_000, reserve=32_000),
+    )
+    assert decision.plan == DeliveryPlan.LOCAL_RETRIEVAL
+    assert "입력 예산이 0" in decision.reason
 
 
 def test_unknown_model_uses_the_conservative_fallback_and_says_so() -> None:
@@ -437,6 +465,35 @@ def test_retrieval_does_not_inline_the_citation_body(tmp_path) -> None:
     assert "로컬 색인" in body
 
 
+def test_final_retrieval_prompt_is_checked_against_the_model_budget(tmp_path) -> None:
+    """근거 패키지를 넣은 최종 조립본도 Provider 호출 전에 다시 잰다."""
+
+    with pytest.raises(job_assembly.ModelInputTooLarge, match="최종 조립 입력"):
+        _assemble(
+            tmp_path,
+            retrieval_mode=RetrievalMode.RETRIEVAL,
+            retrieval_budget=RetrievalBudget(max_evidence_chars=2_000),
+            provider_id="codex",
+            model="tiny-model",
+            model_context_overrides={"codex:tiny-model": 1_100},
+            model_output_reserve_tokens=1_000,
+            unknown_model_context_tokens=128_000,
+        )
+
+
+def test_zero_model_input_budget_fails_before_provider_call(tmp_path) -> None:
+    with pytest.raises(job_assembly.ModelInputTooLarge, match="입력 예산이 0"):
+        _assemble(
+            tmp_path,
+            retrieval_mode=RetrievalMode.RETRIEVAL,
+            provider_id="codex",
+            model="broken-budget",
+            model_context_overrides={"codex:broken-budget": 32_000},
+            model_output_reserve_tokens=32_000,
+            unknown_model_context_tokens=128_000,
+        )
+
+
 # --------------------------------------------------- 근거 패키지 페이지 확장
 
 
@@ -542,6 +599,25 @@ def test_page_build_respects_a_rough_char_budget() -> None:
     """조립 단계에서 미리 자른다. 300페이지를 만들었다가 하나씩 빼면 O(n²) 이다."""
     built = _pages([5], neighbours=4, char_budget=100)
     assert not built or sum(len(p["text"]) for p in built[0]["pages"]) <= 100
+
+
+def test_tight_budget_keeps_the_candidate_before_its_neighbours() -> None:
+    """유효한 ±5 설정에서도 주변 5쪽이 근거 쪽을 밀어내면 안 된다."""
+
+    body = {page: "x" * 20 for page in range(1, 11)}
+    built = pages_module.build(
+        corpus=[_FakeDocument(body)],
+        finding_pages={"doc": {10}},
+        neighbours=5,
+        char_budget=100,
+    )
+
+    assert built[0]["candidate_pages"] == [10]
+    assert built[0]["included_pages"] == [6, 7, 8, 9, 10]
+    assert any(
+        page["pdf_page"] == 10 and page["candidate"]
+        for page in built[0]["pages"]
+    )
 
 
 def test_page_expansion_is_off_when_there_is_no_room() -> None:

@@ -84,46 +84,96 @@ def build(
 
     per_page_cap = max(1, int(char_budget * MAX_PAGE_SHARE))
     used = 0
-    documents: list[dict] = []
-    for document in corpus:
+    prepared: list[dict] = []
+    for document_order, document in enumerate(corpus):
         found = {int(page) for page in finding_pages.get(document.attachment_id, set())}
         if not found:
             continue
         last_page = int(getattr(document.index, "page_count", 0) or 0)
-        wanted = widen(found, last_page, neighbours)
-        entry_pages: list[dict] = []
-        for page in wanted:
-            text = _page_text(document, page)
-            if not text:
-                continue
-            if len(text) > per_page_cap or used + len(text) > char_budget:
-                # 거친 상한. 남은 자리에 안 들어가면 여기서 멈춘다.
-                continue
-            status = document.index.page_status(page) or {}
-            entry_pages.append(
-                {
-                    "pdf_page": page,
-                    "printed_page": status.get("printed_page") or None,
-                    "candidate": page in found,
-                    "extraction_status": status.get("status", ""),
-                    "text": text,
-                }
-            )
-            used += len(text)
-        if not entry_pages:
+        found = {page for page in found if 1 <= page <= last_page}
+        if not found:
             continue
-        included = {page["pdf_page"] for page in entry_pages}
-        documents.append(
+        prepared.append(
             {
+                "order": document_order,
+                "source": document,
+                "found": found,
+                "last_page": last_page,
                 "attachment": document.alias,
                 "attachment_id": document.attachment_id,
                 "filename": document.filename,
                 "pdf_pages": last_page,
                 "candidate_pages": sorted(found),
-                "included_pages": sorted(included),
-                "pages": entry_pages,
+                "included_pages": [],
+                "pages": [],
             }
         )
+
+    def add_page(entry: dict, page: int, *, candidate: bool) -> bool:
+        nonlocal used
+        text = _page_text(entry["source"], page)
+        if not text:
+            return False
+        if len(text) > per_page_cap or used + len(text) > char_budget:
+            return False
+        status = entry["source"].index.page_status(page) or {}
+        entry["pages"].append(
+            {
+                "pdf_page": page,
+                "printed_page": status.get("printed_page") or None,
+                "candidate": candidate,
+                "extraction_status": status.get("status", ""),
+                "text": text,
+            }
+        )
+        entry["included_pages"].append(page)
+        used += len(text)
+        return True
+
+    # 근거 페이지를 모든 문헌에서 먼저 시도한다. 한 문헌에 후보가 여러 개면
+    # 첫 후보가 문헌마다 한 번씩 돌아간 뒤 두 번째 후보로 간다. 문헌 순서대로
+    # 전부 넣으면 첫 문헌의 후보가 예산을 독점할 수 있기 때문이다.
+    candidate_queue = sorted(
+        (
+            (candidate_rank, entry["order"], page, entry)
+            for entry in prepared
+            for candidate_rank, page in enumerate(sorted(entry["found"]))
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    for _rank, _order, page, entry in candidate_queue:
+        add_page(entry, page, candidate=True)
+
+    # 주변 페이지는 실제로 들어간 근거 페이지의 가까운 쪽부터 채운다. 근거 페이지
+    # 전문이 예산이나 페이지별 공정성 상한 때문에 빠졌다면 그 주변 문맥만 따로
+    # 싣지 않는다 — 발췌는 기존 evidence finding 에 그대로 남는다.
+    context_queue: list[tuple[int, int, int, dict]] = []
+    for entry in prepared:
+        included_candidates = {
+            int(page["pdf_page"]) for page in entry["pages"] if page["candidate"]
+        }
+        if not included_candidates:
+            continue
+        for page in widen(included_candidates, entry["last_page"], neighbours):
+            if page in included_candidates:
+                continue
+            distance = min(abs(page - candidate) for candidate in included_candidates)
+            context_queue.append((distance, entry["order"], page, entry))
+    context_queue.sort(key=lambda item: (item[0], item[1], item[2]))
+    for _distance, _order, page, entry in context_queue:
+        add_page(entry, page, candidate=False)
+
+    documents: list[dict] = []
+    for entry in prepared:
+        if not entry["pages"]:
+            continue
+        entry["pages"].sort(key=lambda page: int(page["pdf_page"]))
+        entry["included_pages"] = sorted(set(entry["included_pages"]))
+        entry.pop("source", None)
+        entry.pop("found", None)
+        entry.pop("last_page", None)
+        entry.pop("order", None)
+        documents.append(entry)
     return documents
 
 

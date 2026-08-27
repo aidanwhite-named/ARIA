@@ -978,6 +978,18 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
                 "명세서를 반영하지 못한 채로 검색하지 않습니다."
             ),
         )
+    except job_assembly.ModelInputTooLarge as exc:
+        return PreflightOut(
+            job_kind=job_kind.value,
+            provider=provider_id,
+            lanes=[],
+            chars=0,
+            bytes=0,
+            char_budget=max_chars,
+            byte_budget=byte_budget,
+            blocked=True,
+            message=str(exc),
+        )
     except InputTooLarge as exc:
         # 조립 단계에서 이미 문자 예산을 넘겼다. 크기를 재지 못했으므로
         # 숫자 대신 이유를 돌려준다.

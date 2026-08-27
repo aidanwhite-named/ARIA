@@ -149,12 +149,13 @@ def check_credentials(key: str, secret: str, timeout: float = 15.0) -> Credentia
         return CredentialCheck(False, _NO_CREDENTIALS_DETAIL)
 
     basic = base64.b64encode(f"{key}:{secret}".encode()).decode("ascii")
+    authorization = f"Basic {basic}"
     request = urllib.request.Request(
         TOKEN_URL,
         data=b"grant_type=client_credentials",
         method="POST",
         headers={
-            "Authorization": f"Basic {basic}",
+            "Authorization": authorization,
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
         },
@@ -173,7 +174,9 @@ def check_credentials(key: str, secret: str, timeout: float = 15.0) -> Credentia
             body = response.read(_MAX_BODY_BYTES)
     except urllib.error.HTTPError as exc:  # URLError 의 하위라 먼저 잡는다
         status = int(exc.code)
-        detail = _describe_error_body(exc.read(_MAX_BODY_BYTES) or b"", key, secret)
+        detail = _describe_error_body(
+            exc.read(_MAX_BODY_BYTES) or b"", key, secret, basic, authorization
+        )
         return CredentialCheck(False, _http_error_detail(status, detail), status)
     except urllib.error.URLError as exc:
         reason = exc.reason
@@ -186,11 +189,14 @@ def check_credentials(key: str, secret: str, timeout: float = 15.0) -> Credentia
             )
         return CredentialCheck(
             False,
-            f"EPO OPS 에 접속하지 못했습니다: {_redact(str(reason), key, secret)}",
+            "EPO OPS 에 접속하지 못했습니다: "
+            f"{_redact(str(reason), key, secret, basic, authorization)}",
         )
     except (TimeoutError, OSError) as exc:
         return CredentialCheck(
-            False, f"EPO OPS 접속이 실패했습니다: {_redact(str(exc), key, secret)}"
+            False,
+            "EPO OPS 접속이 실패했습니다: "
+            f"{_redact(str(exc), key, secret, basic, authorization)}",
         )
 
     try:

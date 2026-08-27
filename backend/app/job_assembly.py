@@ -68,6 +68,51 @@ class SpecUnreadable(Exception):
         super().__init__(filename)
 
 
+class ModelInputTooLarge(Exception):
+    """최종 조립본이 모델 입력 예산에 들어가지 않는다."""
+
+    def __init__(
+        self,
+        *,
+        actual_tokens: int,
+        budget: model_limits.TokenBudget,
+    ) -> None:
+        self.actual_tokens = actual_tokens
+        self.budget = budget
+        if budget.input_tokens <= 0:
+            message = (
+                f"모델 {budget.model or '(미지정)'} 의 컨텍스트 "
+                f"{budget.context_tokens:,} 토큰에서 출력·추론 예약 "
+                f"{budget.reserve_tokens:,} 토큰을 빼면 입력 예산이 0입니다. "
+                "Provider 를 호출하지 않았고 토큰도 소모되지 않았습니다. "
+                "예약 토큰을 컨텍스트 토큰보다 작게 설정하십시오."
+            )
+        else:
+            message = (
+                f"최종 조립 입력은 약 {actual_tokens:,} 토큰으로 모델 "
+                f"{budget.model or '(미지정)'} 의 입력 예산 "
+                f"{budget.input_tokens:,} 토큰을 넘습니다. Provider 를 호출하지 "
+                "않았고 토큰도 소모되지 않았습니다. 로컬 검색의 근거 패키지 "
+                "예산을 줄이거나 모델 컨텍스트 설정을 확인하십시오."
+            )
+        super().__init__(message)
+
+
+def model_input_gate(
+    assembled: AssembledPrompt, budget: model_limits.TokenBudget | None
+) -> int:
+    """실제로 보낼 최종 조립본을 모델 토큰 예산과 다시 비교한다."""
+
+    if budget is None:
+        return 0
+    actual = model_limits.estimate_tokens(
+        assembled.system_prompt, assembled.user_message
+    )
+    if budget.input_tokens <= 0 or actual > budget.input_tokens:
+        raise ModelInputTooLarge(actual_tokens=actual, budget=budget)
+    return actual
+
+
 @dataclass
 class AssemblyResult:
     """조립 결과. 레인이 하나든 둘이든 같은 모양으로 돌려준다."""
@@ -327,8 +372,18 @@ def decide_delivery(
         return decision
 
     # 하드 한도가 없는 Provider: 모델 컨텍스트 입력 예산으로 판정한다.
-    if token_budget is not None and token_budget.input_tokens:
-        if full_inline_tokens > token_budget.input_tokens:
+    if token_budget is not None:
+        if token_budget.input_tokens <= 0:
+            decision.plan = DeliveryPlan.LOCAL_RETRIEVAL
+            decision.reason = (
+                f"모델 {token_budget.model or '(미지정)'} 의 컨텍스트 "
+                f"{token_budget.context_tokens:,} 토큰에서 출력·추론 예약 "
+                f"{token_budget.reserve_tokens:,} 토큰을 빼면 입력 예산이 0입니다. "
+                "전체 전달로 안전장치를 우회하지 않고 로컬 검색 경로로 "
+                "전환했으며, 최종 조립 단계에서 유효한 입력 예산이 없으면 "
+                "Provider 호출 전에 중단합니다."
+            )
+        elif full_inline_tokens > token_budget.input_tokens:
             decision.plan = DeliveryPlan.LOCAL_RETRIEVAL
             decision.reason = (
                 f"전체 인라인은 약 {full_inline_tokens:,} 토큰으로 입력 예산 "
@@ -553,6 +608,9 @@ def assemble_job(
             # 한도 검사는 조립본을 다시 만들지 않고 같은 값에 건다. 다시 만들면
             # 큰 첨부를 두 번 읽게 되고, 두 조립본이 미세하게 달라질 여지도 생긴다.
             char_gate(assembled.total_chars, max_chars)
+            actual_tokens = model_input_gate(assembled, budget_for_model)
+            if not decision.full_inline_tokens:
+                decision.full_inline_tokens = actual_tokens
             measured = full_bytes or _payload_bytes(assembled, provider_measure)
             decision.full_inline_bytes = measured
             decision.full_inline_chars = full_chars or assembled.total_chars
@@ -580,6 +638,7 @@ def assemble_job(
                 )
             }
         lane = assemble(max_chars=max_chars, evidence_bundle=bundle, **common)
+        model_input_gate(lane, budget_for_model)
         return AssemblyResult(
             lanes={LANE_SINGLE: lane},
             delivery_plan=plan,

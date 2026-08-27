@@ -21,6 +21,36 @@ from .pdf_fixture import build_korean_pdf
 AGY_BYTE_BUDGET = 180_000
 
 
+def test_settings_reject_a_zero_fallback_input_budget(client, settings_guard) -> None:
+    response = client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "unknown_model_context_tokens": 128_000,
+                "model_output_reserve_tokens": 128_000,
+            }
+        },
+    )
+    assert response.status_code == 400
+    assert "입력 예산이 0" in response.text
+
+
+def test_settings_reject_a_reserve_larger_than_a_model_override(
+    client, settings_guard
+) -> None:
+    response = client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "model_context_tokens": {"codex:tiny": 20_000},
+                "model_output_reserve_tokens": 32_000,
+            }
+        },
+    )
+    assert response.status_code == 400
+    assert "codex:tiny" in response.text
+
+
 @pytest.fixture()
 def prompt(client):
     return client.post(

@@ -516,7 +516,7 @@ class JobRunner:
                     "않습니다.",
                 )
                 return
-            except InputTooLarge as exc:
+            except (InputTooLarge, job_assembly.ModelInputTooLarge) as exc:
                 await self._fail(job_id, ErrorCode.INPUT_TOO_LARGE, str(exc))
                 return
             except search_prompt.SearchPromptError as exc:
@@ -607,11 +607,18 @@ class JobRunner:
                             prior_report=prior_report,
                             prior_citation_mapping=prior_mapping,
                             retrieval_mode=RetrievalMode.RETRIEVAL,
+                            provider_byte_budget=getattr(
+                                provider, "max_input_bytes", None
+                            ),
                             retrieval_budget=retrieval_budget,
                             evidence_bundle=found.bundle,
+                            provider_id=provider_id,
+                            model=model or "",
+                            provider_measure=getattr(provider, "payload_bytes", None),
+                            **delivery_policy,
                         )
                         assembled = assembly.representative
-                    except InputTooLarge as exc:
+                    except (InputTooLarge, job_assembly.ModelInputTooLarge) as exc:
                         self._save_retrieval(
                             job_id,
                             delivery_plan,

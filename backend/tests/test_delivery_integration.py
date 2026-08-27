@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from app import job_assembly
 from app.retrieval import embedding_cache
 from app.retrieval import semantic as semantic_module
 
@@ -199,6 +200,40 @@ def test_oversized_input_goes_straight_to_retrieval(
     assert final["retrieval_manifest"]["delivery_mode"] == "local_retrieval"
     # 실제로 나간 크기는 한도 안이다.
     assert 0 < final["delivery_manifest"]["actual_payload_bytes"] <= AGY_BYTE_BUDGET
+
+
+def test_final_reassembly_keeps_the_model_budget_policy(
+    client, prompt, monkeypatch, settings_guard
+) -> None:
+    """runner의 두 번째 조립에서도 Provider·모델 예산 인자를 잃지 않는다."""
+
+    calls: list[dict] = []
+    real_assemble = job_assembly.assemble_job
+
+    def recording_assemble(**kwargs):
+        calls.append(dict(kwargs))
+        return real_assemble(**kwargs)
+
+    monkeypatch.setattr(job_assembly, "assemble_job", recording_assemble)
+    _settings(
+        client,
+        {
+            "retrieval_mode": "retrieval",
+            "retrieval_evidence_chars": 20_000,
+        },
+    )
+    upload = upload_pdf(client, large_korean_pdf())
+    _preflight, final = _run(
+        client, prompt, upload["batch_id"], "청구항 1. 센서와 제어부."
+    )
+    assert final["status"] == "SUCCEEDED", final["errors"]
+
+    final_calls = [call for call in calls if call.get("evidence_bundle") is not None]
+    assert final_calls
+    final_call = final_calls[-1]
+    assert final_call["provider_id"] == "test"
+    assert final_call["unknown_model_context_tokens"] == 128_000
+    assert final_call["model_output_reserve_tokens"] == 32_000
 
 
 def test_preflight_blocks_when_the_evidence_budget_ceiling_exceeds_the_limit(

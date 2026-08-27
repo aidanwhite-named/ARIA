@@ -288,6 +288,32 @@ def _coerce(key: str, value: Any) -> Any:
                 + " 중 하나여야 합니다."
             )
         return text
+    if key == "model_context_tokens":
+        if not isinstance(value, dict):
+            raise ValueError("model_context_tokens 는 객체여야 합니다.")
+        normalized: dict[str, int] = {}
+        low, high = _LIMITS["unknown_model_context_tokens"]
+        for raw_key, raw_value in value.items():
+            model_key = str(raw_key).strip()
+            if not model_key:
+                raise ValueError("model_context_tokens 의 모델 이름은 비어 있을 수 없습니다.")
+            if isinstance(raw_value, bool):
+                raise ValueError(
+                    f"model_context_tokens[{model_key}] 는 정수여야 합니다."
+                )
+            try:
+                context_tokens = int(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"model_context_tokens[{model_key}] 는 정수여야 합니다."
+                ) from exc
+            if not low <= context_tokens <= high:
+                raise ValueError(
+                    f"model_context_tokens[{model_key}] 는 {low} 이상 {high} "
+                    "이하여야 합니다."
+                )
+            normalized[model_key] = context_tokens
+        return normalized
     if key == "runtime_context":
         return str(value)
     if key == "default_prompt_id":
@@ -315,13 +341,54 @@ def _coerce(key: str, value: Any) -> Any:
     return value
 
 
+def _validate_model_token_budgets(values: dict[str, Any]) -> None:
+    """컨텍스트보다 예약이 크거나 같은 설정을 저장하지 않는다.
+
+    이 조합을 입력 예산 0으로만 정규화하면 호출부가 0을 「예산 없음」으로 읽어
+    전체 입력을 보내는 안전장치 역전이 생긴다. 저장 단계와 실행 단계가 모두
+    방어하지만, 사용자가 가장 빨리 원인을 알 수 있는 곳은 설정 저장이다.
+    """
+
+    reserve = int(values.get("model_output_reserve_tokens") or 0)
+    fallback = int(values.get("unknown_model_context_tokens") or 0)
+    if reserve >= fallback:
+        raise ValueError(
+            "model_output_reserve_tokens 는 unknown_model_context_tokens 보다 "
+            "작아야 합니다. 같거나 크면 모델 입력 예산이 0이 됩니다."
+        )
+
+    overrides = values.get("model_context_tokens") or {}
+    if not isinstance(overrides, dict):
+        raise ValueError("model_context_tokens 는 객체여야 합니다.")
+    invalid = [
+        str(model)
+        for model, context in overrides.items()
+        if reserve >= int(context)
+    ]
+    if invalid:
+        raise ValueError(
+            "model_output_reserve_tokens 는 다음 모델의 컨텍스트 토큰보다 "
+            f"작아야 합니다: {', '.join(sorted(invalid))}."
+        )
+
+
 def update(session: Session, changes: dict[str, Any]) -> dict[str, Any]:
     unknown = set(changes) - EDITABLE_KEYS
     if unknown:
         raise ValueError(f"변경할 수 없는 설정입니다: {', '.join(sorted(unknown))}")
 
-    for key, raw in changes.items():
-        value = _coerce(key, raw)
+    coerced = {key: _coerce(key, raw) for key, raw in changes.items()}
+    model_budget_keys = {
+        "model_context_tokens",
+        "model_output_reserve_tokens",
+        "unknown_model_context_tokens",
+    }
+    if model_budget_keys.intersection(coerced):
+        prospective = get_all(session)
+        prospective.update(coerced)
+        _validate_model_token_budgets(prospective)
+
+    for key, value in coerced.items():
         row = session.get(AppSetting, key)
         if row is None:
             session.add(AppSetting(key=key, value=value))

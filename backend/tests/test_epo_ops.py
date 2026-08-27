@@ -6,6 +6,7 @@ urlopen 을 가짜로 바꿔서만 부른다.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import ssl
@@ -239,6 +240,26 @@ def test_check_redacts_credentials_echoed_back(monkeypatch) -> None:
     _patch_urlopen(monkeypatch, raise_400)
     result = epo_backend.check_credentials("THEKEY", "THESECRET")
     assert "THEKEY" not in result.detail and "THESECRET" not in result.detail
+
+
+def test_check_redacts_the_basic_authorization_value(monkeypatch) -> None:
+    """프록시가 Authorization 헤더를 반사해도 Base64 자격증명이 새지 않는다."""
+
+    encoded = base64.b64encode(b"THEKEY:THESECRET").decode("ascii")
+
+    def raise_400():
+        raise urllib.error.HTTPError(
+            epo_backend.TOKEN_URL,
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(f"Authorization: Basic {encoded}".encode()),
+        )
+
+    _patch_urlopen(monkeypatch, raise_400)
+    result = epo_backend.check_credentials("THEKEY", "THESECRET")
+    assert encoded not in result.detail
+    assert f"Basic {encoded}" not in result.detail
 
 
 def test_check_reports_tls_failure_without_bypassing(monkeypatch) -> None:
