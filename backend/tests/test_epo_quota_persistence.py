@@ -585,3 +585,114 @@ def test_recording_and_syncing_concurrently_do_not_deadlock() -> None:
     assert done.stdout.startswith("OK"), done.stdout
     # 교착을 피하려고 아무것도 안 한 것이 아니다.
     assert int(done.stdout.split()[1]) >= rounds
+
+
+# =====================================================================
+# 4차 리뷰: 저장 콜백을 원장 잠금 밖으로 뺀 뒤 생긴 **중복 집계** 경쟁.
+#
+#   A: peek -> 증분 1
+#   B: peek -> 증분 2   (A 가 아직 ack 하지 않아 A 것까지 다시 보인다)
+#   둘 다 저장 -> DB 3, 실제 2
+#
+# 덜 세는 게 아니라 더 세는 결함이라 조용하다. 한도를 일찍 소진시켜 멀쩡한
+# 검색을 차단하고, pending 이 0 이라 화면에도 드러나지 않는다.
+# =====================================================================
+
+
+def test_persist_holds_its_own_lock_across_merge(client, clean_quota, monkeypatch):
+    """peek → merge → ack 이 한 잠금 안에 있어야 겹치지 않는다."""
+    _install_credentials()
+    with session_scope() as session:
+        ledger = settings_service.epo_ledger(session)
+
+    observed: list[bool] = []
+    real_merge = settings_service.merge_epo_quota
+
+    def merge_spy(delta):
+        # 비재진입 Lock 이라, 잡히지 않으면 누군가(=우리) 쥐고 있다는 뜻이다.
+        free = settings_service._EPO_PERSIST_LOCK.acquire(blocking=False)
+        observed.append(not free)
+        if free:
+            settings_service._EPO_PERSIST_LOCK.release()
+        return real_merge(delta)
+
+    monkeypatch.setattr(settings_service, "merge_epo_quota", merge_spy)
+    ledger.record(body_bytes=7, headers={})
+    assert observed == [True], "merge 가 저장 잠금 밖에서 실행됐습니다."
+
+
+def test_overlapping_persists_do_not_double_count(client, clean_quota, monkeypatch):
+    """두 콜백을 강제로 교차시킨다. 옛 구현에서는 2바이트가 3으로 저장됐다."""
+    _install_credentials()
+    with session_scope() as session:
+        ledger = settings_service.epo_ledger(session)
+
+    real_merge = settings_service.merge_epo_quota
+    original_peek = ledger.peek_delta
+    b_peeked = threading.Event()
+
+    def peek_spy():
+        delta = original_peek()
+        if threading.current_thread().name == "B":
+            b_peeked.set()
+        return delta
+
+    def merge_spy(delta):
+        if threading.current_thread().name == "A":
+            # B 가 겹쳐 들어올 틈을 준다. 직렬화돼 있으면 B 는 아직 peek 하지
+            # 못하고, 이 대기는 시간 초과로 끝난다 — 그게 정상 경로다.
+            b_peeked.wait(2.0)
+        return real_merge(delta)
+
+    ledger.peek_delta = peek_spy
+    monkeypatch.setattr(settings_service, "merge_epo_quota", merge_spy)
+    try:
+        threads = [
+            threading.Thread(
+                target=lambda: ledger.record(body_bytes=1, headers={}),
+                name=name,
+                daemon=True,
+            )
+            for name in ("A", "B")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert not [t.name for t in threads if t.is_alive()]
+    finally:
+        del ledger.peek_delta
+
+    assert ledger.state.local_bytes == 2, "실제 사용량"
+    assert _stored()["local_bytes"] == 2, "영구 저장량 (옛 구현에서는 3)"
+    assert ledger.pending_bytes == 0, "미저장 증분"
+
+
+def test_many_concurrent_persists_match_actual_usage(client, clean_quota) -> None:
+    """겹침을 인위적으로 만들지 않아도 합계가 어긋나지 않아야 한다."""
+    _install_credentials()
+    with session_scope() as session:
+        ledger = settings_service.epo_ledger(session)
+
+    threads_count = 8
+    per_thread = 20
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(per_thread):
+                ledger.record(body_bytes=1, headers={})
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    workers = [threading.Thread(target=worker, daemon=True) for _ in range(threads_count)]
+    for thread in workers:
+        thread.start()
+    for thread in workers:
+        thread.join(30)
+
+    assert not errors, errors
+    expected = threads_count * per_thread
+    assert ledger.state.local_bytes == expected
+    assert _stored()["local_bytes"] == expected
+    assert ledger.pending_bytes == 0

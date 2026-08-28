@@ -360,6 +360,27 @@ def reset_epo_ledger() -> None:
         _EPO_PERSIST_ERROR = ""
 
 
+# peek → merge → ack 한 벌을 직렬화한다.
+#
+# 저장 콜백은 원장 잠금 **밖에서** 돈다(교착을 피하려고 그렇게 했다). 그래서
+# 두 콜백이 겹칠 수 있고, 겹치면 같은 바이트를 두 번 저장한다.
+#
+#     A: peek → 증분 1
+#     B: peek → 증분 2   (A 가 아직 ack 하지 않아 A 것까지 다시 보인다)
+#     둘 다 저장 → DB 3, 실제 2
+#
+# 실측으로 재현했다. 덜 세는 게 아니라 **더 세는** 결함이라 조용하다 — 한도를
+# 일찍 소진시켜 멀쩡한 검색을 차단하고, pending 이 0 이라 화면에도 안 보인다.
+#
+# 잠금 순서: 이 잠금은 **항상 가장 바깥**이다.
+#
+#     _EPO_PERSIST_LOCK → (peek: 원장 잠금) → (merge: 저장소 잠금) → (ack: 원장 잠금)
+#
+# 원장 잠금과 저장소 잠금을 겹쳐 쥐지 않으므로 예전 AB-BA 교착은 돌아오지
+# 않는다. 이 성질은 "저장 콜백은 원장 잠금 밖에서 부른다"에 기대고 있고,
+# test_persist_callback_runs_outside_the_ledger_lock 이 그것을 지킨다.
+_EPO_PERSIST_LOCK = threading.Lock()
+
 # 마지막 저장 실패. 화면과 경고가 이것을 보고 알린다.
 _EPO_PERSIST_ERROR = ""
 
@@ -387,22 +408,26 @@ def persist_epo_quota(ledger) -> None:
       - 실패 사실은 화면 경고와 사용량 스냅샷에 드러난다. 조용히 넘기지 않는다.
     """
     global _EPO_PERSIST_ERROR
-    delta = ledger.peek_delta()
-    nothing_new = (
-        not delta.get("local_bytes")
-        and not delta.get("requests")
-        and delta.get("ops_weekly_bytes") is None
-        and delta.get("ops_hourly_bytes") is None
-    )
-    if nothing_new:
-        return
-    try:
-        merge_epo_quota(delta)
-    except Exception as exc:  # noqa: BLE001 - 어떤 저장 오류든 같은 처리다
-        _EPO_PERSIST_ERROR = f"{type(exc).__name__}: {exc}"
-        return
-    ledger.ack(delta)
-    _EPO_PERSIST_ERROR = ""
+    # peek 과 ack 사이에 다른 저장이 끼어들면 같은 증분을 두 번 적는다.
+    # 셋을 한 잠금 안에 둔다. 원장 잠금은 peek/ack 안에서 잠깐씩만 잡히고
+    # 여기서는 쥐고 있지 않으므로 저장소 잠금과 겹치지 않는다.
+    with _EPO_PERSIST_LOCK:
+        delta = ledger.peek_delta()
+        nothing_new = (
+            not delta.get("local_bytes")
+            and not delta.get("requests")
+            and delta.get("ops_weekly_bytes") is None
+            and delta.get("ops_hourly_bytes") is None
+        )
+        if nothing_new:
+            return
+        try:
+            merge_epo_quota(delta)
+        except Exception as exc:  # noqa: BLE001 - 어떤 저장 오류든 같은 처리다
+            _EPO_PERSIST_ERROR = f"{type(exc).__name__}: {exc}"
+            return
+        ledger.ack(delta)
+        _EPO_PERSIST_ERROR = ""
 
 
 def epo_backend_for(session: Session):
