@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 
@@ -526,6 +527,13 @@ _EPO_MARKER = "EPO OPS 특허 검색 실행기"
 EPO_SCRIPT: dict[str, list[str]] = {}
 EPO_REQUESTS: list = []
 
+#: EPO 레인이 모델을 부르는 **바로 그 순간** 테스트가 끼어드는 자리.
+#: (lane_id, request) 를 받는다. 취소처럼 "레인이 실제로 시작한 뒤에" 일어나야
+#: 하는 사건을 재현하려면 이 자리가 필요하다 — 작업 시작 전에 취소를 넣으면
+#: 웹 레인에서 먼저 걸려 EPO 가 돌기도 전에 끝나고, 그러면 EPO 취소 경로는
+#: 한 줄도 실행되지 않은 채 테스트가 통과한다.
+EPO_ON_ROUND = None
+
 
 def _epo_default_reply() -> str:
     return json.dumps(
@@ -586,6 +594,10 @@ class DeterministicSearchProvider(Provider):
                 lane = candidate
                 break
         EPO_REQUESTS.append({"lane": lane, "message": request.user_message})
+        if EPO_ON_ROUND is not None:
+            hooked = EPO_ON_ROUND(lane, request)
+            if inspect.isawaitable(hooked):
+                await hooked
 
         outcome = ExecutionOutcome(
             cli_path="(내장)", cli_version="0.1.0", cli_args=["test-epo"]
