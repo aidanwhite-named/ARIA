@@ -62,17 +62,18 @@ const ALLOWED_TAGS = [
   "h1", "h2", "h3", "h4", "h5", "h6",
   "p", "br", "hr",
   "ul", "ol", "li",
-  "strong", "em", "del", "code", "pre",
+  "strong", "b", "em", "del", "code", "pre",
   "blockquote",
   "table", "thead", "tbody", "tr", "th", "td",
   "a", "span",
+  "details", "summary",
 ];
 
 export function renderMarkdown(source: string): string {
   const html = marked.parse(source ?? "", { async: false }) as string;
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS,
-    ALLOWED_ATTR: ["href", "title", "colspan", "rowspan", "align"],
+    ALLOWED_ATTR: ["href", "title", "colspan", "rowspan", "align", "open"],
     // javascript:, data: 등 위험한 스킴 차단
     ALLOWED_URI_REGEXP: /^(?:https?|mailto):/i,
     FORBID_TAGS: ["style", "script", "iframe", "object", "embed", "form", "input"],

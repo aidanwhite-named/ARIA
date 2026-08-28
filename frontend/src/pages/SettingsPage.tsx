@@ -497,6 +497,257 @@ export default function SettingsPage() {
         </button>
       </div>
 
+      <div className="card settings-epo">
+        <h2>EPO OPS 특허 검색 연동</h2>
+        <p className="muted settings-integration-copy">
+          EPO OPS API로 특허를 검색하고 받은 XML과 결과를 대조합니다. EPO 번역이
+          포함될 수 있어 증거 등급은 <b>exact</b>까지만 부여합니다.
+        </p>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={v.epo_integration_enabled}
+            onChange={(e) =>
+              saveValue("epo_integration_enabled", e.target.checked)
+            }
+          />
+          EPO OPS 연동 사용
+        </label>
+
+        {v.epo_integration_enabled && (
+          <div style={{ marginTop: 14 }}>
+            <div className="field">
+              <label>Consumer Key</label>
+              <div className="btn-row">
+                <input
+                  value={epoKey}
+                  onChange={(e) => setEpoKey(e.target.value)}
+                  placeholder="EPO 개발자 포털에서 발급한 Consumer Key"
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ flex: "1 1 320px", minWidth: 0 }}
+                />
+                <button
+                  className="btn small"
+                  disabled={epoKey.trim() === (v.epo_consumer_key ?? "")}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_key",
+                      epoKey.trim(),
+                      "Consumer Key 를 저장했습니다.",
+                    )
+                  }
+                >
+                  저장
+                </button>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>
+                Consumer Secret{" "}
+                <span
+                  className={`pill ${epoSecretSaved ? "ok" : "neutral"}`}
+                  style={{ marginLeft: 6 }}
+                >
+                  {epoSecretSaved ? "저장됨" : "미설정"}
+                </span>
+              </label>
+              <div className="btn-row">
+                <input
+                  type="password"
+                  value={epoSecret}
+                  onChange={(e) => setEpoSecret(e.target.value)}
+                  placeholder={
+                    epoSecretSaved
+                      ? "저장되어 있습니다. 바꾸려면 새 값을 입력하십시오."
+                      : "EPO 개발자 포털에서 발급한 Consumer Secret Key"
+                  }
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  style={{ flex: "1 1 320px", minWidth: 0 }}
+                />
+                <button
+                  className="btn small"
+                  disabled={!epoSecret.trim()}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_secret",
+                      epoSecret.trim(),
+                      "Consumer Secret 를 저장했습니다.",
+                    )
+                  }
+                >
+                  저장
+                </button>
+                <button
+                  className="btn small"
+                  disabled={!epoSecretSaved}
+                  onClick={() =>
+                    saveEpoCredential(
+                      "epo_consumer_secret",
+                      "",
+                      "Consumer Secret 를 지웠습니다.",
+                    )
+                  }
+                >
+                  지우기
+                </button>
+              </div>
+              <div className="hint">
+                Secret은 화면에 다시 표시되지 않습니다. 저장 후 「연결 테스트」로
+                확인하세요.
+              </div>
+            </div>
+
+            <div className="btn-row">
+              <button
+                className="btn small"
+                disabled={epoChecking || !v.epo_consumer_key || !epoSecretSaved}
+                onClick={checkEpo}
+              >
+                {epoChecking ? "확인 중…" : "연결 테스트"}
+              </button>
+              <span className="hint">
+                토큰 발급만 확인하며 특허 데이터와 토큰은 저장하지 않습니다.
+              </span>
+            </div>
+
+            {epoCheck && (
+              <div
+                className={`notice ${epoCheck.ok ? "ok" : "danger"}`}
+                style={{ marginTop: 10 }}
+              >
+                {epoCheck.detail}
+                {epoCheck.ok && epoCheck.expires_in
+                  ? ` (토큰 수명 ${epoCheck.expires_in}초)`
+                  : ""}
+              </div>
+            )}
+
+            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>
+              이번 주 사용량
+            </h3>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              OPS는 데이터량 기준이며 주간 4GB 한도가 적용됩니다. OPS와 ARIA
+              측정값 중 큰 값을 사용합니다.
+            </div>
+            <div className="table-scroll">
+            <table>
+              <tbody>
+                <tr>
+                  <th>OPS 가 보고한 주간 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.ops_weekly_bytes)}
+                    {" / "}
+                    {formatBytes(epoQuota.weekly_limit_bytes)}
+                  </td>
+                </tr>
+                <tr>
+                  <th>ARIA 가 센 주간 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.local_bytes)}
+                    {epoQuota.requests ? ` (${epoQuota.requests}회 호출)` : ""}
+                  </td>
+                </tr>
+                <tr>
+                  <th>남은 양</th>
+                  <td>{formatBytes(epoQuota.remaining_weekly_bytes)}</td>
+                </tr>
+                <tr>
+                  <th>시간당 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.ops_hourly_bytes)}
+                    {epoQuota.hourly_limit_bytes
+                      ? ` / ${formatBytes(epoQuota.hourly_limit_bytes)}`
+                      : " (관측만, 차단 안 함)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>아직 저장 안 된 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.pending_bytes)}
+                    {epoQuota.persist_error ? (
+                      <div className="hint">
+                        저장 실패: {epoQuota.persist_error} — 한도는 계속
+                        지켜지지만 프로그램을 다시 시작하면 그만큼이 사라집니다.
+                      </div>
+                    ) : null}
+                  </td>
+                </tr>
+                <tr>
+                  <th>OPS 부하 상태</th>
+                  <td>
+                    <span
+                      className={`pill ${
+                        epoQuota.throttle?.dangerous ? "danger" : "neutral"
+                      }`}
+                    >
+                      {epoQuota.throttle?.system_state || "관측 전"}
+                    </span>
+                    {epoQuota.throttle?.raw ? (
+                      <div className="hint">{epoQuota.throttle.raw}</div>
+                    ) : null}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            </div>
+
+            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 호출 예산</h3>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              OPS HTTP 요청에 쓸 총 대기 시간입니다. AI 실행 전체 제한시간과는
+              별도입니다.
+            </div>
+            <div className="settings-limit-options">
+              <NumberField
+                label="OPS 네트워크 시간 예산 (초)"
+                value={v.epo_http_budget_seconds}
+                hint="10–600. 순수 HTTP 대기 시간입니다."
+                onSave={(n) => saveValue("epo_http_budget_seconds", n)}
+              />
+              <NumberField
+                label="상세 조회 후보 수 상한"
+                value={v.epo_max_detail_fetches}
+                hint="청구항·설명을 받아 오는 후보 수입니다. 기본 12건."
+                onSave={(n) => saveValue("epo_max_detail_fetches", n)}
+              />
+              <NumberField
+                label="시간당 사용량 상한 (bytes, 0 = 관측만)"
+                value={v.epo_hourly_quota_bytes}
+                hint={
+                  "주간 4GB 한도는 항상 적용됩니다. 값을 입력하면 시간당 한도도 추가로 적용합니다."
+                }
+                onSave={(n) => saveValue("epo_hourly_quota_bytes", n)}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card settings-kiwee">
+        <h2>Kiwee 특허 검색 연동</h2>
+        <p className="muted settings-integration-copy">
+          Kiwee 특허 DB를 유사문헌 검색 경로에 추가합니다. 현재는 준비 중이라
+          켜도 실제 접속이나 검색은 수행하지 않습니다.
+        </p>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={v.kiwee_integration_enabled}
+            onChange={(e) =>
+              saveValue("kiwee_integration_enabled", e.target.checked)
+            }
+          />
+          Kiwee 특허 검색 연동 사용
+        </label>
+        {v.kiwee_integration_enabled && (
+          <div className="notice info" style={{ marginTop: 10 }}>
+            준비 중인 기능입니다. 현재는 실제 검색을 수행하지 않습니다.
+          </div>
+        )}
+      </div>
+
       <div className="card settings-provider">
         <div className="split" style={{ marginBottom: 12 }}>
           <div>
@@ -945,257 +1196,6 @@ export default function SettingsPage() {
             사용하십시오.
           </div>
         </div>
-      </div>
-
-      <div className="card settings-kiwee">
-        <h2>Kiwee 특허 검색 연동</h2>
-        <p className="muted settings-integration-copy">
-          Kiwee 특허 DB를 유사문헌 검색 경로에 추가합니다. 현재는 준비 중이라
-          켜도 실제 접속이나 검색은 수행하지 않습니다.
-        </p>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={v.kiwee_integration_enabled}
-            onChange={(e) =>
-              saveValue("kiwee_integration_enabled", e.target.checked)
-            }
-          />
-          Kiwee 특허 검색 연동 사용
-        </label>
-        {v.kiwee_integration_enabled && (
-          <div className="notice info" style={{ marginTop: 10 }}>
-            준비 중인 기능입니다. 현재는 실제 검색을 수행하지 않습니다.
-          </div>
-        )}
-      </div>
-
-      <div className="card settings-epo">
-        <h2>EPO OPS 특허 검색 연동</h2>
-        <p className="muted settings-integration-copy">
-          EPO OPS API로 특허를 검색하고 받은 XML과 결과를 대조합니다. EPO 번역이
-          포함될 수 있어 증거 등급은 <b>exact</b>까지만 부여합니다.
-        </p>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={v.epo_integration_enabled}
-            onChange={(e) =>
-              saveValue("epo_integration_enabled", e.target.checked)
-            }
-          />
-          EPO OPS 연동 사용
-        </label>
-
-        {v.epo_integration_enabled && (
-          <div style={{ marginTop: 14 }}>
-            <div className="field">
-              <label>Consumer Key</label>
-              <div className="btn-row">
-                <input
-                  value={epoKey}
-                  onChange={(e) => setEpoKey(e.target.value)}
-                  placeholder="EPO 개발자 포털에서 발급한 Consumer Key"
-                  autoComplete="off"
-                  spellCheck={false}
-                  style={{ flex: "1 1 320px", minWidth: 0 }}
-                />
-                <button
-                  className="btn small"
-                  disabled={epoKey.trim() === (v.epo_consumer_key ?? "")}
-                  onClick={() =>
-                    saveEpoCredential(
-                      "epo_consumer_key",
-                      epoKey.trim(),
-                      "Consumer Key 를 저장했습니다.",
-                    )
-                  }
-                >
-                  저장
-                </button>
-              </div>
-            </div>
-
-            <div className="field">
-              <label>
-                Consumer Secret{" "}
-                <span
-                  className={`pill ${epoSecretSaved ? "ok" : "neutral"}`}
-                  style={{ marginLeft: 6 }}
-                >
-                  {epoSecretSaved ? "저장됨" : "미설정"}
-                </span>
-              </label>
-              <div className="btn-row">
-                <input
-                  type="password"
-                  value={epoSecret}
-                  onChange={(e) => setEpoSecret(e.target.value)}
-                  placeholder={
-                    epoSecretSaved
-                      ? "저장되어 있습니다. 바꾸려면 새 값을 입력하십시오."
-                      : "EPO 개발자 포털에서 발급한 Consumer Secret Key"
-                  }
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  style={{ flex: "1 1 320px", minWidth: 0 }}
-                />
-                <button
-                  className="btn small"
-                  disabled={!epoSecret.trim()}
-                  onClick={() =>
-                    saveEpoCredential(
-                      "epo_consumer_secret",
-                      epoSecret.trim(),
-                      "Consumer Secret 를 저장했습니다.",
-                    )
-                  }
-                >
-                  저장
-                </button>
-                <button
-                  className="btn small"
-                  disabled={!epoSecretSaved}
-                  onClick={() =>
-                    saveEpoCredential(
-                      "epo_consumer_secret",
-                      "",
-                      "Consumer Secret 를 지웠습니다.",
-                    )
-                  }
-                >
-                  지우기
-                </button>
-              </div>
-              <div className="hint">
-                Secret은 화면에 다시 표시되지 않습니다. 저장 후 「연결 테스트」로
-                확인하세요.
-              </div>
-            </div>
-
-            <div className="btn-row">
-              <button
-                className="btn small"
-                disabled={epoChecking || !v.epo_consumer_key || !epoSecretSaved}
-                onClick={checkEpo}
-              >
-                {epoChecking ? "확인 중…" : "연결 테스트"}
-              </button>
-              <span className="hint">
-                토큰 발급만 확인하며 특허 데이터와 토큰은 저장하지 않습니다.
-              </span>
-            </div>
-
-            {epoCheck && (
-              <div
-                className={`notice ${epoCheck.ok ? "ok" : "danger"}`}
-                style={{ marginTop: 10 }}
-              >
-                {epoCheck.detail}
-                {epoCheck.ok && epoCheck.expires_in
-                  ? ` (토큰 수명 ${epoCheck.expires_in}초)`
-                  : ""}
-              </div>
-            )}
-
-            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>
-              이번 주 사용량
-            </h3>
-            <div className="hint" style={{ marginBottom: 8 }}>
-              OPS는 데이터량 기준이며 주간 4GB 한도가 적용됩니다. OPS와 ARIA
-              측정값 중 큰 값을 사용합니다.
-            </div>
-            <div className="table-scroll">
-            <table>
-              <tbody>
-                <tr>
-                  <th>OPS 가 보고한 주간 사용량</th>
-                  <td>
-                    {formatBytes(epoQuota.ops_weekly_bytes)}
-                    {" / "}
-                    {formatBytes(epoQuota.weekly_limit_bytes)}
-                  </td>
-                </tr>
-                <tr>
-                  <th>ARIA 가 센 주간 사용량</th>
-                  <td>
-                    {formatBytes(epoQuota.local_bytes)}
-                    {epoQuota.requests ? ` (${epoQuota.requests}회 호출)` : ""}
-                  </td>
-                </tr>
-                <tr>
-                  <th>남은 양</th>
-                  <td>{formatBytes(epoQuota.remaining_weekly_bytes)}</td>
-                </tr>
-                <tr>
-                  <th>시간당 사용량</th>
-                  <td>
-                    {formatBytes(epoQuota.ops_hourly_bytes)}
-                    {epoQuota.hourly_limit_bytes
-                      ? ` / ${formatBytes(epoQuota.hourly_limit_bytes)}`
-                      : " (관측만, 차단 안 함)"}
-                  </td>
-                </tr>
-                <tr>
-                  <th>아직 저장 안 된 사용량</th>
-                  <td>
-                    {formatBytes(epoQuota.pending_bytes)}
-                    {epoQuota.persist_error ? (
-                      <div className="hint">
-                        저장 실패: {epoQuota.persist_error} — 한도는 계속
-                        지켜지지만 프로그램을 다시 시작하면 그만큼이 사라집니다.
-                      </div>
-                    ) : null}
-                  </td>
-                </tr>
-                <tr>
-                  <th>OPS 부하 상태</th>
-                  <td>
-                    <span
-                      className={`pill ${
-                        epoQuota.throttle?.dangerous ? "danger" : "neutral"
-                      }`}
-                    >
-                      {epoQuota.throttle?.system_state || "관측 전"}
-                    </span>
-                    {epoQuota.throttle?.raw ? (
-                      <div className="hint">{epoQuota.throttle.raw}</div>
-                    ) : null}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            </div>
-
-            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 호출 예산</h3>
-            <div className="hint" style={{ marginBottom: 8 }}>
-              OPS HTTP 요청에 쓸 총 대기 시간입니다. AI 실행 전체 제한시간과는
-              별도입니다.
-            </div>
-            <div className="settings-limit-options">
-              <NumberField
-                label="OPS 네트워크 시간 예산 (초)"
-                value={v.epo_http_budget_seconds}
-                hint="10–600. 순수 HTTP 대기 시간입니다."
-                onSave={(n) => saveValue("epo_http_budget_seconds", n)}
-              />
-              <NumberField
-                label="상세 조회 후보 수 상한"
-                value={v.epo_max_detail_fetches}
-                hint="청구항·설명을 받아 오는 후보 수입니다. 기본 12건."
-                onSave={(n) => saveValue("epo_max_detail_fetches", n)}
-              />
-              <NumberField
-                label="시간당 사용량 상한 (bytes, 0 = 관측만)"
-                value={v.epo_hourly_quota_bytes}
-                hint={
-                  "주간 4GB 한도는 항상 적용됩니다. 값을 입력하면 시간당 한도도 추가로 적용합니다."
-                }
-                onSave={(n) => saveValue("epo_hourly_quota_bytes", n)}
-              />
-            </div>
-          </div>
-        )}
       </div>
 
       {loginProvider && (

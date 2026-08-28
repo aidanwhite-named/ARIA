@@ -406,6 +406,9 @@ def _channel_comparison_section(manifest: dict) -> list[str]:
 
     lines += [
         "",
+        "<details>",
+        f"<summary><b>교차 발견 문헌 목록 펼치기/접기 (총 {len(rows)}건)</b></summary>",
+        "",
         "| 구분 | 대표 문헌번호 | 명칭 | 웹 기록 | EPO 기록 |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -435,7 +438,7 @@ def _channel_comparison_section(manifest: dict) -> list[str]:
             )
             + " |"
         )
-    lines.append("")
+    lines += ["", "</details>", ""]
     return lines
 
 
