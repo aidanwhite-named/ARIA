@@ -759,6 +759,13 @@ export interface AppSettings {
      * 저장 여부는 secrets_set 을 봐야 한다.
      */
     epo_consumer_secret: string;
+    /** OPS HTTP 대기 시간의 총합. EPO 채널 전체 벽시계와 다른 축이다. */
+    epo_http_budget_seconds: number;
+    /** 0 = 시간당 사용량을 관측·표시만 하고 차단하지 않음. 주간 한도는 계약값이라 별도. */
+    epo_hourly_quota_bytes: number;
+    epo_max_detail_fetches: number;
+    /** ARIA 가 관측해 적는 값. 사용자가 PUT 으로 못 고친다(사용량 되돌리기 방지). */
+    epo_quota_state: Record<string, unknown>;
   };
   warnings: string[];
   data_dir: string;
@@ -771,6 +778,39 @@ export interface AppSettings {
   };
   /** 비밀 값이 저장되어 있는가. values 의 빈 문자열로는 구별할 수 없다. */
   secrets_set: Record<string, boolean>;
+  /** EPO OPS 사용량. 백엔드가 한도·남은 양까지 계산해서 준다. */
+  epo_quota: EpoQuotaSnapshot;
+}
+
+/** EPO OPS 사용량 스냅샷.
+ *
+ *  `ops_*` 는 OPS 가 헤더로 알려준 권위 있는 값이고, `local_bytes` 는 ARIA 가
+ *  센 값이다. 둘을 합치지 않는 것은 의도다 — 어긋나면 그 사실이 신호다.
+ */
+export interface EpoQuotaSnapshot {
+  week?: string;
+  weekly_limit_bytes?: number;
+  hourly_limit_bytes?: number;
+  local_bytes?: number;
+  ops_weekly_bytes?: number | null;
+  ops_hourly_bytes?: number | null;
+  effective_weekly_bytes?: number;
+  remaining_weekly_bytes?: number;
+  requests?: number;
+  /** 지금 날아가 있는 요청들이 잡아 둔 최대 응답량. 한도 계산에 포함된다. */
+  reserved_bytes?: number;
+  /** 아직 DB 에 저장되지 않은 증분. 저장이 실패하면 여기 남는다. */
+  pending_bytes?: number;
+  /** 마지막 저장 실패 사유. 빈 문자열이면 정상. */
+  persist_error?: string;
+  warn?: boolean;
+  throttle?: {
+    raw?: string;
+    system_state?: string;
+    services?: Record<string, string>;
+    dangerous?: boolean;
+  };
+  observed_at?: string;
 }
 
 /** 외부 데이터 소스 자격증명 확인 결과. 토큰 값은 오지 않는다. */

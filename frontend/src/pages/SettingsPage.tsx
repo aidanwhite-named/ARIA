@@ -17,6 +17,25 @@ const AUTH_LABEL: Record<string, { text: string; cls: string }> = {
   NOT_APPLICABLE: { text: "해당 없음", cls: "neutral" },
 };
 
+/** 바이트를 사람이 읽는 단위로. 관측 전(null)과 0 을 구분해서 보여 준다.
+ *
+ *  **십진 단위(1000)로 나눈다.** EPO 계약이 "주 4GB" 이고 백엔드도 십진으로
+ *  잡는다. 여기서만 1024 로 나누면 한도 4,000,000,000 이 "3.7 GB" 로 표시되어,
+ *  바로 위 안내문("주간 4GB 계약")과 화면 숫자가 어긋난다.
+ */
+function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "관측 전";
+  if (value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unit = 0;
+  while (size >= 1000 && unit < units.length - 1) {
+    size /= 1000;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
 /** 이 도구를 지금 못 쓰는 이유를 한 마디로. */
 function blockedReason(p: ProviderInfo): string {
   if (!p.execution_supported) return "실행 미구현";
@@ -370,6 +389,9 @@ export default function SettingsPage() {
   const v = settings.values;
   // Secret 은 values 로 내려오지 않는다. 저장 여부의 근거는 이쪽뿐이다.
   const epoSecretSaved = settings.secrets_set?.epo_consumer_secret === true;
+  // 사용량은 백엔드가 한도까지 계산해서 준다. 화면이 다시 계산하면 경고 문구와
+  // 표의 숫자가 어긋난다.
+  const epoQuota = settings.epo_quota ?? {};
   const selectedProvider = providers.find((p) => p.provider === defaultProvider);
   const modelOptions = Array.isArray(selectedProvider?.capabilities.models)
     ? selectedProvider.capabilities.models
@@ -1053,10 +1075,11 @@ export default function SettingsPage() {
       <div className="card settings-epo">
         <h2>EPO OPS 특허 검색 연동</h2>
         <p className="muted">
-          유럽특허청 Open Patent Services 의 자격증명(Consumer Key / Consumer
-          Secret)을 보관합니다. 지금 동작하는 것은 <b>자격증명 확인</b>까지이고,
-          유사 문헌 검색 경로에는 아직 연결되어 있지 않습니다 — 검색을 붙이려면
-          응답 원본 보존과 출처 검증 배선이 먼저 필요합니다.
+          유럽특허청 Open Patent Services 로 실제 특허를 검색합니다. 응답 원본
+          XML 을 그대로 보존한 뒤 등록된 EPO 파서로 다시 읽어 발췌를 원본에
+          대조합니다. 증거 등급 상한은 <b>exact</b>이며, OPS XML 은 문헌마다
+          원문일 수도 EPO 번역일 수도 있어 <b>원문(raw) 등급은 부여하지
+          않습니다</b>.
         </p>
         <label className="checkbox">
           <input
@@ -1151,8 +1174,9 @@ export default function SettingsPage() {
               </div>
               <div className="hint">
                 저장한 Secret 은 화면으로 다시 내려오지 않습니다. 값이 맞는지는
-                아래 「연결 테스트」로 확인하십시오. 앞뒤 공백이나 줄바꿈이 섞여
-                있으면 저장이 거절됩니다.
+                아래 「연결 테스트」로 확인하십시오. 앞뒤 공백과 줄바꿈은 붙여넣기
+                과정에서 딸려온 것으로 보고 잘라냅니다. 값 <b>가운데</b> 공백이
+                있으면 저장이 거절됩니다 — 그건 잘못 복사된 값이기 때문입니다.
               </div>
             </div>
 
@@ -1166,8 +1190,7 @@ export default function SettingsPage() {
               </button>
               <span className="hint">
                 EPO 에 토큰 발급을 한 번 요청합니다. 특허 데이터는 받지 않고,
-                받은 토큰은 저장하지 않습니다. 실행(분석·검색)은 이 자격증명을
-                쓰지 않습니다.
+                받은 토큰은 저장하지 않습니다.
               </span>
             </div>
 
@@ -1183,11 +1206,106 @@ export default function SettingsPage() {
               </div>
             )}
 
-            <div className="notice info" style={{ marginTop: 10 }}>
-              확인에 성공해도 유사 문헌 검색은 지금까지와 똑같이 동작합니다.
-              EPO 후보가 보고서에 들어가려면 검색 어댑터와 증거 검증 배선이
-              추가되어야 하며, 그 전까지 ARIA 는 이 자격증명으로 검색을 시도하지
-              않습니다.
+            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>
+              이번 주 사용량
+            </h3>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              OPS 는 요청 수가 아니라 <b>데이터량</b>으로 과금됩니다(주간 4GB
+              계약). 아래 두 숫자를 합치지 않는 것은 의도입니다 — 어긋나면 그
+              사실 자체가 신호이기 때문입니다. 판정에는 큰 쪽을 씁니다.
+            </div>
+            <div className="table-scroll">
+            <table>
+              <tbody>
+                <tr>
+                  <th>OPS 가 보고한 주간 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.ops_weekly_bytes)}
+                    {" / "}
+                    {formatBytes(epoQuota.weekly_limit_bytes)}
+                  </td>
+                </tr>
+                <tr>
+                  <th>ARIA 가 센 주간 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.local_bytes)}
+                    {epoQuota.requests ? ` (${epoQuota.requests}회 호출)` : ""}
+                  </td>
+                </tr>
+                <tr>
+                  <th>남은 양</th>
+                  <td>{formatBytes(epoQuota.remaining_weekly_bytes)}</td>
+                </tr>
+                <tr>
+                  <th>시간당 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.ops_hourly_bytes)}
+                    {epoQuota.hourly_limit_bytes
+                      ? ` / ${formatBytes(epoQuota.hourly_limit_bytes)}`
+                      : " (관측만, 차단 안 함)"}
+                  </td>
+                </tr>
+                <tr>
+                  <th>아직 저장 안 된 사용량</th>
+                  <td>
+                    {formatBytes(epoQuota.pending_bytes)}
+                    {epoQuota.persist_error ? (
+                      <div className="hint">
+                        저장 실패: {epoQuota.persist_error} — 한도는 계속
+                        지켜지지만 프로그램을 다시 시작하면 그만큼이 사라집니다.
+                      </div>
+                    ) : null}
+                  </td>
+                </tr>
+                <tr>
+                  <th>OPS 부하 상태</th>
+                  <td>
+                    <span
+                      className={`pill ${
+                        epoQuota.throttle?.dangerous ? "danger" : "neutral"
+                      }`}
+                    >
+                      {epoQuota.throttle?.system_state || "관측 전"}
+                    </span>
+                    {epoQuota.throttle?.raw ? (
+                      <div className="hint">{epoQuota.throttle.raw}</div>
+                    ) : null}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            </div>
+
+            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 호출 예산</h3>
+            <div className="hint" style={{ marginBottom: 8 }}>
+              아래 시간은 <b>OPS HTTP 대기 시간의 총합</b>이며, EPO 채널 전체
+              벽시계(AI 가 생각하는 시간 포함)와 다른 축입니다. 하나로 묶으면
+              모델이 오래 생각한 실행에서 OPS 호출이 남은 예산 없이 시작되고,
+              그 실패가 「EPO 가 느리다」로 기록됩니다.
+            </div>
+            <div className="settings-limit-options">
+              <NumberField
+                label="OPS 네트워크 시간 예산 (초)"
+                value={v.epo_http_budget_seconds}
+                hint="10–600. 순수 HTTP 대기 시간입니다."
+                onSave={(n) => saveValue("epo_http_budget_seconds", n)}
+              />
+              <NumberField
+                label="상세 조회 후보 수 상한"
+                value={v.epo_max_detail_fetches}
+                hint="청구항·설명을 받아 오는 후보 수입니다. 기본 12건."
+                onSave={(n) => saveValue("epo_max_detail_fetches", n)}
+              />
+              <NumberField
+                label="시간당 사용량 상한 (bytes, 0 = 관측만)"
+                value={v.epo_hourly_quota_bytes}
+                hint={
+                  "주간 4GB 는 계약값이라 항상 강제됩니다. 시간당 상한은 확정된 " +
+                  "계약값이 없어 기본은 관측만 하고, 값을 넣으면 그때부터 " +
+                  "차단합니다."
+                }
+                onSave={(n) => saveValue("epo_hourly_quota_bytes", n)}
+              />
             </div>
           </div>
         )}

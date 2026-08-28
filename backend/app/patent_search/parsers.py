@@ -40,6 +40,9 @@ from dataclasses import dataclass
 from .base import (
     SOURCE_KINDS,
     SOURCE_UNKNOWN,
+    TRANSLATION_NO,
+    TRANSLATION_STATES,
+    TRANSLATION_YES,
     PatentSearchError,
 )
 
@@ -76,13 +79,23 @@ class ExtractedField:
 
     text: str
     source_kind: str
-    is_translation: bool
+    translation_state: str
     language: str
     profile_id: str
     parser_id: str
     parser_version: str
     parser_sha256: str
     raw_capable: bool
+
+    @property
+    def is_translation(self) -> bool:
+        """번역이라고 **확인된** 경우에만 참.
+
+        unknown 을 참으로 만들지 않는다. 원문 등급 판정은 이 값이 아니라
+        translation_state == TRANSLATION_NO 를 봐야 한다 — unknown 을 거짓으로
+        읽고 "번역이 아니다"로 통과시키면 안 되기 때문이다.
+        """
+        return self.translation_state == TRANSLATION_YES
 
 
 @dataclass(frozen=True)
@@ -91,6 +104,11 @@ class SourceProfile:
 
     raw_capable 은 '이 프로필로 뽑은 값이 공식 원문 인용이 될 수 있는가'다.
     참으로 두려면 실제 응답을 보고 그 필드가 공식 XML 원문임을 확인해야 한다.
+
+    번역 여부는 세 값을 가진다(base.TRANSLATION_*). 예전에는 불리언이었는데,
+    그러면 "번역이 아니다"와 "번역인지 모른다"가 같은 값이 되어 기록이 실제로
+    아는 것보다 강해진다. is_translation 인자는 그 시절 호출부를 위해 남겨
+    두었고, translation_state 를 명시하면 그쪽이 이긴다.
     """
 
     profile_id: str
@@ -98,9 +116,17 @@ class SourceProfile:
     parser_version: str
     source_kind: str = SOURCE_UNKNOWN
     is_translation: bool = False
+    translation_state: str = ""
     language: str = ""
     raw_capable: bool = False
     note: str = ""
+
+    @property
+    def resolved_translation_state(self) -> str:
+        """실제로 쓰는 값. 명시하지 않았으면 옛 불리언에서 끌어온다."""
+        if self.translation_state:
+            return self.translation_state
+        return TRANSLATION_YES if self.is_translation else TRANSLATION_NO
 
 
 def _json_path_extract(data: bytes, field_path: str) -> str:
@@ -195,6 +221,10 @@ def register_profile(profile: SourceProfile) -> None:
         raise ParserError(f"이미 등록된 프로필입니다: {profile.profile_id}")
     if profile.source_kind not in SOURCE_KINDS:
         raise ParserError(f"알 수 없는 source_kind 입니다: {profile.source_kind}")
+    if profile.resolved_translation_state not in TRANSLATION_STATES:
+        raise ParserError(
+            f"알 수 없는 translation_state 입니다: {profile.translation_state!r}"
+        )
     if (profile.parser_id, profile.parser_version) not in _PARSERS:
         raise ParserNotRegistered(
             f"프로필이 가리키는 파서가 없습니다: "
@@ -230,7 +260,7 @@ def extract(data: bytes, field_path: str, profile_id: str) -> ExtractedField:
     return ExtractedField(
         text=text,
         source_kind=profile.source_kind,
-        is_translation=profile.is_translation,
+        translation_state=profile.resolved_translation_state,
         language=profile.language,
         profile_id=profile.profile_id,
         parser_id=profile.parser_id,

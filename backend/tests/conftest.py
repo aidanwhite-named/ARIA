@@ -93,3 +93,28 @@ def wait_for_job(client: TestClient, job_id: str, timeout: float = 60.0) -> dict
             return data
         time.sleep(0.15)
     raise AssertionError(f"작업이 끝나지 않았습니다: {job_id}")
+
+
+@pytest.fixture(autouse=True)
+def block_epo_network(monkeypatch):
+    """자동 테스트에서 EPO OPS 로 나가는 실제 요청을 구조적으로 막는다.
+
+    전송 계층을 주입하지 않은 테스트는 통과가 아니라 **실패**해야 한다. 예전에
+    test_search_never_opens_network 가 자격증명 없이 검색을 시도했는데, 그 경로가
+    실제로 ops.epo.org 를 쳐서 401 을 받았다. 조용히 나가는 것이 가장 나쁘다 —
+    quota 를 태우고, CI 를 네트워크에 의존시키고, 아무도 눈치채지 못한다.
+
+    막는 지점은 **하나**다. epo_client._live_transport 가 EPO 로 나가는 유일한
+    경로이며, 검색·상세조회·토큰 발급·자격증명 확인이 전부 여기를 지난다.
+    urllib.request.urlopen 을 통째로 바꾸지 않는 것이 중요하다 — 그러면 EPO 와
+    무관한 코드까지 프로세스 전역에서 영향을 받는다.
+    """
+    from app.patent_search import epo_client
+
+    def refuse(request, timeout):
+        raise AssertionError(
+            "테스트가 EPO OPS 로 실제 요청을 보내려 했습니다: "
+            f"{request.full_url} — transport 를 주입하십시오."
+        )
+
+    monkeypatch.setattr(epo_client, "_live_transport", refuse)

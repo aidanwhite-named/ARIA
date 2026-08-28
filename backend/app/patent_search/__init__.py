@@ -58,9 +58,32 @@ from .epo_backend import (
     SETTING_CONSUMER_KEY as EPO_SETTING_CONSUMER_KEY,
     SETTING_CONSUMER_SECRET as EPO_SETTING_CONSUMER_SECRET,
     SETTING_ENABLED as EPO_SETTING_ENABLED,
+    SETTING_QUOTA_STATE as EPO_SETTING_QUOTA_STATE,
     CredentialCheck,
+    DetailBudgetExceeded,
     EpoOpsBackend,
     check_credentials,
+)
+from .epo_client import (
+    MAX_RESULTS_PER_QUERY as EPO_MAX_RESULTS_PER_QUERY,
+    OpsAuthError,
+    OpsBudgetExceeded,
+    OpsError,
+    OpsUnavailable,
+)
+from .epo_cql import CqlError as EpoCqlError, DateRange, Group, Term
+from .epo_parser import (
+    PROFILE_EPO_OPS_XML,
+    EpoDocument,
+    EpoXmlError,
+)
+from .epo_quota import (
+    WARN_RATIO as QUOTA_WARN_RATIO,
+    WEEKLY_QUOTA_BYTES,
+    QuotaExceeded,
+    QuotaLedger,
+    QuotaState,
+    Throttled,
 )
 from .kiwee_backend import KiweePatentSearchBackend
 from .parsers import (
@@ -110,8 +133,28 @@ __all__ = [
     "EPO_SETTING_ENABLED",
     "EPO_SETTING_CONSUMER_KEY",
     "EPO_SETTING_CONSUMER_SECRET",
+    "EPO_SETTING_QUOTA_STATE",
+    "EPO_MAX_RESULTS_PER_QUERY",
     "CredentialCheck",
+    "DetailBudgetExceeded",
+    "EpoCqlError",
+    "EpoDocument",
     "EpoOpsBackend",
+    "EpoXmlError",
+    "DateRange",
+    "Group",
+    "Term",
+    "OpsAuthError",
+    "OpsBudgetExceeded",
+    "OpsError",
+    "OpsUnavailable",
+    "PROFILE_EPO_OPS_XML",
+    "QUOTA_WARN_RATIO",
+    "QuotaExceeded",
+    "QuotaLedger",
+    "QuotaState",
+    "Throttled",
+    "WEEKLY_QUOTA_BYTES",
     "check_credentials",
     "describe_all",
     "BackendStatus",

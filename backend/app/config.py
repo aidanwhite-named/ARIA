@@ -601,4 +601,19 @@ DEFAULTS: dict[str, object] = {
     "epo_integration_enabled": False,
     "epo_consumer_key": "",
     "epo_consumer_secret": "",
+    # OPS 네트워크 시간 예산(초). EPO 채널 전체 벽시계와 **다른 축**이다.
+    # 그쪽은 LLM 턴을 포함하므로 훨씬 길고, 이 값은 순수 HTTP 대기 시간이다.
+    # 하나로 묶으면 모델이 오래 생각한 실행에서 OPS 호출이 남은 예산 없이
+    # 시작되고, 그 실패가 "EPO 가 느리다"로 기록된다.
+    "epo_http_budget_seconds": 120,
+    # 시간당 사용량 상한(bytes). 0 = 관측·표시만 하고 차단하지 않음(기본값).
+    # 주간 4GB 는 계약값이라 코드에 상수로 박혀 있지만(epo_quota), 시간당
+    # 상한은 우리 쪽에 확정값이 없다. 모르는 숫자를 기본값으로 두면 "왜
+    # 멈췄지"에 답할 수 없으므로 사용자가 넣을 때만 건다.
+    "epo_hourly_quota_bytes": 0,
+    # 한 실행에서 상세 조회(청구항·설명)할 후보 수 상한.
+    "epo_max_detail_fetches": 12,
+    # ARIA 가 관측해 적는 사용량 상태. 사용자가 편집하는 값이 아니므로
+    # settings_service.EDITABLE_KEYS 에 없다. 화면에는 보여 준다.
+    "epo_quota_state": {},
 }

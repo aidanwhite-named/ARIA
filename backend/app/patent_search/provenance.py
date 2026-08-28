@@ -48,7 +48,15 @@ import unicodedata
 from dataclasses import dataclass
 
 from . import artifacts, parsers, policy as policy_module
-from .base import ORIGINAL_SOURCE_KINDS, EvidenceRef, FieldValue, PatentRecord
+from .base import (
+    ORIGINAL_SOURCE_KINDS,
+    TRANSLATION_NO,
+    TRANSLATION_UNKNOWN,
+    TRANSLATION_YES,
+    EvidenceRef,
+    FieldValue,
+    PatentRecord,
+)
 
 # 대조 결과.
 MATCH_NONE = "none"              # 재추출한 값에서 찾지 못했거나 검증 불가
@@ -63,7 +71,7 @@ class ExcerptVerification:
 
     match_kind: str = MATCH_NONE
     source_kind: str = ""
-    is_translation: bool = False
+    translation_state: str = TRANSLATION_UNKNOWN
     language: str = ""
     match_span: tuple[int, int] | None = None
     evidence: EvidenceRef | None = None
@@ -79,6 +87,15 @@ class ExcerptVerification:
     def verified(self) -> bool:
         """어떤 형태로든 보존 아티팩트에서 확인되었는가."""
         return self.match_kind in (MATCH_EXACT, MATCH_NORMALIZED)
+
+    @property
+    def is_translation(self) -> bool:
+        """번역이라고 **확인된** 경우에만 참.
+
+        unknown 을 거짓으로 읽으면 "번역이 아니다"라는 진술이 되어 버린다.
+        원문 등급 판정은 이 값이 아니라 translation_state 를 직접 본다.
+        """
+        return self.translation_state == TRANSLATION_YES
 
 
 def _normalize(value: str) -> str:
@@ -153,7 +170,8 @@ def verify_excerpt(
         and extracted.raw_capable
         and match_kind == MATCH_EXACT
         and extracted.source_kind in ORIGINAL_SOURCE_KINDS
-        and not extracted.is_translation
+        # unknown 은 no 가 아니다. 모르면 막는다.
+        and extracted.translation_state == TRANSLATION_NO
     )
 
     if match_kind == MATCH_EXACT and not original and not reason:
@@ -163,6 +181,11 @@ def verify_excerpt(
             reason = (
                 f"프로필 {extracted.profile_id} 는 공식 원문을 증명하지 "
                 f"못합니다(raw_capable=False)."
+            )
+        elif extracted.translation_state == TRANSLATION_UNKNOWN:
+            reason = (
+                "이 필드가 원문인지 번역인지 확인되지 않아 원문 등급을 "
+                "부여하지 않습니다(translation_state=unknown)."
             )
         elif extracted.is_translation:
             reason = "번역 필드이므로 원문 등급을 부여하지 않습니다."
@@ -175,7 +198,7 @@ def verify_excerpt(
     return ExcerptVerification(
         match_kind=match_kind,
         source_kind=extracted.source_kind,
-        is_translation=extracted.is_translation,
+        translation_state=extracted.translation_state,
         language=extracted.language,
         match_span=span,
         evidence=evidence,

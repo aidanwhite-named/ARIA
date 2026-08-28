@@ -40,6 +40,7 @@ def _payload(session: Session) -> SettingsOut:
         runs_dir=str(PATHS.runs_dir),
         env_filtering=describe_filtering(),
         secrets_set=settings_service.secrets_set(values),
+        epo_quota=settings_service.epo_quota_snapshot(values),
     )
 
 

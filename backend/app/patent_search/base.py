@@ -72,6 +72,19 @@ SOURCE_KINDS = (
 # 재구성한 XML 은 공식 문헌과 문자가 다를 수 있다.
 ORIGINAL_SOURCE_KINDS = frozenset({SOURCE_OFFICIAL_XML})
 
+# --- 번역 여부 ------------------------------------------------------------
+#
+# 불리언으로 두면 "번역이 아니다"와 "번역인지 모른다"가 같은 값이 된다. 그
+# 둘은 감사 기록에서 전혀 다른 진술이다 — 앞은 확인한 사실이고 뒤는 확인하지
+# 못했다는 고백이다. EPO OPS 처럼 문헌마다 원문일 수도 번역일 수도 있는
+# 응답에서 unknown 을 False 로 적으면, 기록이 실제로 아는 것보다 강해진다.
+#
+# 원문 등급은 **NO 일 때만** 나온다. UNKNOWN 은 YES 와 똑같이 막는다.
+TRANSLATION_NO = "no"
+TRANSLATION_YES = "yes"
+TRANSLATION_UNKNOWN = "unknown"
+TRANSLATION_STATES = (TRANSLATION_NO, TRANSLATION_YES, TRANSLATION_UNKNOWN)
+
 
 @dataclass(frozen=True)
 class EvidenceRef:
@@ -143,6 +156,10 @@ class PatentSearchResponse:
     total_found: int
     raw_artifact_id: str = ""
     fetched_at: str = ""
+    # 이 검색에서 ARIA 가 사용자에게 알려야 하는 사실. 지금은 "검색어가 길어
+    # 뒤쪽 단어를 뺐다" 같은 것이다. 조용히 바뀐 검색을 기록 없이 넘기지
+    # 않으려고 둔 자리다.
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

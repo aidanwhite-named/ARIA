@@ -333,6 +333,9 @@ class SettingsOut(BaseModel):
     # 이쪽뿐이다 — values 의 빈 문자열로는 '지워졌다'와 '가려졌다'를 구별할 수
     # 없다.
     secrets_set: dict[str, bool] = Field(default_factory=dict)
+    # EPO OPS 사용량. values 의 날것 상태가 아니라 한도·남은 양까지 계산된 값
+    # 이다. 화면과 경고 문구가 같은 숫자를 봐야 하기 때문이다.
+    epo_quota: dict[str, Any] = Field(default_factory=dict)
 
 
 class SettingsUpdate(BaseModel):

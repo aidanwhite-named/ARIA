@@ -1,7 +1,7 @@
 """EPO OPS 연동 — 설정 배선, 자격증명 가림, 토큰 확인.
 
-이 파일의 어떤 테스트도 실제 네트워크를 열지 않는다. check_credentials 는
-urlopen 을 가짜로 바꿔서만 부른다.
+이 파일의 어떤 테스트도 실제 네트워크를 열지 않는다. EPO 로 나가는 경로는
+epo_client._live_transport 하나뿐이고, 여기서는 그것만 가짜로 바꾼다.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import pytest
 
 from app import patent_search, settings_service
 from app.config import DEFAULTS
-from app.patent_search import epo_backend
+from app.patent_search import epo_backend, epo_client
 
 
 # ------------------------------------------------------------------ 설정 배선
@@ -57,8 +57,13 @@ def test_get_backend_injects_credentials() -> None:
     assert backend.has_credentials is True
 
 
-def test_status_separates_credentials_from_wiring() -> None:
-    """자격증명이 있어도 configured 는 False 다 — 검색 배선이 없기 때문이다."""
+def test_configured_follows_credentials() -> None:
+    """검색이 배선된 뒤로 configured 는 곧 '자격증명이 있는가'다.
+
+    예전에는 자격증명이 있어도 False 였다(검색 경로가 없었으므로). 그 구분은
+    이제 다른 축으로 옮겨 갔다 — 증거 등급의 상한이 exact 이고 raw 는 나오지
+    않는다는 사실이며, test_epo_search 가 그쪽을 지킨다.
+    """
     on = {epo_backend.SETTING_ENABLED: True}
     without = patent_search.describe(on, "epo")
     assert without.enabled is True and without.configured is False
@@ -72,18 +77,18 @@ def test_status_separates_credentials_from_wiring() -> None:
         },
         "epo",
     )
-    assert with_creds.configured is False
-    assert "검색 경로" in with_creds.detail
+    assert with_creds.configured is True
+    assert "원문" in with_creds.detail
 
 
-def test_search_never_opens_network() -> None:
+def test_search_without_credentials_never_opens_network() -> None:
+    """자격증명이 없으면 네트워크를 열기 전에 멈춘다.
+
+    conftest 의 block_epo_network 가 실제 요청을 막으므로, 이 테스트가 조용히
+    바깥으로 나가는 일은 없다.
+    """
     backend = epo_backend.EpoOpsBackend()
-    backend.configure(
-        {
-            epo_backend.SETTING_CONSUMER_KEY: "key",
-            epo_backend.SETTING_CONSUMER_SECRET: "secret",
-        }
-    )
+    backend.configure({})
     with pytest.raises(patent_search.PatentSearchNotConfigured):
         backend.search(patent_search.PatentSearchQuery(text="anything"))
 
@@ -96,8 +101,13 @@ def test_describe_all_covers_every_backend() -> None:
 # ------------------------------------------------------------- 자격증명 검증
 
 
-def test_credentials_reject_whitespace(client) -> None:
-    """붙여넣기로 딸려 온 줄바꿈은 조용히 자르지 않고 거절한다."""
+def test_credentials_reject_inner_whitespace(client) -> None:
+    """값 **가운데** 공백은 잘못 복사된 값이므로 거절한다.
+
+    앞뒤 공백과 다르게 다룬다. 그 차이는 화면 안내에도 그대로 적혀 있어야
+    한다 — 안내는 "거절한다"고 하는데 코드가 조용히 잘라내면, 사용자는 자기가
+    넣은 값과 저장된 값이 다르다는 사실을 모른다.
+    """
     response = client.put(
         "/api/settings", json={"values": {"epo_consumer_key": "abc def"}}
     )
@@ -106,6 +116,16 @@ def test_credentials_reject_whitespace(client) -> None:
         "/api/settings", json={"values": {"epo_consumer_secret": "x" * 300}}
     )
     assert response.status_code == 400
+
+
+def test_credentials_trim_paste_whitespace(client) -> None:
+    """앞뒤 공백·줄바꿈은 붙여넣기 부산물로 보고 잘라낸다. 화면 안내와 같다."""
+    updated = client.put(
+        "/api/settings",
+        json={"values": {"epo_consumer_key": "  PASTEDKEY\n"}},
+    ).json()
+    assert updated["values"]["epo_consumer_key"] == "PASTEDKEY"
+    client.put("/api/settings", json={"values": {"epo_consumer_key": ""}})
 
 
 def test_secret_is_stored_but_never_returned(client) -> None:
@@ -154,30 +174,29 @@ def test_check_endpoint_refuses_when_integration_off(client) -> None:
 # ------------------------------------------------------------- 토큰 확인 로직
 
 
-class _FakeResponse(io.BytesIO):
-    status = 200
+def _patch_transport(monkeypatch, handler) -> dict:
+    """check_credentials 가 쓰는 전송 계층을 가짜로 바꾼다.
 
-    def __enter__(self):  # noqa: D105
-        return self
-
-    def __exit__(self, *exc):  # noqa: D105
-        self.close()
-        return False
-
-
-def _patch_urlopen(monkeypatch, handler) -> dict:
+    EPO 로 나가는 경로는 epo_client._live_transport 하나뿐이므로 여기만 막으면
+    된다. 예전에는 urllib.request.urlopen 을 프로세스 전역에서 바꿨는데, 그러면
+    EPO 와 무관한 코드까지 영향을 받는다.
+    """
     seen: dict = {}
 
-    def fake_urlopen(request, timeout=None, context=None):
+    def fake_transport(request, timeout=None):
         seen["url"] = request.full_url
         seen["method"] = request.get_method()
         seen["headers"] = dict(request.header_items())
         seen["data"] = request.data
-        seen["context"] = context
+        seen["timeout"] = timeout
         return handler()
 
-    monkeypatch.setattr(epo_backend.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(epo_client, "_live_transport", fake_transport)
     return seen
+
+
+def response(body: bytes, status: int = 200) -> epo_client.HttpResponse:
+    return epo_client.HttpResponse(status=status, headers={}, body=body)
 
 
 def test_check_requires_both_values() -> None:
@@ -186,9 +205,9 @@ def test_check_requires_both_values() -> None:
 
 
 def test_check_success(monkeypatch) -> None:
-    seen = _patch_urlopen(
+    seen = _patch_transport(
         monkeypatch,
-        lambda: _FakeResponse(
+        lambda: response(
             json.dumps({"access_token": "tok", "expires_in": "1200"}).encode()
         ),
     )
@@ -196,30 +215,45 @@ def test_check_success(monkeypatch) -> None:
     assert result.ok is True and result.expires_in == 1200
     # 토큰은 결과 어디에도 실리지 않는다.
     assert "tok" not in result.detail
-    # client_credentials 를 상수 주소로만 보낸다. 인증서 검증은 켜져 있다.
-    assert seen["url"] == epo_backend.TOKEN_URL
+    # client_credentials 를 상수 주소로만 보낸다.
+    assert seen["url"] == epo_client.TOKEN_URL
     assert seen["method"] == "POST"
     assert seen["data"] == b"grant_type=client_credentials"
     assert seen["headers"]["Authorization"].startswith("Basic ")
-    assert seen["context"].verify_mode == ssl.CERT_REQUIRED
+
+
+def test_check_uses_the_same_transport_as_search() -> None:
+    """EPO 로 나가는 경로는 하나여야 한다.
+
+    둘이면 인증서 정책도 둘이 되고, 테스트에서 막을 지점도 둘이 된다. 실제로
+    두 번째 경로를 막으려다 urllib.request.urlopen 을 프로세스 전역에서
+    바꿔 버린 적이 있다.
+    """
+    assert epo_backend.TOKEN_URL == epo_client.TOKEN_URL
+
+
+def test_check_verifies_certificates() -> None:
+    """인증서 검증을 끄지 않는다. 전송 계층이 기본 컨텍스트를 쓴다."""
+    source = io.open(
+        epo_client.__file__, encoding="utf-8"
+    ).read()
+    assert "ssl.create_default_context()" in source
+    assert "CERT_NONE" not in source
+    assert "check_hostname = False" not in source
 
 
 def test_check_rejects_response_without_token(monkeypatch) -> None:
-    _patch_urlopen(monkeypatch, lambda: _FakeResponse(json.dumps({"ok": 1}).encode()))
+    _patch_transport(monkeypatch, lambda: response(json.dumps({"ok": 1}).encode()))
     assert epo_backend.check_credentials("key", "secret").ok is False
 
 
 def test_check_maps_401(monkeypatch) -> None:
-    def raise_401():
-        raise urllib.error.HTTPError(
-            epo_backend.TOKEN_URL,
-            401,
-            "Unauthorized",
-            {},
-            io.BytesIO(json.dumps({"description": "invalid client"}).encode()),
-        )
-
-    _patch_urlopen(monkeypatch, raise_401)
+    _patch_transport(
+        monkeypatch,
+        lambda: response(
+            json.dumps({"description": "invalid client"}).encode(), status=401
+        ),
+    )
     result = epo_backend.check_credentials("key", "secret")
     assert result.ok is False and result.http_status == 401
     assert "invalid client" in result.detail
@@ -227,36 +261,21 @@ def test_check_maps_401(monkeypatch) -> None:
 
 def test_check_redacts_credentials_echoed_back(monkeypatch) -> None:
     """중간 장비가 요청 헤더를 오류 페이지에 찍어도 화면으로 새지 않는다."""
-
-    def raise_400():
-        raise urllib.error.HTTPError(
-            epo_backend.TOKEN_URL,
-            400,
-            "Bad Request",
-            {},
-            io.BytesIO(b"rejected key=THEKEY secret=THESECRET"),
-        )
-
-    _patch_urlopen(monkeypatch, raise_400)
+    _patch_transport(
+        monkeypatch,
+        lambda: response(b"rejected key=THEKEY secret=THESECRET", status=400),
+    )
     result = epo_backend.check_credentials("THEKEY", "THESECRET")
     assert "THEKEY" not in result.detail and "THESECRET" not in result.detail
 
 
 def test_check_redacts_the_basic_authorization_value(monkeypatch) -> None:
     """프록시가 Authorization 헤더를 반사해도 Base64 자격증명이 새지 않는다."""
-
     encoded = base64.b64encode(b"THEKEY:THESECRET").decode("ascii")
-
-    def raise_400():
-        raise urllib.error.HTTPError(
-            epo_backend.TOKEN_URL,
-            400,
-            "Bad Request",
-            {},
-            io.BytesIO(f"Authorization: Basic {encoded}".encode()),
-        )
-
-    _patch_urlopen(monkeypatch, raise_400)
+    _patch_transport(
+        monkeypatch,
+        lambda: response(f"Authorization: Basic {encoded}".encode(), status=400),
+    )
     result = epo_backend.check_credentials("THEKEY", "THESECRET")
     assert encoded not in result.detail
     assert f"Basic {encoded}" not in result.detail
@@ -268,7 +287,7 @@ def test_check_reports_tls_failure_without_bypassing(monkeypatch) -> None:
             ssl.SSLCertVerificationError("certificate verify failed")
         )
 
-    _patch_urlopen(monkeypatch, raise_tls)
+    _patch_transport(monkeypatch, raise_tls)
     result = epo_backend.check_credentials("key", "secret")
     assert result.ok is False
     assert "인증서" in result.detail
@@ -278,5 +297,5 @@ def test_check_reports_connection_failure(monkeypatch) -> None:
     def raise_conn():
         raise urllib.error.URLError(OSError("no route to host"))
 
-    _patch_urlopen(monkeypatch, raise_conn)
+    _patch_transport(monkeypatch, raise_conn)
     assert epo_backend.check_credentials("key", "secret").ok is False
