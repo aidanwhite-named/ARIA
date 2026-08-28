@@ -1088,6 +1088,21 @@ class JobRunner:
                 verdict = failed_lane or evaluate(
                     outcome, attachments, fail_on_tool_use=fail_on_tool_use
                 )
+                # EPO 는 보조 채널이라 서버·인증·쿼터 실패가 웹 결과를
+                # 무효화하지는 않는다. 하지만 사용자가 누른 **작업 취소**는
+                # 별개다. EPO 레인이 취소를 확인한 뒤에도 웹의 성공 verdict 를
+                # 그대로 두면, 사용자가 멈춘 작업이 마지막에 SUCCEEDED 로
+                # 덮어써진다.
+                #
+                # 여기서 바로 return 하지 않는 이유는 이미 끝난 웹 결과와 EPO
+                # 부분 실행 기록을 아래 manifest 에 보존하기 위해서다. 최종 상태만
+                # CANCELLED 로 확정하고 정상적인 저장 경로를 끝까지 지난다.
+                if job_id in self._cancel_requested:
+                    verdict = Verdict(
+                        JobStatus.CANCELLED,
+                        ErrorCode.CANCELLED,
+                        list(verdict.errors),
+                    )
             else:
                 if await self._reject_if_over_byte_budget(
                     job_id,
