@@ -93,6 +93,35 @@ class OpsUnavailable(OpsError):
     """일시적 오류가 재시도 후에도 계속된다."""
 
 
+class OpsCancelled(OpsError):
+    """사용자가 실행을 취소했다.
+
+    재시도 대기 중에도 던져진다. Retry-After 로 20초를 기다리는 동안 취소를
+    못 보면, 사용자가 멈춘 실행이 20초 더 살아 있으면서 할당량을 쓴다.
+    """
+
+
+def cancellable_sleep(is_cancelled, *, slice_seconds: float = 0.1, sleep=time.sleep):
+    """취소를 볼 수 있는 대기 함수를 만든다.
+
+    통째로 자면 그 시간 동안 취소가 반영되지 않는다. 잘게 나눠 자면서 매번
+    확인하고, 취소면 남은 시간을 버리고 즉시 멈춘다.
+    """
+
+    def _sleep(seconds: float) -> None:
+        if is_cancelled():
+            raise OpsCancelled("사용자가 실행을 취소했습니다.")
+        remaining = max(0.0, float(seconds or 0.0))
+        while remaining > 0:
+            step = min(slice_seconds, remaining)
+            sleep(step)
+            remaining -= step
+            if is_cancelled():
+                raise OpsCancelled("사용자가 실행을 취소했습니다.")
+
+    return _sleep
+
+
 def scrub(text: str, *secrets: str) -> str:
     """문자열에서 자격증명 조각을 지운다.
 

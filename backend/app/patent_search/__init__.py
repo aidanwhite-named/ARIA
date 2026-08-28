@@ -64,10 +64,18 @@ from .epo_backend import (
     EpoOpsBackend,
     check_credentials,
 )
+from .epo_actions import ActionError as EpoActionError, parse_response
+from .epo_agent import (
+    TERMINATION_REASONS,
+    EpoAgentBudget,
+    EpoSearchAgent,
+    EpoSearchRun,
+)
 from .epo_client import (
     MAX_RESULTS_PER_QUERY as EPO_MAX_RESULTS_PER_QUERY,
     OpsAuthError,
     OpsBudgetExceeded,
+    OpsCancelled,
     OpsError,
     OpsUnavailable,
 )
@@ -144,8 +152,15 @@ __all__ = [
     "DateRange",
     "Group",
     "Term",
+    "EpoActionError",
+    "EpoAgentBudget",
+    "EpoSearchAgent",
+    "EpoSearchRun",
+    "TERMINATION_REASONS",
+    "parse_response",
     "OpsAuthError",
     "OpsBudgetExceeded",
+    "OpsCancelled",
     "OpsError",
     "OpsUnavailable",
     "PROFILE_EPO_OPS_XML",
