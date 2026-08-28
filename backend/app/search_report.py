@@ -573,10 +573,4 @@ def render(manifest: dict) -> str:
         lines += [f"- `{query}`" for query in queries]
         lines.append("")
 
-    notes = manifest.get("normalization_notes") or []
-    if notes:
-        lines += ["## ARIA 가 조정한 증거 등급", ""]
-        lines += [f"- {note}" for note in notes]
-        lines.append("")
-
     return "\n".join(lines).rstrip() + "\n"

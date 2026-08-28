@@ -217,7 +217,11 @@ class AgentResponse(_Base):
 _FENCE = re.compile(r"```(?:json)?\s*(?P<body>.*?)```", re.DOTALL)
 
 
-DEPTH_LIMIT = MAX_QUERY_DEPTH + 2
+# JSON 컨테이너(dict/list) 중첩 깊이 상한.
+# AgentResponse(dict) -> actions(list) -> EpoSearch(dict) -> query(dict) -> items(list) -> ...
+# 질의 트리 단계마다 dict + list 2단계가 생기므로, 유효한 MAX_QUERY_DEPTH(6단계) 질의를
+# 수용하려면 약 18~24 수준이 필요하다. 재귀 공격(수천 단계)은 안전하게 차단한다.
+DEPTH_LIMIT = MAX_QUERY_DEPTH * 3 + 6
 
 
 def _depth(value) -> int:
@@ -289,6 +293,10 @@ def _candidate_payloads(text: str) -> list[str]:
     end = text.rfind("}")
     if start != -1 and end > start:
         candidates.append(text[start : end + 1])
+    start_arr = text.find("[")
+    end_arr = text.rfind("]")
+    if start_arr != -1 and end_arr > start_arr:
+        candidates.append(text[start_arr : end_arr + 1])
     return candidates
 
 
@@ -322,8 +330,16 @@ def parse_response(text: str) -> AgentResponse:
             # 어떤 경로로도 이 함수 밖으로 RecursionError 를 내보내지 않는다.
             last_error = too_deep
             continue
-        if not isinstance(data, dict):
-            last_error = "최상위가 객체가 아닙니다."
+        if isinstance(data, list):
+            data = {"actions": data}
+        elif isinstance(data, dict):
+            # 모델이 최상위에 단일 action 객체를 직접 준 경우(예: {"action": "epo_search", ...})
+            # AgentResponse 스키마에 맞게 actions 리스트로 감싼다.
+            if "action" in data and "actions" not in data:
+                strategy = str(data.get("strategy", "") or "")
+                data = {"strategy": strategy, "actions": [data]}
+        else:
+            last_error = "최상위가 객체 또는 배열이 아닙니다."
             continue
         if _depth(data) > DEPTH_LIMIT:
             last_error = too_deep

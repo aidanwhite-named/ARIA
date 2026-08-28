@@ -177,6 +177,88 @@ def test_agy_search_ignores_extra_advertised_tools_but_checks_actual_calls() -> 
     assert forbidden.error_code == ErrorCode.TOOL_POLICY_VIOLATION
 
 
+def test_agy_headless_read_url_denial_is_not_reported_as_empty_result() -> None:
+    """agy 의 soft-deny + 빈 SUCCESS 는 원인 그대로 사용자에게 보여 준다."""
+    outcome = ExecutionOutcome(
+        result_text="",
+        exit_code=0,
+        terminal_reason="SUCCESS",
+        usage={"input_tokens": 100},
+        tool_policy=AGY_WEB_SEARCH,
+        tool_uses=["search_web", "read_url_content"],
+        tool_calls=[
+            {
+                "name": "search_web",
+                "input": {"query": "radar patent"},
+                "ok": True,
+                "error": None,
+            },
+            {
+                "name": "read_url_content",
+                "input": {
+                    "url": "https://patents.google.com/patent/KR102477584B1/en"
+                },
+                "ok": False,
+                "error": (
+                    'permission check failed for read_url "patents.google.com": '
+                    "user denied permission for read_url(patents.google.com)"
+                ),
+            },
+        ],
+        raw_stderr=(
+            'a tool required the "read_url" permission that headless mode cannot '
+            "prompt for, so it was auto-denied"
+        ),
+    )
+
+    verdict = evaluate(outcome)
+
+    assert verdict.status == JobStatus.FAILED
+    assert verdict.error_code == ErrorCode.SEARCH_PERMISSION_DENIED
+    assert "read_url(patents.google.com)" in " ".join(verdict.errors)
+
+
+def test_agy_permission_denial_does_not_discard_a_nonempty_search_report() -> None:
+    """모델이 접근 실패를 포함한 보고서를 냈다면 한 URL 거부만으로 폐기하지 않는다."""
+    outcome = _ok(
+        tool_policy=AGY_WEB_SEARCH,
+        tool_uses=["search_web", "read_url_content"],
+        tool_calls=[
+            {
+                "name": "read_url_content",
+                "input": {"url": "https://paywall.example.com/paper"},
+                "ok": False,
+                "error": "permission check failed: user denied permission",
+            }
+        ],
+    )
+
+    verdict = evaluate(outcome)
+
+    assert verdict.status == JobStatus.SUCCEEDED
+    assert verdict.error_code is None
+
+
+def test_agy_headless_stderr_denial_is_detected_without_a_tool_error_record() -> None:
+    """Provider 가 거부 원인을 stderr 에만 남겨도 EMPTY_RESULT 로 뭉개지 않는다."""
+    outcome = ExecutionOutcome(
+        result_text="",
+        exit_code=0,
+        usage={"input_tokens": 100},
+        tool_policy=AGY_WEB_SEARCH,
+        tool_uses=["search_web"],
+        raw_stderr=(
+            'a tool required the "read_url" permission that headless mode cannot '
+            "prompt for, so it was auto-denied"
+        ),
+    )
+
+    verdict = evaluate(outcome)
+
+    assert verdict.error_code == ErrorCode.SEARCH_PERMISSION_DENIED
+    assert "웹페이지 읽기 권한" in " ".join(verdict.errors)
+
+
 def test_global_optout_cannot_widen_search_allowlist() -> None:
     """fail_on_tool_use 를 꺼도 검색의 허용 목록은 넓어지지 않는다."""
     verdict = evaluate(

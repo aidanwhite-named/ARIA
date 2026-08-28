@@ -353,6 +353,13 @@ ARIA 는 항상 `--disable-slash-commands` 로 실행하므로 plan 모드는 �
 - 도구 호출 시 항상 실패 처리 — `fail_on_tool_use` 설정으로도 완화 불가
 - 구형 `gemini` 명령으로 폴백하지 않음 (계약이 달라 조용히 오작동함)
 
+유사문헌 검색의 `read_url_content` 는 headless 실행에서 승인 창을 열 수 없다.
+필요한 출처만 agy 전역 설정의 `permissions.allow` 에 호스트 단위로 허용한다.
+예를 들어 Google Patents 는 `read_url(patents.google.com)` 이다. `read_url(*)` 나
+`read_url(google.com)` 처럼 범위를 넓히지 않는다. 권한이 없으면 agy 는 종료 코드
+0과 빈 응답을 돌려줄 수 있으며, ARIA 는 이를 `SEARCH_PERMISSION_DENIED` 로
+구분해 표시한다.
+
 **신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.**
 
 긴 프롬프트는 `-p` 인수가 아니라 stdin 으로 전달합니다. Windows 명령행 길이

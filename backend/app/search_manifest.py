@@ -48,13 +48,22 @@ MANIFEST_VERSION = 6
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
+# 구분자는 반드시 독립된 줄이어야 한다. 모델이 보고서 앞에서
+# ``[ARIA_SEARCH_LOG_V1] ... [/ARIA_SEARCH_LOG_V1] 형식으로 쓰겠습니다``라고
+# 설명할 때 그 인라인 예시까지 블록으로 세면, 실제 JSON 블록 하나를 정상적으로
+# 냈는데도 "2개"로 오판한다. 줄 시작/끝을 고정하되 들여쓰기와 코드펜스는
+# 허용한다.
 _BLOCK = re.compile(
-    r"(?:```[\w-]*\s*\n)?"
+    r"(?:^[ \t]*```[\w-]*[ \t]*\r?\n)?"
+    r"^[ \t]*"
     + re.escape(_OPEN)
-    + r"\s*(?P<payload>.*?)\s*"
+    + r"[ \t]*\r?\n"
+    r"(?P<payload>.*?)"
+    r"^[ \t]*"
     + re.escape(_CLOSE)
-    + r"(?:\s*\n```)?",
-    re.DOTALL,
+    + r"[ \t]*(?:\r?\n|$)"
+    r"(?:^[ \t]*```[ \t]*(?:\r?\n|$))?",
+    re.DOTALL | re.MULTILINE,
 )
 
 # 검색 채널. 값 자체는 후보 항목에 남으므로 채널별 집계가 가능하다.

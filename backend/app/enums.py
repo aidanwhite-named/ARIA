@@ -42,6 +42,10 @@ class ErrorCode(StrEnum):
     SEARCH_BUDGET_EXCEEDED = "SEARCH_BUDGET_EXCEEDED"
     # 검색 프롬프트 파일을 읽지 못했거나 placeholder 가 없다.
     SEARCH_PROMPT_ERROR = "SEARCH_PROMPT_ERROR"
+    # 비대화형 Provider 가 검색/페이지 열람 권한을 요청했지만 승인할 사람이 없어
+    # 거부됐다. agy 는 이 경우에도 종료 코드 0 과 빈 응답을 돌려줄 수 있으므로
+    # EMPTY_RESULT 보다 먼저 구분해야 한다.
+    SEARCH_PERMISSION_DENIED = "SEARCH_PERMISSION_DENIED"
     # 로컬 검색(retrieval) 전용.
     # 이 실행 환경에서 로컬 검색 인덱스를 만들 수 없거나(FTS5 없음), 색인할 수
     # 있는 문헌이 하나도 없다. 검색 없이 근거를 지어내지 않으므로 실패시킨다.

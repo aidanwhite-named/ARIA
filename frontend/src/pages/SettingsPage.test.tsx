@@ -153,4 +153,26 @@ describe("대용량 인용발명 전달 방식", () => {
     const { container } = await renderPage();
     expect(container.textContent).toContain("없음 (전부 대체값 사용)");
   });
+
+  it("내부 실행 한도는 설정 화면에 노출하지 않는다", async () => {
+    const { container } = await renderPage();
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("실행 한도");
+    expect(text).not.toContain("파일 1개 최대 크기");
+    expect(text).not.toContain("실행 제한 시간 (초)");
+    expect(text).not.toContain("검색 1회당 최대 도구 호출 수");
+    expect(text).not.toContain("raw stdout/stderr 를 파일로 보존");
+  });
+
+  it("특허 연동 카드를 전체 폭 대상으로 표시하고 설명을 간결하게 유지한다", async () => {
+    const { container } = await renderPage();
+    expect(container.querySelector(".settings-kiwee")).toBeTruthy();
+    expect(container.querySelector(".settings-epo")).toBeTruthy();
+    expect(container.textContent).toContain(
+      "Kiwee 특허 DB를 유사문헌 검색 경로에 추가합니다.",
+    );
+    expect(container.textContent).toContain(
+      "EPO OPS API로 특허를 검색하고 받은 XML과 결과를 대조합니다.",
+    );
+  });
 });

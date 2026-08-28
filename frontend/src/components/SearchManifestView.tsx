@@ -314,7 +314,6 @@ export default function SearchManifestView({ job }: { job: Job }) {
   const foundByBoth = candidates.filter(
     (candidate) => (candidate.search_origins ?? []).length > 1,
   ).length;
-  const notes = manifest.normalization_notes ?? [];
   const focus = manifest.input?.search_focus ?? null;
 
   return (
@@ -327,17 +326,6 @@ export default function SearchManifestView({ job }: { job: Job }) {
             검증되지 않은 모델 출력을 보고서로 내보내지 않습니다. 모델 원문과
             아래 실제 검색 기록은 그대로 남아 있습니다.
           </div>
-        </div>
-      )}
-
-      {notes.length > 0 && (
-        <div className="notice info">
-          <strong>ARIA 가 증거 등급을 조정했습니다</strong>
-          <ul>
-            {notes.map((note, i) => (
-              <li key={i}>{note}</li>
-            ))}
-          </ul>
         </div>
       )}
 

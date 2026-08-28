@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from ..enums import DeliveryMode, ErrorCode, JobStatus
 from ..ingestion.service import IngestedFile
@@ -43,6 +44,19 @@ from ..providers.base import NO_TOOLS, ExecutionOutcome, ToolPolicy
 # function" 같은 정상 기술 문구는 걸리지 않는다. 숫자가 없기 때문이다.
 _PROVIDER_TRUNCATION = re.compile(
     r"(?:<|\\u003[cC])truncated\s+(\d+)\s+bytes(?:>|\\u003[eE])"
+)
+
+# agy 1.1.22 는 headless 실행에서 승인할 수 없는 도구를 soft-deny 한 뒤에도
+# 종료 코드 0 / status SUCCESS 를 돌려준다. 최종 응답까지 비면 일반적인
+# EMPTY_RESULT 로 보이므로, 도구 호출 기록과 stderr 에 남는 실제 원인을 먼저
+# 찾는다. 단순히 "permission" 이 들어간 모든 문장을 잡으면 사용 설명까지
+# 오탐하므로 실측한 거부 표현만 받는다.
+_PERMISSION_DENIAL_MARKERS = (
+    "permission check failed",
+    "permission denied",
+    "denied permission",
+    "user denied permission",
+    "auto-denied",
 )
 
 
@@ -99,6 +113,57 @@ def _input_tokens(usage: dict | None) -> int | None:
         if isinstance(value, int):
             return value
     return None
+
+
+def _is_permission_denial(value: object) -> bool:
+    text = str(value or "").lower()
+    return any(marker in text for marker in _PERMISSION_DENIAL_MARKERS)
+
+
+def _search_permission_denial(
+    outcome: ExecutionOutcome,
+) -> tuple[list[str], list[str]] | None:
+    """검색 도구 권한 거부가 있으면 (도구 표시, 호스트) 를 돌려준다.
+
+    호출 기록이 가장 강한 근거다. 일부 Provider 는 거부를 stderr 에만 남기므로
+    structured permission_denials 와 raw_stderr 도 보조 근거로 본다. 이 함수는
+    검색 정책 + 빈 최종 응답인 경우에만 호출된다. 정상 보고서가 있으면 접근 실패를
+    access_failures 로 설명할 수 있으므로, 한 URL 의 거부만으로 결과를 폐기하지 않는다.
+    """
+
+    labels: list[str] = []
+    hosts: list[str] = []
+    denied = False
+
+    for call in outcome.tool_calls:
+        if not isinstance(call, dict) or not _is_permission_denial(call.get("error")):
+            continue
+        denied = True
+        name = str(call.get("name") or "도구")
+        raw_input = call.get("input")
+        url = ""
+        if isinstance(raw_input, dict):
+            url = str(raw_input.get("url") or raw_input.get("Url") or "")
+        host = urlsplit(url).hostname or ""
+        label = f"{name} ({host})" if host else name
+        if label not in labels:
+            labels.append(label)
+        if host and host not in hosts:
+            hosts.append(host)
+
+    if outcome.permission_denials:
+        denied = True
+        for entry in outcome.permission_denials:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("tool") or entry.get("name") or "")
+            if name and name not in labels:
+                labels.append(name)
+
+    if _is_permission_denial(outcome.raw_stderr):
+        denied = True
+
+    return (labels, hosts) if denied else None
 
 
 def effective_policy(outcome: ExecutionOutcome) -> ToolPolicy | None:
@@ -280,6 +345,37 @@ def evaluate(
                 "모델이 기억에서 작성한 것이므로 검토 후보로 쓸 수 없습니다."
             )
             return Verdict(JobStatus.FAILED, ErrorCode.SEARCH_NOT_PERFORMED, errors)
+
+    # --- headless 검색 도구 권한 거부 ---------------------------------------
+    # agy 는 권한 거부를 soft-deny 로 취급해 exit 0 / SUCCESS 로 끝낼 수 있다.
+    # 검색 자체가 없었던 경우는 위 SEARCH_NOT_PERFORMED 가 우선하고, 검색은 했지만
+    # 권한 거부 뒤 최종 응답이 빈 경우에만 이 원인을 EMPTY_RESULT 보다 먼저 알린다.
+    if policy is not None and not outcome.result_text.strip():
+        permission_denial = _search_permission_denial(outcome)
+        if permission_denial is not None:
+            labels, hosts = permission_denial
+            target = ": " + ", ".join(labels) if labels else ""
+            message = (
+                f"검색 중 필요한 웹페이지 읽기 권한이 거부되었습니다{target}. "
+                "비대화형 실행에서는 승인 요청에 답할 수 없습니다. "
+            )
+            if policy.name == "agy_web_search" and hosts:
+                rules = ", ".join(f"read_url({host})" for host in hosts)
+                message += (
+                    "agy의 permissions.allow에 다음 규칙을 허용한 뒤 다시 "
+                    f"실행하십시오: {rules}"
+                )
+            else:
+                message += (
+                    "Provider 권한 설정에서 해당 도메인의 읽기를 허용한 뒤 "
+                    "다시 실행하십시오."
+                )
+            errors.append(message)
+            return Verdict(
+                JobStatus.FAILED,
+                ErrorCode.SEARCH_PERMISSION_DENIED,
+                errors,
+            )
 
     # --- exit code 0 이지만 결과가 비어 있는 경우 ---------------------------
     if not outcome.result_text.strip():

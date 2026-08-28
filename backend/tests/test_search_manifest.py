@@ -101,6 +101,33 @@ def test_duplicate_block_raises() -> None:
         search_manifest.parse(text)
 
 
+def test_inline_delimiter_example_is_not_counted_as_a_second_block() -> None:
+    """설명 문장 속 구분자 예시는 실제 감사 블록이 아니다."""
+    explanation = (
+        "필수 감사 블록인 `[ARIA_SEARCH_LOG_V1] ... "
+        "[/ARIA_SEARCH_LOG_V1]` 형식에 맞추어 출력하겠습니다.\n\n"
+    )
+    text = explanation + _block({"candidates": []})
+
+    reported, _ = search_manifest.parse(text, _observed())
+
+    assert reported["candidates"] == []
+    stripped = search_manifest.strip_block(text)
+    assert explanation.strip() in stripped
+
+
+def test_delimiters_must_each_occupy_their_own_line() -> None:
+    """줄 앞뒤에 산문이 붙은 표식은 감사 블록 계약을 만족하지 않는다."""
+    text = (
+        "설명 [ARIA_SEARCH_LOG_V1]\n"
+        '{"candidates": []}\n'
+        "[/ARIA_SEARCH_LOG_V1] 설명\n"
+    )
+
+    with pytest.raises(search_manifest.SearchLogError, match="찾지 못했"):
+        search_manifest.parse(text)
+
+
 def test_broken_json_raises() -> None:
     text = "[ARIA_SEARCH_LOG_V1]\n{not json}\n[/ARIA_SEARCH_LOG_V1]"
     with pytest.raises(search_manifest.SearchLogError, match="JSON"):

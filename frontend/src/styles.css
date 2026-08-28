@@ -686,6 +686,9 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 .page-settings > .settings-context { grid-column: span 7; }
 .page-settings > .settings-storage { grid-column: span 5; }
 .page-settings > .settings-limits { grid-column: 1 / -1; }
+.page-settings > .settings-kiwee,
+.page-settings > .settings-epo { grid-column: 1 / -1; }
+.settings-integration-copy { max-width: 900px; }
 .settings-limit-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

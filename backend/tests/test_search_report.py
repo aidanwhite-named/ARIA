@@ -160,13 +160,13 @@ def test_report_states_the_disclaimer() -> None:
     )
 
 
-def test_report_shows_normalization_notes() -> None:
+def test_report_keeps_normalization_notes_out_of_user_report() -> None:
     reported, notes = _parsed(_hostile_candidate())
-    assert notes, "정규화 메모가 비어 있으면 사용자가 무엇이 조정됐는지 모른다."
+    assert notes, "검증 조정 내역은 감사 매니페스트에는 남아야 한다."
     report = search_report.render(_manifest(reported["candidates"], notes))
-    assert "ARIA 가 조정한 증거 등급" in report
+    assert "ARIA 가 조정한 증거 등급" not in report
     for note in notes:
-        assert note in report
+        assert note not in report
 
 
 def test_report_distinguishes_attempted_from_succeeded_fetches() -> None:

@@ -695,3 +695,36 @@ def test_depth_counter_does_not_recurse() -> None:
     for _ in range(50_000):
         value = {"a": value}
     assert epo_actions._depth(value) > epo_actions.DEPTH_LIMIT
+
+
+def test_parse_response_single_action_dict_without_wrapper() -> None:
+    """모델이 최상위에 단일 action dict 를 그대로 돌려주어도 actions 리스트로 감싸서 읽는다."""
+    payload = json.dumps(search_action("radar surveillance", "ta"))
+    parsed = epo_actions.parse_response(payload)
+    assert len(parsed.actions) == 1
+    assert parsed.actions[0].action == epo_actions.ACTION_SEARCH
+    assert parsed.actions[0].query.value == "radar surveillance"
+
+
+def test_parse_response_action_list_without_wrapper() -> None:
+    """모델이 최상위에 action list 를 돌려주어도 정상 파싱한다."""
+    payload = json.dumps([search_action("radar", "ta"), FINISH])
+    parsed = epo_actions.parse_response(payload)
+    assert len(parsed.actions) == 2
+    assert parsed.actions[0].action == epo_actions.ACTION_SEARCH
+    assert parsed.actions[1].action == epo_actions.ACTION_FINISH
+
+
+def test_single_action_without_wrapper_executes_in_agent_loop(store, tmp_path) -> None:
+    """실제 에이전트 루프에서도 단일 action dict 응답이 parse_error 나 no_actions 없이 동작한다."""
+    provider = FakeProvider(
+        json.dumps(search_action("radar surveillance", "ta")),
+        json.dumps(FINISH),
+    )
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
+    result = run(make_agent(provider, transport, store, tmp_path))
+
+    assert result.termination_reason == epo_agent.TERM_LLM_FINISHED
+    assert result.search_calls == 1
+    assert result.invalid_responses == 0
+    assert len(result.candidates) > 0

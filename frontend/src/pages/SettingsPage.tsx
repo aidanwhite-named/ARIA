@@ -768,106 +768,6 @@ export default function SettingsPage() {
       </div>
 
       <div className="card settings-limits">
-        <h2>실행 한도</h2>
-        <div className="settings-limit-grid">
-          <ByteField
-            label="파일 1개 최대 크기"
-            value={v.max_file_size_bytes}
-            onSave={(n) => saveValue("max_file_size_bytes", n)}
-          />
-          <ByteField
-            label="한 번에 올릴 수 있는 총 파일 크기"
-            value={v.max_total_upload_bytes}
-            onSave={(n) => saveValue("max_total_upload_bytes", n)}
-          />
-          <NumberField
-            label="분석 1회당 최대 파일 수"
-            value={v.max_files_per_job}
-            onSave={(n) => saveValue("max_files_per_job", n)}
-          />
-          <NumberField
-            label="ARIA 자체 글자 수 한도 (0 = 제한 없음)"
-            value={v.max_inline_chars}
-            hint={
-              "기본값 0 — ARIA 는 글자 수로 막지 않습니다. 실행을 실제로 막는 " +
-              "한도는 선택한 Provider 가 자료 전체를 손실 없이 전달할 수 있는 " +
-              "크기와 모델 컨텍스트이며, 이 둘은 끌 수 없습니다. 어느 쪽을 " +
-              "넘든 ARIA 는 문서를 자르거나 요약하지 않고 INPUT_TOO_LARGE 로 " +
-              "중단합니다. 그때는 문헌을 나눠 여러 번 실행하거나 전송 한도가 " +
-              "더 큰 Provider 를 선택하십시오."
-            }
-            onSave={(n) => saveValue("max_inline_chars", n)}
-          />
-          <NumberField
-            label="실행 제한 시간 (초)"
-            value={v.default_timeout_seconds}
-            onSave={(n) => saveValue("default_timeout_seconds", n)}
-          />
-          <NumberField
-            label="실행 도구당 동시 분석 수"
-            value={v.max_concurrency_per_provider}
-            hint="2 이상이면 메모리와 계정 사용량 제한에 주의하십시오."
-            onSave={(n) => saveValue("max_concurrency_per_provider", n)}
-          />
-          <NumberField
-            label="검색 1회당 최대 도구 호출 수"
-            value={v.max_search_tool_calls}
-            hint="유사 문헌 검색에만 적용됩니다. 넘으면 실행을 끊고 실패로 남깁니다."
-            onSave={(n) => saveValue("max_search_tool_calls", n)}
-          />
-        </div>
-        <div className="settings-limit-options">
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={v.keep_raw_output}
-              onChange={(e) => saveValue("keep_raw_output", e.target.checked)}
-            />
-            raw stdout/stderr 를 파일로 보존
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={v.fail_on_tool_use}
-              onChange={(e) => saveValue("fail_on_tool_use", e.target.checked)}
-            />
-            도구 호출이 감지되면 실패로 처리
-          </label>
-          <div className="hint">
-            특허 구성대비 분석에서는 이 설정과 무관하게 도구 호출을 실패로
-            처리합니다. 유사 문헌 검색은 Provider별 검색 도구만 허용하는 별도
-            정책을 사용합니다.
-          </div>
-        </div>
-      </div>
-
-      <div className="card settings-limits">
-        <div className="settings-limit-options">
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={v.keep_raw_output}
-              onChange={(e) => saveValue("keep_raw_output", e.target.checked)}
-            />
-            raw stdout/stderr 를 파일로 보존
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={v.fail_on_tool_use}
-              onChange={(e) => saveValue("fail_on_tool_use", e.target.checked)}
-            />
-            도구 호출이 감지되면 실패로 처리
-          </label>
-          <div className="hint">
-            특허 구성대비 분석에서는 이 설정과 무관하게 도구 호출을 실패로
-            처리합니다. 유사 문헌 검색은 Provider별 검색 도구만 허용하는 별도
-            정책을 사용합니다.
-          </div>
-        </div>
-      </div>
-
-      <div className="card settings-limits">
         <h2>대용량 인용발명 전달 방식</h2>
         <p className="muted">
           인용발명 PDF 를 최종 분석 모델에게 어떻게 전달할지 정합니다. 폭은
@@ -1049,10 +949,9 @@ export default function SettingsPage() {
 
       <div className="card settings-kiwee">
         <h2>Kiwee 특허 검색 연동</h2>
-        <p className="muted">
-          유사 문헌 검색에서 웹 대신(또는 웹과 함께) Kiwee 특허 DB 를 사용할지
-          결정합니다. 지금은 연동 지점만 모듈로 준비된 단계이며, 실제 접속·검색은
-          공급자 승인과 API 계약이 확정된 뒤 활성화됩니다.
+        <p className="muted settings-integration-copy">
+          Kiwee 특허 DB를 유사문헌 검색 경로에 추가합니다. 현재는 준비 중이라
+          켜도 실제 접속이나 검색은 수행하지 않습니다.
         </p>
         <label className="checkbox">
           <input
@@ -1066,20 +965,16 @@ export default function SettingsPage() {
         </label>
         {v.kiwee_integration_enabled && (
           <div className="notice info" style={{ marginTop: 10 }}>
-            연동이 켜져 있으나 접속·인증이 아직 구현되지 않아 실제 검색은
-            수행되지 않습니다. 외부 접속을 시도하지 않습니다.
+            준비 중인 기능입니다. 현재는 실제 검색을 수행하지 않습니다.
           </div>
         )}
       </div>
 
       <div className="card settings-epo">
         <h2>EPO OPS 특허 검색 연동</h2>
-        <p className="muted">
-          유럽특허청 Open Patent Services 로 실제 특허를 검색합니다. 응답 원본
-          XML 을 그대로 보존한 뒤 등록된 EPO 파서로 다시 읽어 발췌를 원본에
-          대조합니다. 증거 등급 상한은 <b>exact</b>이며, OPS XML 은 문헌마다
-          원문일 수도 EPO 번역일 수도 있어 <b>원문(raw) 등급은 부여하지
-          않습니다</b>.
+        <p className="muted settings-integration-copy">
+          EPO OPS API로 특허를 검색하고 받은 XML과 결과를 대조합니다. EPO 번역이
+          포함될 수 있어 증거 등급은 <b>exact</b>까지만 부여합니다.
         </p>
         <label className="checkbox">
           <input
@@ -1173,10 +1068,8 @@ export default function SettingsPage() {
                 </button>
               </div>
               <div className="hint">
-                저장한 Secret 은 화면으로 다시 내려오지 않습니다. 값이 맞는지는
-                아래 「연결 테스트」로 확인하십시오. 앞뒤 공백과 줄바꿈은 붙여넣기
-                과정에서 딸려온 것으로 보고 잘라냅니다. 값 <b>가운데</b> 공백이
-                있으면 저장이 거절됩니다 — 그건 잘못 복사된 값이기 때문입니다.
+                Secret은 화면에 다시 표시되지 않습니다. 저장 후 「연결 테스트」로
+                확인하세요.
               </div>
             </div>
 
@@ -1189,8 +1082,7 @@ export default function SettingsPage() {
                 {epoChecking ? "확인 중…" : "연결 테스트"}
               </button>
               <span className="hint">
-                EPO 에 토큰 발급을 한 번 요청합니다. 특허 데이터는 받지 않고,
-                받은 토큰은 저장하지 않습니다.
+                토큰 발급만 확인하며 특허 데이터와 토큰은 저장하지 않습니다.
               </span>
             </div>
 
@@ -1210,9 +1102,8 @@ export default function SettingsPage() {
               이번 주 사용량
             </h3>
             <div className="hint" style={{ marginBottom: 8 }}>
-              OPS 는 요청 수가 아니라 <b>데이터량</b>으로 과금됩니다(주간 4GB
-              계약). 아래 두 숫자를 합치지 않는 것은 의도입니다 — 어긋나면 그
-              사실 자체가 신호이기 때문입니다. 판정에는 큰 쪽을 씁니다.
+              OPS는 데이터량 기준이며 주간 4GB 한도가 적용됩니다. OPS와 ARIA
+              측정값 중 큰 값을 사용합니다.
             </div>
             <div className="table-scroll">
             <table>
@@ -1278,10 +1169,8 @@ export default function SettingsPage() {
 
             <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 호출 예산</h3>
             <div className="hint" style={{ marginBottom: 8 }}>
-              아래 시간은 <b>OPS HTTP 대기 시간의 총합</b>이며, EPO 채널 전체
-              벽시계(AI 가 생각하는 시간 포함)와 다른 축입니다. 하나로 묶으면
-              모델이 오래 생각한 실행에서 OPS 호출이 남은 예산 없이 시작되고,
-              그 실패가 「EPO 가 느리다」로 기록됩니다.
+              OPS HTTP 요청에 쓸 총 대기 시간입니다. AI 실행 전체 제한시간과는
+              별도입니다.
             </div>
             <div className="settings-limit-options">
               <NumberField
@@ -1300,9 +1189,7 @@ export default function SettingsPage() {
                 label="시간당 사용량 상한 (bytes, 0 = 관측만)"
                 value={v.epo_hourly_quota_bytes}
                 hint={
-                  "주간 4GB 는 계약값이라 항상 강제됩니다. 시간당 상한은 확정된 " +
-                  "계약값이 없어 기본은 관측만 하고, 값을 넣으면 그때부터 " +
-                  "차단합니다."
+                  "주간 4GB 한도는 항상 적용됩니다. 값을 입력하면 시간당 한도도 추가로 적용합니다."
                 }
                 onSave={(n) => saveValue("epo_hourly_quota_bytes", n)}
               />
@@ -1554,43 +1441,6 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-const BYTES_PER_MEBIBYTE = 1024 * 1024;
-
-function ByteField(props: {
-  label: string;
-  value: number;
-  onSave: (value: number) => void;
-}) {
-  const current = props.value / BYTES_PER_MEBIBYTE;
-  const [draft, setDraft] = useState(String(current));
-  useEffect(() => setDraft(String(current)), [current]);
-  const parsed = Number(draft);
-  const dirty = Number.isFinite(parsed) && parsed > 0 && parsed !== current;
-
-  return (
-    <div className="field">
-      <label>{props.label}</label>
-      <div className="number-with-unit">
-        <input
-          type="number"
-          min="1"
-          step="1"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        <span>MB</span>
-        <button
-          className="btn small"
-          disabled={!dirty}
-          onClick={() => props.onSave(Math.round(parsed * BYTES_PER_MEBIBYTE))}
-        >
-          저장
-        </button>
-      </div>
     </div>
   );
 }
