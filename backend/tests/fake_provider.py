@@ -518,6 +518,31 @@ _SEARCH_KEYWORDS = """유사 문헌 검색 경로 전용 키워드.
 """
 
 
+
+_EPO_MARKER = "EPO OPS 특허 검색 실행기"
+
+# 테스트가 EPO 레인의 응답을 바꿔 끼우는 자리. 레인 id 별로 넣으면 그 레인만
+# 다르게 답한다. 비어 있으면 검색 한 번 + 마무리를 돌려준다.
+EPO_SCRIPT: dict[str, list[str]] = {}
+EPO_REQUESTS: list = []
+
+
+def _epo_default_reply() -> str:
+    return json.dumps(
+        {
+            "strategy": "테스트",
+            "actions": [
+                {
+                    "action": "epo_search",
+                    "query": {"kind": "term", "field": "ta", "value": "test claim"},
+                },
+                {"action": "finish", "notes": "끝"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
 class DeterministicSearchProvider(Provider):
     """도구 목록을 강제할 수 있는 Provider 를 흉내 낸다.
 
@@ -553,6 +578,34 @@ class DeterministicSearchProvider(Provider):
         self._cancelled.add(job_id)
         return True
 
+    async def _epo_round(self, request: ExecutionRequest, emit: EmitFn):
+        """EPO 레인 한 라운드. 도구를 쓰지 않는다."""
+        lane = ""
+        for candidate in ("epo:claim_only", "epo:spec_assisted"):
+            if candidate.replace(":", "-") in str(request.work_dir):
+                lane = candidate
+                break
+        EPO_REQUESTS.append({"lane": lane, "message": request.user_message})
+
+        outcome = ExecutionOutcome(
+            cli_path="(내장)", cli_version="0.1.0", cli_args=["test-epo"]
+        )
+        outcome.tool_policy = request.tool_policy
+        if request.job_id in self._cancelled:
+            outcome.cancelled = True
+            outcome.terminal_reason = "cancelled"
+            return outcome
+        queue = EPO_SCRIPT.get(lane)
+        if queue:
+            reply = queue.pop(0)
+            if reply == "__RAISE__":
+                # 레인 하나가 예외로 죽는 경우. 러너가 격리하는지 본다.
+                raise RuntimeError("테스트용 레인 실패")
+            outcome.result_text = reply
+        else:
+            outcome.result_text = _epo_default_reply()
+        return outcome
+
     async def _sleep(self, job_id: str, seconds: float) -> bool:
         step = 0.05
         waited = 0.0
@@ -567,6 +620,13 @@ class DeterministicSearchProvider(Provider):
         self._cancelled.discard(request.job_id)
         message = request.user_message
         policy = request.tool_policy
+
+        # EPO 레인은 계약이 다르다. 도구를 쓰지 않고 구조화된 action JSON 을
+        # 돌려준다. 시스템 프롬프트로 구분한다 — 사용자 메시지에는 청구항이
+        #들어 있어 키워드가 섞일 수 있다.
+        if _EPO_MARKER in (request.system_prompt or ""):
+            return await self._epo_round(request, emit)
+
         outcome = ExecutionOutcome(
             cli_path="(내장)",
             cli_version="0.1.0",

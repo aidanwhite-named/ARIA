@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -153,6 +153,34 @@ _MAX_INTERPRETATIONS = 40
 ORIGIN_CLAIM_ONLY = "claim_only"
 ORIGIN_SPEC_ASSISTED = "spec_assisted"
 SEARCH_ORIGINS = (ORIGIN_CLAIM_ONLY, ORIGIN_SPEC_ASSISTED)
+
+# --- 레인 ------------------------------------------------------------------
+#
+# 레인은 (검색 경로 × 검색 기원)이다. 네 개가 전부이고 id 는 고정이다.
+#
+#     web:claim_only   web:spec_assisted   epo:claim_only   epo:spec_assisted
+#
+# 여기서 말하는 '채널'은 **검색 경로**다. 후보에 붙는 channel(web / patent_db)과
+# 축이 다르다 — 그쪽은 "이 후보를 누가 만들었나(모델 보고냐 ARIA 생산이냐)"이고,
+# 이쪽은 "어느 경로로 검색했나"이다. EPO 레인이 만든 후보의 channel 은
+# patent_db 이고 backend_id 는 epo 다.
+LANE_CHANNEL_WEB = "web"
+LANE_CHANNEL_EPO = "epo"
+LANE_CHANNELS = (LANE_CHANNEL_WEB, LANE_CHANNEL_EPO)
+
+EPO_BACKEND_ID = "epo"
+
+
+def lane_id(channel: str, origin: str) -> str:
+    """레인 id 를 만드는 유일한 곳. 두 군데서 만들면 반드시 어긋난다."""
+    return f"{channel}:{origin}"
+
+
+LANE_IDS = tuple(
+    lane_id(channel, origin)
+    for channel in LANE_CHANNELS
+    for origin in SEARCH_ORIGINS
+)
 
 _UNVERIFIED_EXCERPT = "원문에서 확인되지 않음"
 _UNVERIFIED_LOCATION = "확인 필요"
@@ -1078,6 +1106,65 @@ def merge_observed(*sections: dict) -> dict:
     return merged
 
 
+def empty_epo_section(enabled: bool = False, reason: str = "") -> dict:
+    """EPO 를 돌리지 않은 실행의 기록. 키는 늘 같은 모양으로 있어야 한다.
+
+    없는 키로 두면 화면과 통계가 "EPO 를 안 켰다"와 "켰는데 기록이 없다"를
+    구별하지 못한다.
+    """
+    return {
+        "enabled": enabled,
+        "backend_id": EPO_BACKEND_ID,
+        "reason": reason,
+        "channel_budget": {},
+        "lanes": [],
+        "error": "",
+    }
+
+
+def epo_lane_record(
+    *,
+    origin: str,
+    run,
+    status: str,
+    error: str = "",
+) -> dict:
+    """EPO 레인 하나의 기록. 에이전트 결과를 그대로 옮긴다.
+
+    후보를 다른 레인과 합치지 않는다. 합치면 어느 검색어가 어느 후보를 데려
+    왔는지 잃고, 그것이 이 단계에서 재려는 값이다.
+    """
+    data = run.to_dict() if run is not None else {}
+    return {
+        "id": lane_id(LANE_CHANNEL_EPO, origin),
+        "channel": LANE_CHANNEL_EPO,
+        "origin": origin,
+        "status": status,
+        "error": error,
+        "termination_reason": data.get("termination_reason", ""),
+        "termination_detail": data.get("termination_detail", ""),
+        "cancelled": bool(data.get("cancelled", False)),
+        "rounds": data.get("rounds", []),
+        "queries": data.get("queries", []),
+        "candidates": data.get("candidates", []),
+        "search_calls": data.get("search_calls", 0),
+        "detail_fetches": data.get("detail_fetches", 0),
+        "invalid_responses": data.get("invalid_responses", 0),
+        "notes": data.get("notes", []),
+        "usage": data.get("usage", {}),
+    }
+
+
+def web_lane_record(record: dict) -> dict:
+    """옛 웹 레인 기록에 레인 id 와 채널을 붙인다. 내용은 그대로 둔다."""
+    origin = str(record.get("id") or ORIGIN_CLAIM_ONLY)
+    merged = dict(record)
+    merged["id"] = lane_id(LANE_CHANNEL_WEB, origin)
+    merged["channel"] = LANE_CHANNEL_WEB
+    merged["origin"] = origin
+    return merged
+
+
 def build(
     *,
     claim_text: str,
@@ -1106,6 +1193,8 @@ def build(
     lane_budgets: dict[str, int] | None = None,
     max_content_reads_total: int | None = None,
     content_read_lane_budgets: dict[str, int] | None = None,
+    lanes: list[dict] | None = None,
+    epo: dict | None = None,
 ) -> dict:
     """저장할 감사 기록을 만든다.
 
@@ -1172,7 +1261,15 @@ def build(
             "search_domain_restriction": False,
         },
         "timing": {"started_at": started_at, "completed_at": completed_at},
+        # search_lanes 는 **웹 레인만** 담는 옛 키다. 이미 디스크에 있는
+        # 기록과 화면이 이 모양을 읽으므로 뜻을 바꾸지 않는다.
         "search_lanes": list(search_lanes or []),
+        # v5 의 정본. 네 레인 전부를 고정 id 로 담는다.
+        "lanes": list(lanes or []),
+        # EPO 채널의 기록. 웹과 **섞지 않는다** — 후보·검색어·오류·종료 사유·
+        # 사용량이 전부 여기 따로 있다. 초기 보정 단계에서 두 채널을 비교하려면
+        # 섞이지 않은 채로 남아 있어야 한다.
+        "epo": epo or empty_epo_section(),
         "observed": observed_section or observed(tool_calls, tool_uses),
         "reported": reported,
         "normalization_notes": list(notes or []),

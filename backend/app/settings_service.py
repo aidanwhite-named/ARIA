@@ -46,6 +46,8 @@ EDITABLE_KEYS = frozenset(
         "epo_http_budget_seconds",
         "epo_hourly_quota_bytes",
         "epo_max_detail_fetches",
+        "epo_max_search_calls",
+        "epo_channel_timeout_seconds",
         # epo_quota_state 는 일부러 없다. ARIA 가 관측해 적는 값이라
         # 사용자가 PUT 으로 고칠 수 있으면 사용량을 0 으로 되돌릴 수 있다.
             # 근거 패키지의 페이지 확장.
@@ -103,6 +105,8 @@ _INT_KEYS = frozenset(
         "epo_http_budget_seconds",
         "epo_hourly_quota_bytes",
         "epo_max_detail_fetches",
+        "epo_max_search_calls",
+        "epo_channel_timeout_seconds",
     }
 )
 
@@ -134,6 +138,8 @@ _LIMITS = {
     # 클 수 있으면 그 설정은 아무것도 막지 못한다.
     "epo_hourly_quota_bytes": (1000 * 1000, patent_search.WEEKLY_QUOTA_BYTES),
     "epo_max_detail_fetches": (1, 50),
+    "epo_max_search_calls": (1, 20),
+    "epo_channel_timeout_seconds": (30, 900),
 }
 
 # 인용발명 문헌 전달 방식. enums.RetrievalMode 와 같은 값이며, 여기서 import

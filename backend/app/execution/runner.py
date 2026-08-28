@@ -22,6 +22,7 @@ from .. import (
     analysis_manifest,
     citation_mapping,
     job_assembly,
+    patent_search,
     retrieval,
     search_manifest,
     search_prompt,
@@ -98,6 +99,14 @@ def render_search_focus(focus: dict | None) -> str:
         ],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _positive(value, fallback: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return number if number > 0 else fallback
 
 
 def _utcnow() -> datetime:
@@ -309,6 +318,142 @@ class JobRunner:
             "선택하십시오.",
         )
         return True
+
+    async def _run_epo_channel(
+        self,
+        *,
+        job_id: str,
+        values: dict,
+        provider,
+        model,
+        timeout: int,
+        work_dir: Path,
+        claim_text: str,
+        spec_text: str,
+        emit,
+    ) -> dict:
+        """EPO 채널을 돈다. 웹 결과에는 어떤 경우에도 영향을 주지 않는다.
+
+        꺼져 있거나 자격증명이 없으면 **모델도 OPS 도 부르지 않고** 빈 기록을
+        돌려준다. 그때 이 함수가 하는 일은 사유를 적는 것뿐이다.
+
+        레인 하나가 실패해도 다른 레인은 계속한다. EPO 는 보조 채널이고, 한
+        레인의 실패로 나머지를 버리면 초기 보정에 쓸 자료가 사라진다.
+        """
+        from ..patent_search import epo_agent
+
+        if not patent_search.is_enabled(values, "epo"):
+            return search_manifest.empty_epo_section(
+                enabled=False, reason="EPO OPS 연동이 꺼져 있습니다."
+            )
+
+        with session_scope() as session:
+            backend = settings_service.epo_backend_for(session)
+        if not backend.has_credentials:
+            return search_manifest.empty_epo_section(
+                enabled=True,
+                reason="Consumer Key/Secret 가 설정되지 않아 EPO 채널을 건너뜁니다.",
+            )
+
+        # 채널 예산은 **작업당**이다(명세: "작업당 OPS 검색 요청 최대 6회",
+        # "EPO 채널 전체 제한시간 180초"). 레인마다 만들면 레인 수만큼 예산이
+        # 늘어난다.
+        channel = epo_agent.ChannelBudget(
+            max_search_calls=_positive(values.get("epo_max_search_calls"), 6),
+            max_detail_fetches=_positive(values.get("epo_max_detail_fetches"), 12),
+            deadline_seconds=float(
+                _positive(values.get("epo_channel_timeout_seconds"), 180)
+            ),
+        )
+        channel.start()
+
+        origins = [search_manifest.ORIGIN_CLAIM_ONLY]
+        if spec_text.strip():
+            origins.append(search_manifest.ORIGIN_SPEC_ASSISTED)
+
+        lanes: list[dict] = []
+        section_error = ""
+        for origin in origins:
+            lane = search_manifest.lane_id(search_manifest.LANE_CHANNEL_EPO, origin)
+            if job_id in self._cancel_requested:
+                lanes.append(
+                    search_manifest.epo_lane_record(
+                        origin=origin, run=None, status="cancelled",
+                        error="사용자가 실행을 취소했습니다.",
+                    )
+                )
+                continue
+
+            await emit(
+                job_id,
+                "stage",
+                {
+                    "stage": "executing",
+                    "search_origin": origin,
+                    "lane": lane,
+                    "message": (
+                        "EPO 특허 DB 검색 중"
+                        if origin == search_manifest.ORIGIN_CLAIM_ONLY
+                        else "EPO 명세서 보조 확장 검색 중"
+                    ),
+                },
+            )
+
+            async def lane_emit(event_type: str, payload: dict, _lane=lane) -> None:
+                await emit(job_id, event_type, {**payload, "lane": _lane})
+
+            agent = epo_agent.EpoSearchAgent(
+                job_id=job_id,
+                provider=provider,
+                model=model,
+                timeout_seconds=timeout,
+                work_dir=work_dir / lane.replace(":", "-"),
+                claim_text=claim_text,
+                spec_text=(
+                    spec_text
+                    if origin == search_manifest.ORIGIN_SPEC_ASSISTED
+                    else ""
+                ),
+                backend=backend,
+                channel=channel,
+                lane_id=lane,
+                emit=lane_emit,
+                is_cancelled=lambda: job_id in self._cancel_requested,
+            )
+            try:
+                run = await agent.run()
+            except Exception as exc:  # noqa: BLE001 - 레인 하나의 실패로 끝내지 않는다
+                lanes.append(
+                    search_manifest.epo_lane_record(
+                        origin=origin, run=None, status="failed", error=str(exc)
+                    )
+                )
+                section_error = section_error or str(exc)
+                continue
+            lanes.append(
+                search_manifest.epo_lane_record(
+                    origin=origin,
+                    run=run,
+                    status="cancelled" if run.cancelled else "ok",
+                )
+            )
+
+        # 사용량은 실행 뒤에 반드시 저장한다. 여기서 빠뜨리면 나간 바이트가
+        # 메모리에만 남는다.
+        try:
+            settings_service.persist_epo_quota(backend.ledger)
+        except Exception:  # pragma: no cover - 저장 실패는 화면 경고로 드러난다
+            pass
+
+        return {
+            "enabled": True,
+            "backend_id": search_manifest.EPO_BACKEND_ID,
+            "reason": "",
+            "channel_budget": channel.to_dict(),
+            "lanes": lanes,
+            "usage": backend.usage(),
+            "error": section_error,
+        }
 
     async def _run(self, job_id: str) -> None:
         try:
@@ -795,6 +940,7 @@ class JobRunner:
             search_lane_outcomes: list[tuple[str, ExecutionOutcome]] = []
             search_lane_records: list[dict] = []
             lane_verdicts: list[Verdict] = []
+            epo_section: dict = search_manifest.empty_epo_section()
 
             if job_kind is JobKind.SIMILARITY_SEARCH:
                 for origin, lane_assembled in search_assemblies.items():
@@ -911,6 +1057,24 @@ class JobRunner:
                     # 않는다. 기본 후보 집합이 없는 결과는 합집합이 아니다.
                     if lane_verdict.status != JobStatus.SUCCEEDED:
                         break
+
+                # --- EPO 채널 ------------------------------------------
+                #
+                # 웹 레인이 끝난 **뒤에** 돈다. 순서를 이렇게 두면 EPO 가 어떤
+                # 식으로 실패해도 웹 결과는 이미 확정되어 있다. 두 채널은
+                # 논리적으로 격리되어야 하므로 EPO 는 웹의 후보도 검색어도
+                # 보지 않고, 같은 청구항만 입력으로 받는다.
+                epo_section = await self._run_epo_channel(
+                    job_id=job_id,
+                    values=values,
+                    provider=provider,
+                    model=model,
+                    timeout=timeout,
+                    work_dir=work_dir,
+                    claim_text=claim_text,
+                    spec_text=getattr(assembly, "spec_text", ""),
+                    emit=self._emit,
+                )
 
                 outcome = _merge_search_outcomes(search_lane_outcomes, tool_policy)
                 failed_lane = next(
@@ -1058,6 +1222,12 @@ class JobRunner:
                         )
                     ),
                     search_lanes=search_lane_records,
+                    lanes=[
+                        search_manifest.web_lane_record(record)
+                        for record in search_lane_records
+                    ]
+                    + list((epo_section or {}).get("lanes") or []),
+                    epo=epo_section,
                     max_tool_calls_total=search_budget,
                     lane_budgets=lane_budgets,
                     max_content_reads_total=content_budget or None,

@@ -119,6 +119,10 @@ class AssemblyResult:
 
     lanes: dict[str, AssembledPrompt]
     spec_document: dict | None = None
+    # 명세서 본문. 웹 레인은 이미 렌더된 프롬프트 안에 들고 있지만, EPO 레인은
+    # 자기 프롬프트를 따로 만들므로 본문 자체가 필요하다. 없으면 빈 문자열이고,
+    # 그때 EPO 는 청구항 단독 레인만 돈다.
+    spec_text: str = ""
     search_prompt_sha: str = ""
     claim_boundary_neutralized: bool = False
     spec_boundary_neutralized: bool = False
@@ -698,6 +702,7 @@ def assemble_job(
     return AssemblyResult(
         lanes=lanes,
         spec_document=spec_document,
+        spec_text=spec_text,
         search_prompt_sha=search_prompt.sha256(master_prompt),
         claim_boundary_neutralized=claim_rendered.claim_boundary_neutralized,
         spec_boundary_neutralized=spec_boundary_neutralized,

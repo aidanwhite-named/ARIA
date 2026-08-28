@@ -613,6 +613,13 @@ DEFAULTS: dict[str, object] = {
     "epo_hourly_quota_bytes": 0,
     # 한 실행에서 상세 조회(청구항·설명)할 후보 수 상한.
     "epo_max_detail_fetches": 12,
+    # 아래 둘은 **작업당**(채널 전체) 예산이다. 레인당이 아니다 — 명세가
+    # "작업당 OPS 검색 요청 최대 6회", "EPO 채널 전체 제한시간 180초"라고
+    # 못 박았다. 레인마다 주면 EPO 레인 둘에서 예산이 두 배가 된다.
+    "epo_max_search_calls": 6,
+    # 채널 전체 벽시계(초). 모델이 생각하는 시간을 포함하므로 OPS HTTP 대기
+    # 예산(epo_http_budget_seconds)과 다른 축이다.
+    "epo_channel_timeout_seconds": 180,
     # ARIA 가 관측해 적는 사용량 상태. 사용자가 편집하는 값이 아니므로
     # settings_service.EDITABLE_KEYS 에 없다. 화면에는 보여 준다.
     "epo_quota_state": {},

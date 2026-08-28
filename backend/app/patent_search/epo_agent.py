@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -66,9 +67,85 @@ TERMINATION_REASONS = (
 )
 
 
+@dataclass
+class ChannelBudget:
+    """EPO **채널 전체**가 나눠 쓰는 예산. 레인마다 따로 두지 않는다.
+
+    근거는 원 명세의 문구다.
+
+        "**작업당** OPS 검색 요청 최대 6회"
+        "EPO **채널 전체** 제한시간 180초"
+
+    둘 다 작업/채널 단위이지 레인 단위가 아니다. 레인마다 6회를 주면 EPO 레인
+    두 개에서 12회가 나가고, 그건 명세가 정한 예산의 두 배다. 반면 "라운드당
+    3회"와 "최대 2라운드"는 루프 하나의 성질이므로 레인마다 따로 센다.
+
+    상세 조회 12건도 같은 목록에 있으므로 작업당으로 읽는다.
+    """
+
+    max_search_calls: int = 6
+    max_detail_fetches: int = 12
+    # 채널 전체 벽시계. OPS HTTP 대기 시간 예산과 **다른 축**이다 — 이쪽은
+    # 모델이 생각하는 시간을 포함한다.
+    deadline_seconds: float = 180.0
+
+    searches_used: int = 0
+    details_used: int = 0
+
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+    _started: float = field(default_factory=time.monotonic, init=False, repr=False)
+
+    def start(self) -> None:
+        """벽시계를 지금부터 잰다. 채널 시작 시점에 한 번 부른다."""
+        with self._lock:
+            self._started = time.monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    def expired(self) -> bool:
+        if not self.deadline_seconds:
+            return False
+        return self.elapsed >= self.deadline_seconds
+
+    def take_search(self) -> bool:
+        """검색 한 번을 차지한다. 남지 않았으면 False."""
+        with self._lock:
+            if self.searches_used >= self.max_search_calls:
+                return False
+            self.searches_used += 1
+            return True
+
+    def take_detail(self) -> bool:
+        with self._lock:
+            if self.details_used >= self.max_detail_fetches:
+                return False
+            self.details_used += 1
+            return True
+
+    def to_dict(self) -> dict:
+        return {
+            "scope": "channel",
+            "max_search_calls": self.max_search_calls,
+            "max_detail_fetches": self.max_detail_fetches,
+            "deadline_seconds": self.deadline_seconds,
+            "searches_used": self.searches_used,
+            "details_used": self.details_used,
+            "elapsed_seconds": round(self.elapsed, 3),
+        }
+
+
 @dataclass(frozen=True)
 class EpoAgentBudget:
-    """사용자 확정값(2026-08-28). 프롬프트가 이 객체에서 숫자를 읽는다."""
+    """**레인 하나**의 예산. 채널 전체 예산은 ChannelBudget 이 따로 든다.
+
+    max_search_calls / max_detail_fetches 는 채널 예산을 주지 않았을 때의
+    기본값으로만 쓴다(단일 레인 실행·테스트). 레인이 둘 이상이면 반드시
+    ChannelBudget 을 공유해야 한다.
+    """
 
     max_rounds: int = 2
     max_search_calls: int = 6
@@ -216,8 +293,11 @@ class EpoSearchAgent:
         timeout_seconds: int,
         work_dir: Path,
         claim_text: str,
-        backend,
+        spec_text: str = "",
+        backend=None,
         budget: EpoAgentBudget | None = None,
+        channel: ChannelBudget | None = None,
+        lane_id: str = "",
         emit=None,
         is_cancelled=None,
         sleep=None,
@@ -228,8 +308,19 @@ class EpoSearchAgent:
         self.timeout_seconds = timeout_seconds
         self.work_dir = Path(work_dir)
         self.claim_text = claim_text
+        # 명세서는 검색어를 넓히는 자료이지 검색 범위를 정하는 기준이 아니다.
+        # 웹 레인과 같은 원칙이라 별도 경계 안에 넣는다.
+        self.spec_text = spec_text
         self.backend = backend
         self.budget = budget or EpoAgentBudget()
+        # 채널 예산을 주지 않으면 이 레인만 쓰는 것을 하나 만든다. 레인이
+        # 둘 이상인 실행에서는 러너가 하나를 만들어 모든 레인에 같은 것을
+        # 넘겨야 한다 — 안 그러면 레인 수만큼 예산이 늘어난다.
+        self.channel = channel or ChannelBudget(
+            max_search_calls=self.budget.max_search_calls,
+            max_detail_fetches=self.budget.max_detail_fetches,
+        )
+        self.lane_id = lane_id
         self.emit = emit or _noop_emit
         self.is_cancelled = is_cancelled or (lambda: False)
         # 재시도 대기의 바닥 함수. 테스트가 실제로 20초를 자지 않도록 바꿔 낀다.
@@ -355,11 +446,18 @@ class EpoSearchAgent:
 
             # 검색 예산을 다 썼으면 그것이 멈추는 이유다. "새 후보가 없어서"로
             # 적으면 더 찾을 수 있었는데 안 찾은 것처럼 읽힌다.
-            if run.search_calls >= self.budget.max_search_calls:
+            if self.channel.searches_used >= self.channel.max_search_calls:
                 run.termination_reason = TERM_SEARCH_CALL_LIMIT
                 run.termination_detail = (
-                    f"OPS 검색 호출 상한({self.budget.max_search_calls}회)을 "
-                    "다 썼습니다."
+                    f"OPS 검색 호출 상한({self.channel.max_search_calls}회, 작업 "
+                    "전체)을 다 썼습니다."
+                )
+                return self._finish(run)
+            if self.channel.expired():
+                run.termination_reason = TERM_TIMEOUT
+                run.termination_detail = (
+                    f"EPO 채널 제한시간({self.channel.deadline_seconds:.0f}초)을 "
+                    "넘겼습니다."
                 )
                 return self._finish(run)
 
@@ -455,10 +553,10 @@ class EpoSearchAgent:
         return None
 
     async def _do_search(self, action, run: EpoSearchRun, record: RoundRecord):
-        if run.search_calls >= self.budget.max_search_calls:
-            return TERM_SEARCH_CALL_LIMIT, (
-                f"OPS 검색 호출 상한({self.budget.max_search_calls}회)에 "
-                "도달했습니다."
+        if self.channel.expired():
+            return TERM_TIMEOUT, (
+                f"EPO 채널 제한시간({self.channel.deadline_seconds:.0f}초)을 "
+                "넘겼습니다."
             )
         if record.search_calls >= self.budget.max_search_calls_per_round:
             # 라운드 상한은 루프를 끝내지 않는다. 이번 라운드의 나머지 검색만
@@ -484,6 +582,13 @@ class EpoSearchAgent:
                 )
             return None
 
+        # 채널 전체 예산에서 한 자리를 차지한다. 레인마다 세면 레인 수만큼
+        # 예산이 늘어난다.
+        if not self.channel.take_search():
+            return TERM_SEARCH_CALL_LIMIT, (
+                f"OPS 검색 호출 상한({self.channel.max_search_calls}회, 작업 "
+                "전체)에 도달했습니다."
+            )
         run.search_calls += 1
         record.search_calls += 1
         run.queries.append({"round": record.round, "cql": cql})
@@ -513,10 +618,15 @@ class EpoSearchAgent:
         return None
 
     async def _do_fetch(self, action, run: EpoSearchRun, record: RoundRecord):
-        if run.detail_fetches >= self.budget.max_detail_fetches:
+        if self.channel.expired():
+            return TERM_TIMEOUT, (
+                f"EPO 채널 제한시간({self.channel.deadline_seconds:.0f}초)을 "
+                "넘겼습니다."
+            )
+        if not self.channel.take_detail():
             return TERM_DETAIL_FETCH_LIMIT, (
-                f"상세 조회 상한({self.budget.max_detail_fetches}건)에 "
-                "도달했습니다."
+                f"상세 조회 상한({self.channel.max_detail_fetches}건, 작업 "
+                "전체)에 도달했습니다."
             )
         try:
             response = await asyncio.to_thread(
@@ -602,6 +712,8 @@ class EpoSearchAgent:
             "budget": self.budget.to_dict(),
             "claim_text": self.claim_text,
         }
+        if self.spec_text:
+            payload["spec_text"] = self.spec_text
         if pending_error:
             payload["previous_error"] = pending_error
         if results:
@@ -665,5 +777,7 @@ class EpoSearchAgent:
         run.usage["search_calls"] = run.search_calls
         run.usage["max_search_calls"] = self.budget.max_search_calls
         run.usage["invalid_responses"] = run.invalid_responses
+        run.usage["lane_id"] = self.lane_id
+        run.usage["channel_budget"] = self.channel.to_dict()
         run.usage["termination_reason"] = run.termination_reason
         return run
