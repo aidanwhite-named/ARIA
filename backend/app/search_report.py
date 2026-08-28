@@ -334,6 +334,111 @@ def _focus_section(focus: dict | None) -> list[str]:
     return lines
 
 
+def _channel_comparison_section(manifest: dict) -> list[str]:
+    """웹과 EPO의 공개번호 교집합·차집합을 사용자에게 보여 준다.
+
+    이것은 후보 발견 경로의 대조이지 A/B/C 분류나 패밀리 판정이 아니다. 그
+    경계를 문구와 표에 함께 남겨, EPO 단독 후보가 곧 신규성 근거인 것처럼
+    읽히지 않게 한다.
+    """
+    comparison = manifest.get("channel_comparison")
+    if not isinstance(comparison, dict):
+        return []
+
+    epo = manifest.get("epo") or {}
+    if not comparison.get("compared"):
+        if not epo.get("enabled"):
+            return []
+        return [
+            "## 웹/EPO 채널 교차 발견",
+            "",
+            "두 채널을 대조하지 못했습니다: "
+            + str(comparison.get("reason") or "비교할 기록이 없습니다."),
+            "",
+        ]
+
+    counts = comparison.get("counts") or {}
+    web = comparison.get("web") or {}
+    epo_stats = comparison.get("epo") or {}
+    lines = [
+        "## 웹/EPO 채널 교차 발견",
+        "",
+        "이 표는 **국가코드를 보존한 공개번호 표기**만 맞춘 발견 경로 비교입니다. "
+        "특허 패밀리 판정이나 A/B/C 유사도 분류가 아니며, `EPO에서만`은 이번 "
+        "웹 검색 기록에 같은 공개번호가 없었다는 뜻일 뿐입니다.",
+        "",
+        f"- 양쪽 채널에서 발견: {int(counts.get('both') or 0)}건",
+        f"- EPO에서만 발견: {int(counts.get('epo_only') or 0)}건",
+        f"- 웹에서만 발견: {int(counts.get('web_only') or 0)}건",
+        "- 식별 가능한 고유 공개번호: "
+        f"웹 {int(web.get('unique_identified') or 0)}건 · "
+        f"EPO {int(epo_stats.get('unique_identified') or 0)}건",
+    ]
+    if web.get("unidentified") or epo_stats.get("unidentified"):
+        lines.append(
+            "- 문헌번호가 없어 대조에서 제외: "
+            f"웹 {int(web.get('unidentified') or 0)}건 · "
+            f"EPO {int(epo_stats.get('unidentified') or 0)}건"
+        )
+    if web.get("quarantined"):
+        lines.append(
+            f"- 웹 후보 중 식별·근거 격리 상태: {int(web['quarantined'])}건 "
+            "(교차 발견 여부가 격리를 자동 해제하지 않습니다.)"
+        )
+    excluded_lanes = epo_stats.get("excluded_lanes") or []
+    if excluded_lanes:
+        lines.append(
+            "- 완료되지 않아 비교에서 제외한 EPO 레인: "
+            + ", ".join(str(value) for value in excluded_lanes)
+        )
+
+    rows: list[tuple[str, dict]] = []
+    for key, label in (
+        ("both", "양쪽"),
+        ("epo_only", "EPO에서만"),
+        ("web_only", "웹에서만"),
+    ):
+        rows.extend((label, item) for item in comparison.get(key) or [])
+
+    if not rows:
+        lines += ["", "식별 가능한 공개번호 후보가 없습니다.", ""]
+        return lines
+
+    lines += [
+        "",
+        "| 구분 | 대표 문헌번호 | 명칭 | 웹 기록 | EPO 기록 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for label, item in rows:
+        web_records = []
+        for record in item.get("web") or []:
+            origins = ", ".join(record.get("origins") or []) or "경로 미기록"
+            suffix = " · 격리" if record.get("quarantined") else ""
+            web_records.append(
+                f"{record.get('doc_number') or '-'} ({origins}{suffix})"
+            )
+        epo_records = []
+        for record in item.get("epo") or []:
+            lanes = ", ".join(record.get("lanes") or []) or "레인 미기록"
+            epo_records.append(f"{record.get('doc_number') or '-'} ({lanes})")
+        lines.append(
+            "| "
+            + " | ".join(
+                _cell(value)
+                for value in (
+                    label,
+                    item.get("doc_number") or "-",
+                    item.get("title") or "-",
+                    "; ".join(web_records) or "-",
+                    "; ".join(epo_records) or "-",
+                )
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def render(manifest: dict) -> str:
     """감사 기록에서 사용자용 Markdown 보고서를 만든다.
 
@@ -420,6 +525,7 @@ def render(manifest: dict) -> str:
 
     lines += _focus_section(focus)
     lines += _expansion_section(manifest, reported)
+    lines += _channel_comparison_section(manifest)
 
     if not candidates:
         lines += ["## 후보", "", "제시된 후보가 없습니다.", ""]

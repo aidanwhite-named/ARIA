@@ -1,4 +1,4 @@
-"""러너 2채널 — 레인 4개, 격리, 실패 전파 없음, 취소, manifest v5.
+"""러너 2채널 — 레인 4개, 격리, 실패 전파 없음, 취소, manifest v6.
 
 **네트워크를 열지 않는다.** 모델은 DeterministicSearchProvider 가, OPS 는
 전송 계층 monkeypatch 가 대신한다. 실수로 실제 호출이 나가면 conftest 의
@@ -179,9 +179,9 @@ def test_epo_lane_is_recorded_with_a_fixed_id(client, epo_on) -> None:
         assert lane["origin"] in ("claim_only", "spec_assisted")
 
 
-def test_manifest_version_is_five(client, epo_on) -> None:
+def test_manifest_version_is_six(client, epo_on) -> None:
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 5
+    assert manifest["version"] == 6
 
 
 # ---------------------------------------------------------------- 격리
@@ -316,6 +316,19 @@ def test_attached_spec_runs_all_four_lanes(client, epo_on) -> None:
     ]
     # 두 레인이 각각 OPS 를 쳤다.
     assert len(ops_searches(epo_on)) == 2
+
+    # v6 파생 비교가 실제 러너 산출물에도 붙고, 사용자 보고서에도 보인다.
+    comparison = manifest["channel_comparison"]
+    assert comparison["compared"] is True
+    assert comparison["match_basis"] == (
+        "country_scoped_publication_number_variants"
+    )
+    assert comparison["epo"]["unique_identified"] >= 1
+    assert comparison["counts"]["both"] + comparison["counts"]["epo_only"] == (
+        comparison["epo"]["unique_identified"]
+    )
+    detail = client.get(f"/api/jobs/{job['id']}").json()
+    assert "## 웹/EPO 채널 교차 발견" in detail["result_text"]
 
 
 def test_only_the_spec_assisted_epo_lane_gets_the_spec_body(client, epo_on) -> None:
@@ -456,7 +469,7 @@ def test_cancel_inside_a_running_epo_lane_stops_the_next_one(client, epo_on) -> 
 def test_manifest_exists_when_the_epo_lane_fails(client, epo_on) -> None:
     fake_provider.EPO_SCRIPT["epo:claim_only"] = ["깨진 응답"] * 5
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 5
+    assert manifest["version"] == 6
     assert manifest["epo"]["lanes"], "실패한 레인의 기록이 없습니다."
     assert manifest["timing"]["completed_at"]
 

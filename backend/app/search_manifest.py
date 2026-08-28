@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 5
+MANIFEST_VERSION = 6
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -1165,6 +1165,278 @@ def web_lane_record(record: dict) -> dict:
     return merged
 
 
+# 두 채널의 후보를 맞출 때 쓰는 기준. 기록에 적어서, 나중에 숫자를 읽는
+# 사람이 무엇으로 맞춘 숫자인지 알 수 있게 한다.
+#
+# URL 대조용 _number_variants()는 국가코드를 떼어 낸 숫자도 만든다. URL 안에서
+# 번호를 찾을 때는 유용하지만 채널끼리 문헌을 맞출 때 쓰면 EP1000000과
+# US1000000이 같은 것으로 묶인다. 여기서는 국가코드를 보존하고 종류코드만
+# 선택적으로 제거한다.
+CHANNEL_MATCH_BASIS = "country_scoped_publication_number_variants"
+
+_COMPARABLE_EPO_TERMINATIONS = frozenset(
+    {
+        "llm_finished",
+        "round_limit",
+        "search_call_limit",
+        "detail_fetch_limit",
+        "no_new_candidates",
+    }
+)
+
+
+_UNKNOWN_DOCUMENT_NUMBERS = frozenset(
+    {
+        "",
+        "확인 필요",
+        "문헌번호 확인 필요",
+        "unknown",
+        "n/a",
+        "none",
+        "not available",
+    }
+)
+
+
+def _comparison_number_variants(raw) -> set[str]:
+    """채널 대조 전용 문헌번호 표기 변형.
+
+    ``EP 1 000 000``과 ``EP1000000A1``은 맞추되, 국가코드가 다른 문헌이나
+    국가코드가 없는 숫자를 추측으로 같은 문헌에 붙이지 않는다. 이 단계는
+    패밀리 판정이 아니며 공개번호 표기 차이만 흡수한다.
+    """
+    text = _text(raw, 300)
+    if text.lower() in _UNKNOWN_DOCUMENT_NUMBERS:
+        return set()
+    compact = re.sub(r"[^0-9A-Z]", "", text.upper())
+    if len(compact) < 5:
+        return set()
+
+    # 국가코드가 있는 공개번호는 그 범위 안에서만 종류코드를 제거한다.
+    if re.match(r"^[A-Z]{2}\d", compact):
+        publication = re.sub(r"[A-Z]\d?$", "", compact)
+        return {f"publication:{publication}"}
+
+    # 국가코드가 없는 값은 같은 맨문자열끼리만 맞춘다. EP/US 등의 후보에
+    # 추측으로 붙이는 순간 교차 발견 수가 사실보다 부풀기 때문이다.
+    return {f"bare:{compact}"}
+
+
+def _union_find(pairs: list[tuple[str, str]]) -> dict[str, str]:
+    """(항목, 표기) 쌍에서 같은 문헌끼리 묶은 대표 이름표를 돌려준다."""
+    parent: dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for left, right in pairs:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+    return {node: find(node) for node in parent}
+
+
+def _comparable(candidates: list[dict]) -> tuple[list[dict], int]:
+    """대조할 수 있는 후보와, 문헌번호가 없어 대조하지 못한 수."""
+    usable: list[dict] = []
+    unidentified = 0
+    for candidate in candidates:
+        variants = _comparison_number_variants(candidate.get("doc_number"))
+        if not variants:
+            unidentified += 1
+            continue
+        usable.append({**candidate, "_variants": variants})
+    return usable, unidentified
+
+
+def empty_channel_comparison(reason: str = "") -> dict:
+    """대조하지 않은 실행의 기록. 키 모양은 늘 같아야 한다."""
+    return {
+        "compared": False,
+        "complete": False,
+        "reason": reason,
+        "match_basis": CHANNEL_MATCH_BASIS,
+        "web": {
+            "total": 0,
+            "identified": 0,
+            "unique_identified": 0,
+            "unidentified": 0,
+            "quarantined": 0,
+        },
+        "epo": {
+            "total": 0,
+            "identified": 0,
+            "unique_identified": 0,
+            "unidentified": 0,
+            "excluded_lanes": [],
+        },
+        "counts": {"both": 0, "epo_only": 0, "web_only": 0},
+        "both": [],
+        "epo_only": [],
+        "web_only": [],
+    }
+
+
+def compare_channels(reported: dict | None, epo: dict | None) -> dict:
+    """웹 채널과 EPO 채널이 각각 무엇을 찾았는지 대조한다.
+
+    두 채널의 기록을 **섞지 않는다.** 이 절은 파생된 관점이고, reported 와 epo
+    는 손대지 않은 채로 남는다. 어느 쪽 후보도 다른 쪽으로 옮기거나 다시
+    분류하지 않는다 — 그렇게 하는 순간 "EPO 가 무엇을 더 데려왔는가"를 물을 수
+    없게 되고, 그 질문이 이 채널을 켜 둘 이유의 전부다.
+
+    같은 문헌을 두 채널이 다르게 적는다. 모델 보고는 "EP 1 000 000"처럼 쓰고
+    OPS 는 종류코드까지 붙인 "EP1000000A1"을 준다. 비교 전용 변형은 국가코드를
+    보존한 채 종류코드만 제거한다. 따라서 같은 숫자의 EP/US 문헌을 합치지 않고,
+    같은 패밀리의 서로 다른 공개번호도 이 단계에서 추측으로 합치지 않는다.
+
+    문헌번호가 없는 후보(DOI 만 있는 논문 등)는 대조 대상이 아니다. 세어서
+    따로 적고 어느 목록에도 넣지 않는다. web_only 에 넣으면 "EPO 가 놓쳤다"로
+    읽히는데, OPS 에 있을 수 없는 문헌을 놓쳤다고 적는 것은 거짓이다.
+    """
+    section = epo or {}
+    lanes = list(section.get("lanes") or [])
+    if not section.get("enabled") or not lanes:
+        return empty_channel_comparison(
+            reason=str(section.get("reason") or "EPO 채널이 실행되지 않았습니다.")
+        )
+    if reported is None:
+        return empty_channel_comparison(
+            reason="웹 채널의 구조화 결과가 없어 두 채널을 대조하지 않았습니다."
+        )
+
+    comparable_lanes = [
+        lane
+        for lane in lanes
+        if lane.get("status") == "ok"
+        and int(lane.get("search_calls") or 0) > 0
+        and lane.get("termination_reason") in _COMPARABLE_EPO_TERMINATIONS
+    ]
+    excluded_lanes = [
+        str(lane.get("id") or "(이름 없는 EPO 레인)")
+        for lane in lanes
+        if lane not in comparable_lanes
+    ]
+    if not comparable_lanes:
+        return empty_channel_comparison(
+            reason="완료된 OPS 검색이 없어 두 채널을 대조하지 않았습니다."
+        )
+
+    web_candidates = list((reported or {}).get("candidates") or [])
+    web_usable, web_unidentified = _comparable(web_candidates)
+
+    # 같은 문헌이 두 EPO 레인에 다 나올 수 있다. 레인 이름을 모아 둔다.
+    epo_candidates: list[dict] = []
+    for lane in comparable_lanes:
+        for candidate in lane.get("candidates") or []:
+            epo_candidates.append({**candidate, "lane": lane.get("id", "")})
+    epo_usable, epo_unidentified = _comparable(epo_candidates)
+
+    pairs: list[tuple[str, str]] = []
+    for index, candidate in enumerate(web_usable):
+        for variant in candidate["_variants"]:
+            pairs.append((f"n:{variant}", f"web:{index}"))
+    for index, candidate in enumerate(epo_usable):
+        for variant in candidate["_variants"]:
+            pairs.append((f"n:{variant}", f"epo:{index}"))
+
+    roots = _union_find(pairs)
+    groups: dict[str, dict[str, list[dict]]] = {}
+    for index, candidate in enumerate(web_usable):
+        group = groups.setdefault(roots[f"web:{index}"], {"web": [], "epo": []})
+        group["web"].append(candidate)
+    for index, candidate in enumerate(epo_usable):
+        group = groups.setdefault(roots[f"epo:{index}"], {"web": [], "epo": []})
+        group["epo"].append(candidate)
+
+    both: list[dict] = []
+    epo_only: list[dict] = []
+    web_only: list[dict] = []
+    for group in groups.values():
+        entry = _comparison_entry(group)
+        if group["web"] and group["epo"]:
+            both.append(entry)
+        elif group["epo"]:
+            epo_only.append(entry)
+        else:
+            web_only.append(entry)
+
+    for bucket in (both, epo_only, web_only):
+        bucket.sort(key=lambda item: item["doc_number"])
+
+    return {
+        "compared": True,
+        "complete": not excluded_lanes,
+        "reason": "",
+        "match_basis": CHANNEL_MATCH_BASIS,
+        "web": {
+            "total": len(web_candidates),
+            "identified": len(web_usable),
+            "unique_identified": len(both) + len(web_only),
+            "unidentified": web_unidentified,
+            # 식별이 확인되지 않은 후보가 웹 쪽 숫자에 몇 건 섞였는지 알려 준다.
+            # 이것을 모르면 "웹이 이미 찾았다"가 얼마나 단단한 말인지 모른다.
+            "quarantined": sum(
+                1 for item in web_candidates if item.get("quarantined")
+            ),
+        },
+        "epo": {
+            "total": len(epo_candidates),
+            "identified": len(epo_usable),
+            "unique_identified": len(both) + len(epo_only),
+            "unidentified": epo_unidentified,
+            "excluded_lanes": excluded_lanes,
+        },
+        "counts": {
+            "both": len(both),
+            "epo_only": len(epo_only),
+            "web_only": len(web_only),
+        },
+        "both": both,
+        "epo_only": epo_only,
+        "web_only": web_only,
+    }
+
+
+def _comparison_entry(group: dict[str, list[dict]]) -> dict:
+    """묶인 문헌 하나. 각 채널이 적은 표기를 **그대로** 들고 있는다."""
+    web = [
+        {
+            "doc_number": _text(item.get("doc_number"), 120),
+            "title": _text(item.get("title"), 500),
+            "origins": list(item.get("search_origins") or []),
+            "quarantined": bool(item.get("quarantined", False)),
+        }
+        for item in group["web"]
+    ]
+    lanes_by_number: dict[str, dict] = {}
+    for item in group["epo"]:
+        number = _text(item.get("doc_number"), 120)
+        row = lanes_by_number.setdefault(
+            number,
+            {"doc_number": number, "title": _text(item.get("title"), 500), "lanes": []},
+        )
+        if item.get("lane") and item["lane"] not in row["lanes"]:
+            row["lanes"].append(item["lane"])
+    epo = list(lanes_by_number.values())
+    representatives = web + epo
+    representative = representatives[0]
+    title = next(
+        (str(item.get("title") or "") for item in representatives if item.get("title")),
+        "",
+    )
+    return {
+        "doc_number": representative.get("doc_number", ""),
+        "title": title,
+        "web": web,
+        "epo": epo,
+    }
+
+
 def build(
     *,
     claim_text: str,
@@ -1204,6 +1476,18 @@ def build(
     strategy = search_strategy or (
         "isolated_union" if spec_document is not None else ORIGIN_CLAIM_ONLY
     )
+    epo_section = epo or empty_epo_section()
+    channels_used = {
+        candidate.get("channel")
+        for candidate in ((reported or {}).get("candidates") or [])
+        if candidate.get("channel")
+    }
+    if any(
+        lane.get("candidates")
+        for lane in (epo_section.get("lanes") or [])
+        if isinstance(lane, dict)
+    ):
+        channels_used.add(CHANNEL_PATENT_DB)
     return {
         "version": MANIFEST_VERSION,
         "generated_at": _utcnow_iso(),
@@ -1219,13 +1503,7 @@ def build(
         # 적이 있다(GROUP_DEFINITIONS 주석 참조).
         "group_schema_version": GROUP_SCHEMA_VERSION,
         "group_definitions": dict(GROUP_DEFINITIONS),
-        "channels_used": sorted(
-            {
-                candidate.get("channel")
-                for candidate in ((reported or {}).get("candidates") or [])
-                if candidate.get("channel")
-            }
-        ),
+        "channels_used": sorted(channels_used),
         "input": {
             "claim_text": claim_text,
             "claim_boundary_neutralized": claim_boundary_neutralized,
@@ -1269,7 +1547,10 @@ def build(
         # EPO 채널의 기록. 웹과 **섞지 않는다** — 후보·검색어·오류·종료 사유·
         # 사용량이 전부 여기 따로 있다. 초기 보정 단계에서 두 채널을 비교하려면
         # 섞이지 않은 채로 남아 있어야 한다.
-        "epo": epo or empty_epo_section(),
+        "epo": epo_section,
+        # v6 의 정본. 두 채널이 각각 무엇을 찾았는지 대조한 **파생** 기록이다.
+        # 위의 reported 와 epo 는 그대로 두고, 여기서만 맞춰 본다.
+        "channel_comparison": compare_channels(reported, epo_section),
         "observed": observed_section or observed(tool_calls, tool_uses),
         "reported": reported,
         "normalization_notes": list(notes or []),
