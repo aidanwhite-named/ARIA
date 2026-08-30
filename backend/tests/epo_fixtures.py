@@ -163,3 +163,31 @@ HEADERS_OVERLOADED = {
     ),
     "X-RegisteredQuotaPerWeek-Used": "104857600",
 }
+
+
+# 검색 결과가 0건일 때 OPS 가 실제로 돌려준 응답(2026-08-30 실행에서 관측).
+# 상태 코드가 404 라서 예전에는 호출 실패로 처리됐다.
+SEARCH_NO_RESULTS_404 = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<fault xmlns="http://ops.epo.org">
+    <code>SERVER.EntityNotFound</code>
+    <message>No results found</message>
+</fault>
+"""
+
+# 같은 404 라도 이건 0건이 아니다. 엔드포인트나 문헌이 없는 것이다.
+SEARCH_OTHER_FAULT_404 = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<fault xmlns="http://ops.epo.org">
+    <code>SERVER.ServiceNotFound</code>
+    <message>Service not found</message>
+</fault>
+"""
+
+
+# fault 문서가 아니다. 본문 어딘가에 같은 문자열이 들어 있을 뿐이다.
+# substring 검사를 쓰면 이것을 "결과 0건" 으로 오판한다.
+SEARCH_ECHOES_FAULT_TEXT_404 = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ops:world-patent-data xmlns:ops="http://ops.epo.org">
+  <ops:meta name="note" value="SERVER.EntityNotFound"/>
+  <ops:message>No results found</ops:message>
+</ops:world-patent-data>
+"""

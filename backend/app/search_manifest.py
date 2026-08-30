@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 6
+MANIFEST_VERSION = 7
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -201,9 +201,26 @@ _UNVERIFIED_LOCATION = "확인 필요"
 # 횟수가 0으로 보이는 식으로 조용히 어긋난다.
 #   Claude : WebSearch / WebFetch
 #   agy    : search_web / read_url_content
-#   Codex  : web_search (페이지를 여는 도구는 없다)
+#   Codex  : web_search (검색과 URL 조회를 겸한다. 종류는 input_kind 로 갈리며,
+#            URL 조회의 성공 여부는 스트림에 오지 않아 열람으로 세지 않는다)
 SEARCH_TOOL_NAMES = frozenset({"WebSearch", "search_web", "web_search"})
 FETCH_TOOL_NAMES = frozenset({"WebFetch", "read_url_content"})
+
+# Codex 의 web_search 는 도구 하나가 검색과 URL 조회를 겸한다. 도구 이름만으로는
+# 종류를 알 수 없어서 Provider 가 붙인 input_kind 를 본다. 붙이지 않는
+# Provider(Claude/agy)는 도구 이름이 곧 종류이므로 예전 계약대로 검색으로 센다.
+INPUT_KIND_QUERY = "query"
+INPUT_KIND_URL = "url"
+
+
+def _call_kind(call: dict) -> str:
+    data = call.get("input")
+    if not isinstance(data, dict):
+        return ""
+    kind = data.get("input_kind")
+    if kind in (INPUT_KIND_QUERY, INPUT_KIND_URL):
+        return str(kind)
+    return INPUT_KIND_QUERY if data.get("query") else ""
 _SEARCH_TOOL_NAMES = SEARCH_TOOL_NAMES
 _FETCH_TOOL_NAMES = FETCH_TOOL_NAMES
 
@@ -715,9 +732,14 @@ def _normalize_candidate(
                 f"'{_UNVERIFIED_EXCERPT}' 로 바꿨습니다."
             )
 
+    # 그룹 값은 모델이 정하지 않는다. group_eligible 이 거짓이면 무조건 null 이다.
+    # A/B/C 중 아무 글자나 남겨 두면, 격리 영역에 찍히는 후보가 다운스트림에서는
+    # 분류된 후보처럼 읽힌다 — 채널 대조와 프런트 집계가 그 값을 그대로 쓴다.
+    group = _one_of(entry.get("group"), GROUPS, "C") if group_eligible else None
+
     return {
         "index": index,
-        "group": _one_of(entry.get("group"), GROUPS, "C"),
+        "group": group,
         "provisional": provisional,
         "channel": channel,
         "doc_type": _one_of(entry.get("doc_type"), DOC_TYPES, "other"),
@@ -752,7 +774,7 @@ def _normalize_candidate(
         "note": note,
         # 이 값은 모델이 고르는 것이 아니라 ARIA 가 실행 경로에서 붙인다.
         "search_origins": [search_origin],
-        "origin_groups": {search_origin: _one_of(entry.get("group"), GROUPS, "C")},
+        "origin_groups": {search_origin: group},
     }
 
 
@@ -996,11 +1018,16 @@ def merge_reported(*reports: dict | None) -> dict | None:
             # 더 잘 확인된 경로의 서지·증거 필드를 사용하되, 기본 검색의 분류는
             # 명세서 보조 검색이 덮어쓰지 못한다.
             if _evidence_score(candidate) > _evidence_score(existing):
-                base_group = origin_groups.get(
-                    ORIGIN_CLAIM_ONLY, existing.get("group", candidate.get("group"))
-                )
                 replacement = dict(candidate)
-                replacement["group"] = base_group
+                if not replacement.get("group_eligible", True):
+                    # 병합 결과가 그룹 자격을 잃었으면 어느 경로의 분류도
+                    # 물려받지 않는다. 미확인 단서에 A/B/C 가 남으면 안 된다.
+                    replacement["group"] = None
+                else:
+                    base_group = origin_groups.get(ORIGIN_CLAIM_ONLY)
+                    if base_group not in GROUPS:
+                        base_group = existing.get("group") or replacement.get("group")
+                    replacement["group"] = base_group if base_group in GROUPS else "C"
                 existing = replacement
 
             existing["search_origins"] = origins
@@ -1036,12 +1063,38 @@ def observed(
     counts: dict[str, int] = {}
     for name in uses:
         counts[name] = counts.get(name, 0) + 1
-    queries = [
-        call["input"]["query"]
+    # 호출 수와 질의 수는 다른 값이다. Codex 는 한 호출에 질의 여러 개를 묶어
+    # 보내고, 최상위 query 는 CLI 가 첫 질의를 잘라 만든 표시용 문자열이다
+    # (" ..." 로 끝난다). 그것 하나만 목록에 넣으면 관측 기록이 실제의 1/4 이
+    # 되고, 진짜 질의 목록은 모델 자기보고에만 남는다 — 자기보고를 관측으로
+    # 대체하는 것이 이 모듈의 존재 이유인데 거기서 구멍이 난다.
+    search_calls = [
+        call
         for call in calls
         if call.get("name") in _SEARCH_TOOL_NAMES
+        and _call_kind(call) == INPUT_KIND_QUERY
+    ]
+    queries: list[str] = []
+    for call in search_calls:
+        data = call["input"]
+        batch = data.get("queries")
+        if isinstance(batch, list) and batch:
+            queries.extend(
+                str(part).strip() for part in batch if str(part).strip()
+            )
+        elif data.get("query"):
+            queries.append(data["query"])
+    # URL 조회는 검색이 아니고 페이지 열람도 아니다. 세 번째 종류로 따로 센다.
+    # attempted/succeeded_fetch_urls 에는 절대 넣지 않는다 — 이 호출은 성공
+    # 신호를 주지 않으므로, 넣는 순간 열지 못한 URL 이 열람 기록이 된다.
+    # 2026-08-30 실측에서 열린 URL 과 실패한 URL 의 이벤트가 완전히 같았다.
+    url_lookups = [
+        call["input"]["url"]
+        for call in calls
+        if call.get("name") in _SEARCH_TOOL_NAMES
+        and _call_kind(call) == INPUT_KIND_URL
         and isinstance(call.get("input"), dict)
-        and call["input"].get("query")
+        and call["input"].get("url")
     ]
     # 시도한 열람과 성공한 열람을 나눈다. 403 이나 유료 장벽으로 실패한 호출을
     # '열람했다'로 세면 증거 등급이 근거 없이 올라간다.
@@ -1081,18 +1134,37 @@ def observed(
         for call in calls
         if call.get("ok") is False
     ]
+    # ok is None 은 "성공"이 아니라 "관측할 수 없음"이다. 확인된 실패와 같은
+    # 목록에 넣지 않고, 그렇다고 성공으로 승격하지도 않는다. 이 목록이 없으면
+    # "확인된 실패 0건"이 화면에서 "전부 성공"으로 읽힌다.
+    unknown = [
+        {
+            "name": call.get("name"),
+            "ts": call.get("ts"),
+            "input": call.get("input"),
+            "search_origin": call.get("search_origin"),
+        }
+        for call in calls
+        if call.get("ok") is None
+    ]
     result = {
         "tool_names": sorted(counts),
         "tool_call_counts": counts,
         "tool_calls": calls,
         # ARIA 가 스트림에서 직접 읽은 검색어다. 보고서가 무엇이라고 쓰든
-        # 실제로 나간 질의는 이것이다.
+        # 실제로 나간 질의는 이것이다. 호출 수와는 다른 값이므로 따로 센다.
         "search_queries": queries,
+        "search_call_count": len(search_calls),
         # 연 주소가 아니라 '열려고 한' 주소다. 성공 여부는 아래에 따로 있다.
         "attempted_fetch_urls": attempted,
         # 열람에 성공했고 그 본문을 실제로 읽은 것까지 확인된 주소.
         "succeeded_fetch_urls": succeeded,
+        # 검색어가 아니라 URL 로 부른 호출. 시도일 뿐 열람이 아니다.
+        "url_lookup_attempts": url_lookups,
+        # 구조적으로 실패가 확인된 호출.
         "tool_failures": failures,
+        # 성공도 실패도 관측할 수 없었던 호출.
+        "unknown_tool_outcomes": unknown,
     }
     if search_origin:
         result["search_queries_by_origin"] = {search_origin: queries}
@@ -1452,6 +1524,7 @@ def build(
     prompt_id: str,
     prompt_version: int | None,
     prompt_sha256: str,
+    runtime_context_sha256: str = "",
     claim_boundary_neutralized: bool,
     spec_document: dict | None = None,
     spec_boundary_neutralized: bool = False,
@@ -1528,7 +1601,24 @@ def build(
         "prompt": {
             "id": prompt_id,
             "version": prompt_version,
+            # 이 값은 **프롬프트 템플릿 파일**의 해시다. 모델에게 실제로 간
+            # 프롬프트가 아니다. 런타임 컨텍스트와 청구항이 붙기 전 값이라,
+            # 런타임 컨텍스트만 바뀐 두 실행이 여기서는 같아 보인다 —
+            # 2026-08-30 에 이 값을 근거로 "프롬프트 동일"이라고 잘못 보고했다.
+            # 실제로는 레인 해시가 3b53ad43… → bc0564c5… 로 달랐다.
+            #
+            # sha256 은 옛 기록·클라이언트 호환을 위해 남긴다. 새 코드는
+            # template_sha256 을 읽고, "같은 프롬프트인가"는 아래 두 값으로
+            # 판단해야 한다.
             "sha256": prompt_sha256,
+            "template_sha256": prompt_sha256,
+            "runtime_context_sha256": runtime_context_sha256,
+            # 레인별로 모델에게 실제로 간 프롬프트의 해시.
+            "effective_prompt_sha256": {
+                str(lane.get("id") or ""): str(lane.get("prompt_sha256") or "")
+                for lane in (search_lanes or [])
+                if lane.get("id")
+            },
         },
         "policy": {
             "name": tool_policy_name,

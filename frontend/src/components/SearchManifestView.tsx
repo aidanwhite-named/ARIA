@@ -291,8 +291,15 @@ export default function SearchManifestView({ job }: { job: Job }) {
   const toolFailures = observed.tool_failures ?? [];
   const searchQueries = observed.search_queries ?? [];
   const queriesByOrigin = observed.search_queries_by_origin ?? {};
-  const toolCounts = observed.tool_call_counts ?? {};
-  const searchCount = (toolCounts.WebSearch ?? 0) + (toolCounts.search_web ?? 0);
+  const urlLookups = observed.url_lookup_attempts ?? [];
+  const unknownOutcomes = observed.unknown_tool_outcomes ?? [];
+  // 도구 이름 개수로 세지 않는다. Codex 는 web_search 하나로 검색과 URL 조회를
+  // 겸하므로 이름을 세면 URL 조회가 검색으로 잡히고, 예전 코드는 web_search 를
+  // 아예 빼먹어서 Codex 실행이 "실제 검색 0회" 로 보였다.
+  //
+  // 질의 수로 세지도 않는다. 한 호출이 질의 여러 개를 묶어 보낸다. 옛 기록에는
+  // search_call_count 가 없고, 그때는 호출당 질의 하나라 둘이 같았다.
+  const searchCount = observed.search_call_count ?? searchQueries.length;
   const exposureEnforced = manifest.policy.advertised_tools_enforced !== false;
   const reported = manifest.reported;
   const candidates = reported?.candidates ?? [];
@@ -355,7 +362,15 @@ export default function SearchManifestView({ job }: { job: Job }) {
       <div className="search-summary">
         <span>
           <strong>실제 검색</strong> {searchCount}회
+          {searchQueries.length !== searchCount && (
+            <> (질의 {searchQueries.length}개)</>
+          )}
         </span>
+        {urlLookups.length > 0 && (
+          <span>
+            <strong>URL 조회 시도</strong> {urlLookups.length}건
+          </span>
+        )}
         <span>
           <strong>페이지 열람 시도</strong>{" "}
           {attempted.length}건
@@ -530,9 +545,18 @@ export default function SearchManifestView({ job }: { job: Job }) {
             </ul>
           )}
 
+          {(toolFailures.length > 0 || unknownOutcomes.length > 0) && (
+            <p className="faint">
+              확인된 도구 실패 {toolFailures.length}건 · 결과 확인 불가{" "}
+              {unknownOutcomes.length}건. <strong>결과 확인 불가</strong>는
+              실패가 아니라, 이 Provider 가 성공·실패를 구조화된 형태로 알려주지
+              않아 ARIA 가 판정할 수 없었다는 뜻입니다. 성공으로 읽지 마십시오.
+            </p>
+          )}
+
           {toolFailures.length > 0 && (
             <>
-              <h4>접근 실패</h4>
+              <h4>확인된 접근 실패</h4>
               <ul className="search-query-list">
                 {toolFailures.map((failure, i) => (
                   <li key={i} className="break">

@@ -299,7 +299,8 @@ export interface SearchMappingRow {
 
 export interface SearchCandidate {
   index: number;
-  group: "A" | "B" | "C";
+  /** 그룹 자격을 얻지 못한 후보(미확인 검색 단서)는 null 이다. */
+  group: "A" | "B" | "C" | null;
   provisional: boolean;
   /** 검색 경로. 현재는 web 뿐이고 향후 epo 등이 추가된다. */
   channel: string;
@@ -334,7 +335,9 @@ export interface SearchCandidate {
   /** ARIA가 붙인 독립 검색 출처. 모델이 정하는 값이 아니다. */
   search_origins?: ("claim_only" | "spec_assisted")[];
   /** 같은 문헌을 각 경로가 어느 그룹으로 분류했는지. */
-  origin_groups?: Partial<Record<"claim_only" | "spec_assisted", "A" | "B" | "C">>;
+  origin_groups?: Partial<
+    Record<"claim_only" | "spec_assisted", "A" | "B" | "C" | null>
+  >;
 }
 
 /** 청구항 문언을 명세서로 어떻게 읽었는지, 모델이 보고한 한 줄.
@@ -386,7 +389,18 @@ export interface SearchManifest {
     search_focus?: GapSearchFocus | null;
     focus_boundary_neutralized?: boolean;
   };
-  prompt: { id: string; version: number | null; sha256: string };
+  prompt: {
+    id: string;
+    version: number | null;
+    /** 템플릿 파일의 해시. 모델에게 실제로 간 프롬프트가 아니다(호환용 별칭). */
+    sha256: string;
+    /** 위와 같은 값. 이름으로 무엇의 해시인지 알 수 있게 둔 것. */
+    template_sha256?: string;
+    /** 런타임 컨텍스트의 해시. 템플릿이 같아도 이것이 다르면 프롬프트가 다르다. */
+    runtime_context_sha256?: string;
+    /** 레인별로 모델에게 실제로 간 프롬프트의 해시. */
+    effective_prompt_sha256?: Record<string, string>;
+  };
   policy: {
     name: string;
     allowed_tools: string[];
@@ -425,9 +439,13 @@ export interface SearchManifest {
       error: string | null;
     }[];
     search_queries: string[];
+    /** 검색 호출 수. 한 호출이 질의 여러 개를 묶어 보내므로 질의 수와 다르다. */
+    search_call_count?: number;
     search_queries_by_origin?: Partial<
       Record<"claim_only" | "spec_assisted", string[]>
     >;
+    /** 검색어가 아니라 URL 로 부른 호출. 시도일 뿐 열람이 아니다. */
+    url_lookup_attempts?: string[];
     /** 열려고 시도한 주소. 성공했다는 뜻이 아니다. */
     attempted_fetch_urls: string[];
     /** 실제로 열린 주소. 후보의 열람 주장은 이 목록과 대조해야 인정된다. */
@@ -437,6 +455,13 @@ export interface SearchManifest {
       ts: string;
       input: Record<string, unknown>;
       error: string;
+      search_origin?: "claim_only" | "spec_assisted";
+    }[];
+    /** 성공도 실패도 관측할 수 없었던 호출. 성공으로 읽으면 안 된다. */
+    unknown_tool_outcomes?: {
+      name: string;
+      ts: string;
+      input: Record<string, unknown>;
       search_origin?: "claim_only" | "spec_assisted";
     }[];
   };

@@ -467,7 +467,11 @@ def test_unknown_enum_values_fall_back_instead_of_crashing() -> None:
         _observed(),
     )
     candidate = reported["candidates"][0]
-    assert candidate["group"] == "C"
+    # 이 후보의 mapping 에는 page_text 근거 행이 없어 그룹 자격이 없다. 예전에는
+    # 알 수 없는 값을 "C" 로 떨어뜨렸지만, 그러면 미확인 단서가 분류된 후보처럼
+    # 읽힌다. 자격이 없으면 글자가 아니라 null 이다.
+    assert candidate["group"] is None
+    assert candidate["group_eligible"] is False
     assert candidate["channel"] == search_manifest.CHANNEL_WEB
     assert candidate["doc_type"] == "other"
     assert candidate["provenance"] == search_manifest.PROV_SNIPPET
@@ -894,3 +898,133 @@ def test_candidate_whose_page_was_read_keeps_its_page_supported_row() -> None:
     # 본문을 읽었다고 해서 공식 원문 대조로 올라가지는 않는다.
     assert candidate["provenance"] == "webfetch_summary"
     assert candidate["original_verified"] is False
+
+
+def test_ungrouped_candidate_keeps_its_number_but_loses_the_group_letter() -> None:
+    """페이지를 열지 못한 후보는 버려지지 않는다. 그룹만 잃는다.
+
+    2026-08-30 Codex 실행에서 모델이 후보 10건을 전부 access_failures 로 보내
+    "후보 0건" 이 나왔다. 원인은 group 에 A/B/C 말고 둘 곳이 없었던 것이다.
+    """
+    reported, _notes = search_manifest.parse(
+        _block({"candidates": [_candidate(group="A")]}),
+        _observed(succeeded=()),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["group"] is None
+    assert candidate["group_eligible"] is False
+    assert candidate["quarantined"] is True
+    # 후보 자체는 남는다 — 문헌번호가 다시 확인해 볼 단서다.
+    assert candidate["doc_number"] == "US2019/0123456A1"
+    assert candidate["origin_groups"] == {search_manifest.ORIGIN_CLAIM_ONLY: None}
+
+
+def test_group_eligible_candidate_still_falls_back_to_c() -> None:
+    """자격이 있는 후보의 알 수 없는 글자는 예전대로 C 로 떨어진다."""
+    reported, _notes = search_manifest.parse(
+        _block({"candidates": [_candidate(group="Z")]}),
+        _observed(),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["group_eligible"] is True
+    assert candidate["group"] == "C"
+
+
+def test_merged_candidates_never_carry_a_group_without_the_eligibility() -> None:
+    """병합 뒤에도 'group 이 있다 ⇔ group_eligible' 이 깨지면 안 된다."""
+    unmatched = "https://patents.example.com/new"
+    base, _ = search_manifest.parse(
+        _block({"candidates": [_candidate(group="A")]}),
+        _observed(),
+        search_origin=search_manifest.ORIGIN_CLAIM_ONLY,
+    )
+    assisted, _ = search_manifest.parse(
+        _block(
+            {
+                "term_expansions": [],
+                "candidates": [
+                    _candidate(group="B"),
+                    _candidate(
+                        group="A",
+                        doc_number="US2020/9999999A1",
+                        url=unmatched,
+                    ),
+                ],
+            }
+        ),
+        _observed(succeeded=(CANDIDATE_URL, unmatched)),
+        spec_provided=True,
+        search_origin=search_manifest.ORIGIN_SPEC_ASSISTED,
+    )
+    merged = search_manifest.merge_reported(base, assisted)
+    assert merged is not None
+    assert len(merged["candidates"]) == 2
+    for candidate in merged["candidates"]:
+        eligible = candidate["group_eligible"]
+        assert (candidate["group"] is not None) is eligible, candidate["doc_number"]
+        if not eligible:
+            assert all(
+                value is None for value in candidate["origin_groups"].values()
+            )
+
+
+def test_manifest_separates_template_hash_from_the_prompt_actually_sent() -> None:
+    """템플릿 해시로 "프롬프트가 같다"를 판정하면 안 된다.
+
+    2026-08-30 에 실제로 그렇게 잘못 보고했다. 템플릿은 그대로였지만 런타임
+    컨텍스트가 바뀌어 모델이 받은 프롬프트는 달랐다(레인 해시 3b53ad43… →
+    bc0564c5…).
+    """
+    manifest = search_manifest.build(
+        claim_text="청구항 1. 테스트",
+        prompt_id="search_prompt.md",
+        prompt_version=6,
+        prompt_sha256="a" * 64,
+        runtime_context_sha256="b" * 64,
+        claim_boundary_neutralized=False,
+        started_at="2026-08-30T00:00:00+00:00",
+        completed_at="2026-08-30T00:01:00+00:00",
+        tool_calls=[],
+        tool_uses=[],
+        tool_policy_name="codex_web_search",
+        allowed_tools=("web_search",),
+        search_lanes=[
+            {"id": "claim_only", "prompt_sha256": "c" * 64},
+            {"id": "spec_assisted", "prompt_sha256": "d" * 64},
+        ],
+        reported=None,
+        notes=[],
+        error=None,
+    )
+    prompt = manifest["prompt"]
+    # 옛 기록·클라이언트를 위해 sha256 은 그대로 둔다.
+    assert prompt["sha256"] == "a" * 64
+    assert prompt["template_sha256"] == "a" * 64
+    assert prompt["runtime_context_sha256"] == "b" * 64
+    assert prompt["effective_prompt_sha256"] == {
+        "claim_only": "c" * 64,
+        "spec_assisted": "d" * 64,
+    }
+    # 실제로 간 프롬프트는 템플릿과 다르다.
+    assert prompt["template_sha256"] not in prompt["effective_prompt_sha256"].values()
+
+
+def test_manifest_without_lanes_has_an_empty_effective_hash_map() -> None:
+    manifest = search_manifest.build(
+        claim_text="청구항 1. 테스트",
+        prompt_id="search_prompt.md",
+        prompt_version=6,
+        prompt_sha256="a" * 64,
+        claim_boundary_neutralized=False,
+        started_at="2026-08-30T00:00:00+00:00",
+        completed_at="2026-08-30T00:01:00+00:00",
+        tool_calls=[],
+        tool_uses=[],
+        tool_policy_name="codex_web_search",
+        allowed_tools=("web_search",),
+        reported=None,
+        notes=[],
+        error=None,
+    )
+    assert manifest["prompt"]["effective_prompt_sha256"] == {}
+    assert manifest["prompt"]["runtime_context_sha256"] == ""

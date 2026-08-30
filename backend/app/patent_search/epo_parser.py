@@ -139,6 +139,12 @@ def _parse_xml(data: bytes):
         raise EpoXmlError(f"XML 을 파싱하지 못했습니다: {exc}") from exc
 
 
+# fault 판정처럼 다른 모듈이 XML 을 열어야 할 때도 같은 경화 경로를 쓰게
+# 공개한다. 파서를 하나 더 만들면 DOCTYPE·크기 가드가 둘로 갈라지고, 그중
+# 하나는 반드시 낡는다.
+parse_xml = _parse_xml
+
+
 def _docdb_id(node):
     """``document-id[document-id-type=docdb]`` 하나에서 (country, number, kind, date)."""
     for candidate in _iter(node, "document-id"):

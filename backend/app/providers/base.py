@@ -89,6 +89,15 @@ class ToolPolicy:
                        여부가 갈리는 도구. 가져온 페이지 본문을 파일로만 돌려주는
                        Provider 가 여기에 해당한다. Provider 가 인자를 검사해
                        call["scope_ok"] 를 True 로 표시한 호출만 허용된다.
+      max_search_calls : **검색어로 부른** 호출의 상한. 0 이면 상한 없음.
+                       max_tool_calls 와 따로 센다. 도구 하나가 검색과 URL
+                       조회를 겸하는 Provider(Codex web_search)가 있어서,
+                       도구 이름만 세면 URL 을 몇 개 열어 보는 것으로 검색
+                       라운드가 마른다.
+      max_url_lookup_calls : **URL 로 부른** 호출의 상한. 0 이면 상한 없음.
+                       성공이 아니라 **시도**를 센다 — 이 Provider 들은 열람
+                       성공 여부를 구조화된 형태로 알려주지 않으므로, 성공만
+                       세는 예산은 영원히 소진되지 않는다.
       max_content_read_calls : 위 도구의 호출 상한. 검색 호출 상한과 따로 센다.
                        페이지 하나를 100줄씩 나눠 읽는 것과 검색을 100번 하는
                        것은 다른 행동이고, 한 예산에 섞으면 본문을 성실히 읽을수록
@@ -106,6 +115,8 @@ class ToolPolicy:
     enforce_advertised_allowlist: bool = True
     content_read_tools: tuple[str, ...] = ()
     max_content_read_calls: int = 0
+    max_search_calls: int = 0
+    max_url_lookup_calls: int = 0
 
     @property
     def tools_disabled(self) -> bool:
@@ -192,15 +203,28 @@ AGY_WEB_SEARCH = ToolPolicy(
 # 호출에 대한 사후 탐지 계약이다. 도구 이름은 CLI 가 내보내는 항목 종류
 # (item.type) 를 그대로 쓴다 — codex_stream.TOOL_ITEM_TYPES 를 보라.
 #
-# 페이지 본문을 여는 도구가 없다. 그래서 이 정책으로 나온 후보는 검색 스니펫
-# 수준을 넘지 못하고, 구성 대응표의 page_text 행은 만들어질 수 없다(대조할
-# 열람 기록이 없으므로 search_manifest 가 snippet 으로 내린다). 근거 기반
-# 대응표가 필요한 실행에는 쓰지 않는다 — 스니펫 기반 후보 탐색 전용이다.
+# web_search 하나가 검색과 URL 조회를 겸한다. 2026-08-30 실측에서 모델이
+# 검색어 대신 URL 을 넣어 부르는 호출이 확인됐고, 그중 일부는 페이지 내용을
+# 받아왔다. 그런데 **성공 여부는 스트림에 오지 않는다** — 열린 URL 3건과
+# 실패한 URL 3건의 완료 이벤트가 필드 단위로 완전히 같았다(status/error/
+# results/sources 전부 없음).
+#
+# 그래서 이 정책은 URL 조회를 "시도"로만 세고 열람으로 승격하지 않는다.
+# 구성 대응표의 page_text 행은 여전히 만들어질 수 없다. 열람 성공을 판정할
+# 구조화된 신호가 생기기 전까지는 스니펫 기반 후보 탐색 전용이다.
+#
+# 예산이 세 층인 이유: 도구 이름 하나로 두 가지 행동을 하므로, 이름만 세면
+# URL 을 스무 개 열어 보는 것만으로 검색 예산이 마른다.
 CODEX_WEB_SEARCH = ToolPolicy(
     name="codex_web_search",
     allowed_tools=("web_search",),
     required_tools=("web_search",),
+    # 1층: 시작 이벤트 기준 전체 hard cap. 시작 시점에는 query 가 비어 있어
+    # 종류를 모르므로, 종류별 예산만으로는 폭주를 막을 수 없다.
     max_tool_calls=40,
+    # 2층: 검색어 호출. 3층: URL 조회 호출. 둘 다 완료 이벤트 기준이다.
+    max_search_calls=40,
+    max_url_lookup_calls=20,
     enforce_advertised_allowlist=False,
 )
 

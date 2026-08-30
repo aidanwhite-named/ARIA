@@ -120,6 +120,15 @@ def _is_permission_denial(value: object) -> bool:
     return any(marker in text for marker in _PERMISSION_DENIAL_MARKERS)
 
 
+def _observed_search_attempt(calls) -> bool:
+    """검색어로 부른 호출이 하나라도 있는가.
+
+    성공 여부는 묻지 않는다. 이 Provider 는 성공 신호를 주지 않으므로, 성공을
+    요구하면 검색을 하고도 SEARCH_NOT_PERFORMED 로 떨어진다.
+    """
+    return any(call["input"].get("input_kind") == "query" for call in calls)
+
+
 def _search_permission_denial(
     outcome: ExecutionOutcome,
 ) -> tuple[list[str], list[str]] | None:
@@ -343,6 +352,26 @@ def evaluate(
                 + ", ".join(policy.required_tools)
                 + " 중 최소 1회 필요). 이 결과는 웹 검색으로 확인된 내용이 아니라 "
                 "모델이 기억에서 작성한 것이므로 검토 후보로 쓸 수 없습니다."
+            )
+            return Verdict(JobStatus.FAILED, ErrorCode.SEARCH_NOT_PERFORMED, errors)
+        # 도구를 불렀다고 검색을 한 것은 아니다. Codex 의 web_search 는 도구
+        # 하나로 검색과 URL 조회를 겸하므로, URL 만 조회한 실행도 도구 이름
+        # 으로는 검색으로 보인다. 성공 여부는 묻지 않는다 — 이 Provider 는
+        # 성공 신호를 주지 않으므로, 성공을 요구하면 검색을 하고도 실패한다.
+        #
+        # 종류를 표시하는 Provider 에만 적용한다. Claude 와 agy 는 도구 이름이
+        # 곧 종류라 이 모호함이 없고, input_kind 를 붙이지도 않는다. 그쪽까지
+        # 건드리면 검색 도구를 부른 실행을 기록 형태 차이만으로 떨어뜨린다.
+        labelled = [
+            call
+            for call in (outcome.tool_calls or ())
+            if isinstance(call.get("input"), dict)
+            and call["input"].get("input_kind")
+        ]
+        if labelled and not _observed_search_attempt(labelled):
+            errors.append(
+                "검색어로 부른 검색 호출이 한 번도 없습니다(URL 조회만 관측). "
+                "이 결과는 검색으로 찾은 것이 아니므로 검토 후보로 쓸 수 없습니다."
             )
             return Verdict(JobStatus.FAILED, ErrorCode.SEARCH_NOT_PERFORMED, errors)
 

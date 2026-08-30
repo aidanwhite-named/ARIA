@@ -131,6 +131,60 @@ def _search_lane_budgets(total: int, spec_provided: bool) -> dict[str, int]:
     }
 
 
+PROGRESS_SEARCH = "search"
+PROGRESS_URL_LOOKUP = "url_lookup"
+PROGRESS_FETCH = "fetch"
+
+
+def _progress_counts_as(event_type: str, payload: dict) -> str:
+    """실시간 진행 표시에서 이 이벤트를 무엇으로 셀지. "" 이면 세지 않는다.
+
+    도구 이름만 보고 세면 안 된다. Codex 의 web_search 는 도구 하나로 검색과
+    URL 조회를 겸하고, 종류는 완료 이벤트에서야 정해진다. 시작 이벤트에
+    kind_pending 이 붙어 있으면 여기서 세지 않고 완료를 기다린다 — 그러지
+    않으면 URL 조회가 "검색어 없는 검색 N회째" 로 화면에 찍힌다.
+    """
+    if event_type not in ("tool_use", "tool_use_resolved"):
+        return ""
+    if event_type == "tool_use" and payload.get("kind_pending"):
+        return ""
+    summary = payload.get("input") or {}
+    kind = summary.get("input_kind") if isinstance(summary, dict) else None
+    if kind == search_manifest.INPUT_KIND_URL:
+        return PROGRESS_URL_LOOKUP
+    if kind == search_manifest.INPUT_KIND_QUERY:
+        return PROGRESS_SEARCH
+    if event_type == "tool_use_resolved":
+        # 종류를 표시하는 Provider 가 이번엔 표시하지 못했다는 뜻이다(완료
+        # 이벤트에 query 가 비었거나 형태가 바뀌었다). 이름으로 되돌리면 URL
+        # 조회가 다시 검색으로 잡힌다 — 애초에 이름 기반 가정을 버리려고 이
+        # 이벤트를 만들었다. 모르면 세지 않는다.
+        return ""
+    name = str(payload.get("name") or "")
+    # 종류를 표시하지 않는 Provider 는 도구 이름이 곧 종류다.
+    if name in search_manifest.SEARCH_TOOL_NAMES:
+        return PROGRESS_SEARCH
+    if name in search_manifest.FETCH_TOOL_NAMES:
+        return PROGRESS_FETCH
+    return ""
+
+
+def _progress_should_count(counted: set, search_origin: str, call_id: str) -> bool:
+    """같은 호출을 두 번 세지 않는다. 세어야 하면 True 를 주고 표시까지 한다.
+
+    키에 레인을 넣는다. 두 레인은 각자 별도의 CLI 프로세스이고 호출 ID 는 그
+    프로세스 안에서만 고유하다. ID 만 쓰면 명세서 보조 검색의 첫 호출이 청구항
+    단독 검색의 같은 ID 와 겹쳐 통째로 누락된다.
+    """
+    if not call_id:
+        return True
+    key = (search_origin, call_id)
+    if key in counted:
+        return False
+    counted.add(key)
+    return True
+
+
 def _merge_search_outcomes(
     lane_outcomes: list[tuple[str, ExecutionOutcome]], tool_policy: ToolPolicy
 ) -> ExecutionOutcome:
@@ -580,6 +634,7 @@ class JobRunner:
 
             # --- 프롬프트 조립 -------------------------------------------
             search_prompt_sha = ""
+            search_runtime_context_sha = ""
             claim_boundary_neutralized = False
             spec_boundary_neutralized = False
             focus_boundary_neutralized = False
@@ -617,6 +672,7 @@ class JobRunner:
                     search_assemblies = dict(assembly.lanes)
                     spec_document = assembly.spec_document
                     search_prompt_sha = assembly.search_prompt_sha
+                    search_runtime_context_sha = assembly.search_runtime_context_sha
                     claim_boundary_neutralized = assembly.claim_boundary_neutralized
                     spec_boundary_neutralized = assembly.spec_boundary_neutralized
                     focus_boundary_neutralized = assembly.focus_boundary_neutralized
@@ -641,6 +697,37 @@ class JobRunner:
                         # 나눌 수 없을 만큼 작은 상한. 0 은 '상한 없음'이라
                         # 여기서 쓰면 정반대가 되므로 레인마다 1회로 둔다.
                         content_lane_budgets = {
+                            origin: 1 for origin in search_assemblies
+                        }
+                    # 검색 호출과 URL 조회 상한도 같은 방식으로 레인에 나눈다.
+                    # 나누지 않으면 두 레인이 한 예산을 놓고 경쟁해서 먼저 도는
+                    # 레인이 다 써 버린다.
+                    search_call_budget = int(
+                        getattr(tool_policy, "max_search_calls", 0) or 0
+                    )
+                    search_call_lane_budgets = (
+                        _search_lane_budgets(
+                            search_call_budget, spec_document is not None
+                        )
+                        if search_call_budget
+                        else {}
+                    )
+                    if search_call_budget and not search_call_lane_budgets:
+                        search_call_lane_budgets = {
+                            origin: 1 for origin in search_assemblies
+                        }
+                    url_lookup_budget = int(
+                        getattr(tool_policy, "max_url_lookup_calls", 0) or 0
+                    )
+                    url_lookup_lane_budgets = (
+                        _search_lane_budgets(
+                            url_lookup_budget, spec_document is not None
+                        )
+                        if url_lookup_budget
+                        else {}
+                    )
+                    if url_lookup_budget and not url_lookup_lane_budgets:
+                        url_lookup_lane_budgets = {
                             origin: 1 for origin in search_assemblies
                         }
                     if spec_document is not None and not lane_budgets:
@@ -860,7 +947,17 @@ class JobRunner:
             # 검색 작업은 도구 호출이 곧 진행 상황이다. 화면이 "무엇을 검색하고
             # 어디를 열어 보는 중"인지 보여줄 수 있도록 관측한 호출을 단계로
             # 옮긴다. 보고서를 기다리는 동안 아무 일도 없어 보이면 안 된다.
-            search_state = {"searches": 0, "fetches": 0, "reads": 0}
+            # counted 는 이미 센 호출의 (레인, ID). 같은 호출이 시작·완료 두 번
+            # 오므로 이것이 없으면 두 번 세거나, 종류를 알기 전에 세게 된다.
+            # 레인을 키에 넣는 이유: 두 레인은 각자 별도의 CLI 프로세스이고 호출
+            # ID 는 프로세스 안에서만 고유하다. ID 만 쓰면 명세서 보조 검색의
+            # 첫 호출이 청구항 단독 검색의 같은 ID 와 겹쳐 통째로 누락된다.
+            search_state = {
+                "searches": 0,
+                "fetches": 0,
+                "reads": 0,
+                "counted": set(),
+            }
 
             def make_emit(search_origin: str | None = None):
                 async def emit(event_type: str, payload: dict) -> None:
@@ -870,16 +967,50 @@ class JobRunner:
                     await self._emit(job_id, event_type, payload)
                     if job_kind is not JobKind.SIMILARITY_SEARCH:
                         return
-                    if event_type != "tool_use":
+                    if event_type not in ("tool_use", "tool_use_resolved"):
                         return
+                    counts_as = _progress_counts_as(event_type, payload)
                     name = str(payload.get("name") or "")
+                    if not counts_as and name not in (
+                        tool_policy.content_read_tools or ()
+                    ):
+                        return
+                    if not _progress_should_count(
+                        search_state["counted"],
+                        search_origin,
+                        str(payload.get("id") or ""),
+                    ):
+                        return
                     summary = payload.get("input") or {}
                     origin_label = (
                         "청구항 단독"
                         if search_origin == search_manifest.ORIGIN_CLAIM_ONLY
                         else "명세서 확장"
                     )
-                    if name in search_manifest.SEARCH_TOOL_NAMES:
+                    if counts_as == PROGRESS_URL_LOOKUP:
+                        # 검색도 아니고 페이지 열람도 아니다. 성공 여부를 알 수
+                        # 없으므로 "시도" 로만 알린다.
+                        search_state["url_lookups"] = (
+                            search_state.get("url_lookups", 0) + 1
+                        )
+                        await self._emit(
+                            job_id,
+                            "search_progress",
+                            {
+                                "phase": "url_lookup",
+                                "search_origin": search_origin,
+                                "searches": search_state["searches"],
+                                "fetches": search_state["fetches"],
+                                "url_lookups": search_state["url_lookups"],
+                                "message": (
+                                    f"{origin_label} URL 조회 "
+                                    f"{search_state['url_lookups']}건째"
+                                    " (열람 성공 여부는 확인되지 않음): "
+                                    f"{str(summary.get('url', ''))[:120]}"
+                                ),
+                            },
+                        )
+                    elif counts_as == PROGRESS_SEARCH:
                         search_state["searches"] += 1
                         await self._emit(
                             job_id,
@@ -897,7 +1028,7 @@ class JobRunner:
                                 ),
                             },
                         )
-                    elif name in search_manifest.FETCH_TOOL_NAMES:
+                    elif counts_as == PROGRESS_FETCH:
                         search_state["fetches"] += 1
                         await self._emit(
                             job_id,
@@ -957,6 +1088,8 @@ class JobRunner:
                         tool_policy,
                         max_tool_calls=lane_budgets[origin],
                         max_content_read_calls=content_lane_budgets.get(origin, 0),
+                        max_search_calls=search_call_lane_budgets.get(origin, 0),
+                        max_url_lookup_calls=url_lookup_lane_budgets.get(origin, 0),
                     )
                     lane_request = ExecutionRequest(
                         job_id=job_id,
@@ -1212,6 +1345,7 @@ class JobRunner:
                     prompt_id=search_prompt.SEARCH_PROMPT_ID,
                     prompt_version=prompt_version,
                     prompt_sha256=search_prompt_sha,
+                    runtime_context_sha256=search_runtime_context_sha,
                     claim_boundary_neutralized=claim_boundary_neutralized,
                     spec_document=spec_document,
                     spec_boundary_neutralized=spec_boundary_neutralized,

@@ -11,6 +11,7 @@ runner 와 preflight 가 **같은 함수**를 부른다.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 from . import retrieval, search_manifest, search_prompt
@@ -32,7 +33,8 @@ from .prompt_assembly import (
 from .prompt_assembly import included_attachments as prompt_assembly_included
 
 # 검색 실행의 런타임 규칙은 Provider 가 실제로 가진 도구에 맞춰야 한다.
-# 도구 이름이 다를 뿐 아니라, Codex 는 페이지를 여는 도구 자체가 없고 agy 는
+# 도구 이름이 다를 뿐 아니라, Codex 는 web_search 하나로 검색과 URL 조회를
+# 겸하고(성공 여부는 ARIA 가 확인할 수 없다) agy 는
 # 가져온 페이지를 파일로만 돌려준다. 정책 이름으로 고르므로 Provider 가 늘어도
 # 이 표만 채우면 된다.
 SEARCH_CONTEXT_BY_POLICY = {
@@ -124,6 +126,9 @@ class AssemblyResult:
     # 그때 EPO 는 청구항 단독 레인만 돈다.
     spec_text: str = ""
     search_prompt_sha: str = ""
+    # 런타임 컨텍스트의 해시. 템플릿이 그대로여도 이것이 바뀌면 모델이 받은
+    # 프롬프트가 달라진다 — Provider 별 파생 컨텍스트가 여기에 들어간다.
+    search_runtime_context_sha: str = ""
     claim_boundary_neutralized: bool = False
     spec_boundary_neutralized: bool = False
     focus_boundary_neutralized: bool = False
@@ -704,6 +709,9 @@ def assemble_job(
         spec_document=spec_document,
         spec_text=spec_text,
         search_prompt_sha=search_prompt.sha256(master_prompt),
+        search_runtime_context_sha=hashlib.sha256(
+            search_context.encode("utf-8")
+        ).hexdigest(),
         claim_boundary_neutralized=claim_rendered.claim_boundary_neutralized,
         spec_boundary_neutralized=spec_boundary_neutralized,
         focus_boundary_neutralized=claim_rendered.focus_boundary_neutralized,

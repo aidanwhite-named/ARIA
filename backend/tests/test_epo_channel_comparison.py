@@ -203,7 +203,7 @@ def test_manifest_v6_records_the_derived_comparison_and_used_channel() -> None:
         _epo(_lane("epo:claim_only", _epo_candidate("EP1000000A1"))),
     )
 
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["channel_comparison"]["counts"]["both"] == 1
     assert search_manifest.CHANNEL_PATENT_DB in manifest["channels_used"]
     # 원 채널 기록은 파생 비교를 만들면서 바뀌지 않는다.

@@ -421,6 +421,17 @@ class EpoOpsBackend(PatentSearchBackend):
         store = self._require_store()
         artifact_id = store.put(call.body)
 
+        if getattr(call, "no_results", False):
+            # 검색 결과 0건. 원본 fault XML 은 바로 위에서 아티팩트로 보존했고
+            # 사용량도 이미 반영됐다. 파서에는 넘기지 않는다 — fault 문서는
+            # 검색 응답 스키마가 아니라서 읽으려 하면 오류가 된다.
+            return PatentSearchResponse(
+                records=(),
+                total_found=0,
+                raw_artifact_id=artifact_id,
+                fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+
         try:
             documents = epo_parser.read_documents(call.body)
             total = epo_parser.total_result_count(call.body) or len(documents)

@@ -352,6 +352,59 @@ def test_403_is_auth_error_not_retried(store) -> None:
     assert len(transport.requests) == 2
 
 
+def test_search_404_no_results_is_an_empty_result_not_a_failure(store) -> None:
+    """OPS 는 검색 0건을 404 + SERVER.EntityNotFound 로 알린다.
+
+    이걸 호출 실패로 올리면 레인이 provider_error 로 끝나고, 앞 라운드에서
+    실제로 찾은 후보까지 채널 대조에서 통째로 빠진다. 2026-08-30 실행에서
+    1라운드 후보 2건이 그렇게 사라졌다.
+    """
+    transport = FakeTransport(
+        token_response(), ok(fx.SEARCH_NO_RESULTS_404, status=404)
+    )
+    backend = make_backend(transport, store)
+    response = backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "없는것"))
+    assert response.records == ()
+    assert response.total_found == 0
+    # 원본 fault 는 아티팩트로 보존한다. 사용량을 쓴 호출의 흔적을 지우지 않는다.
+    assert response.raw_artifact_id
+    assert b"SERVER.EntityNotFound" in store.read(response.raw_artifact_id)
+
+
+def test_search_404_with_a_different_fault_is_still_a_failure(store) -> None:
+    """404 전체를 정상으로 돌리지 않는다. 0건인 fault 하나만 통과시킨다."""
+    transport = FakeTransport(
+        token_response(), ok(fx.SEARCH_OTHER_FAULT_404, status=404)
+    )
+    backend = make_backend(transport, store)
+    with pytest.raises(epo_client.OpsError):
+        backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+
+
+def test_fault_text_echoed_in_a_non_fault_body_is_not_zero_results(store) -> None:
+    """판정은 substring 이 아니라 fault 문서의 code/message 로 한다.
+
+    본문 어딘가에 같은 문자열이 들어 있다고 0건으로 읽으면, 실제 오류가
+    조용히 "그런 특허 없음" 이 된다.
+    """
+    transport = FakeTransport(
+        token_response(), ok(fx.SEARCH_ECHOES_FAULT_TEXT_404, status=404)
+    )
+    backend = make_backend(transport, store)
+    with pytest.raises(epo_client.OpsError):
+        backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+
+
+def test_detail_404_is_still_a_failure(store) -> None:
+    """상세 조회의 404 는 '그 문헌이 없다'는 다른 사실이다. 0건과 섞지 않는다."""
+    transport = FakeTransport(
+        token_response(), ok(fx.SEARCH_NO_RESULTS_404, status=404)
+    )
+    backend = make_backend(transport, store)
+    with pytest.raises(epo_client.OpsError):
+        backend.fetch_document("EP1000000A1")
+
+
 def test_zero_results_is_not_a_failure(store) -> None:
     """0건과 호출 실패는 다른 사건이다. 섞으면 실패가 '그런 특허 없음'이 된다."""
     transport = FakeTransport(token_response(), ok(fx.SEARCH_EMPTY))

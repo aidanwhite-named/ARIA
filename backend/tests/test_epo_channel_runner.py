@@ -181,7 +181,7 @@ def test_epo_lane_is_recorded_with_a_fixed_id(client, epo_on) -> None:
 
 def test_manifest_version_is_six(client, epo_on) -> None:
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
 
 
 # ---------------------------------------------------------------- 격리
@@ -469,7 +469,7 @@ def test_cancel_inside_a_running_epo_lane_stops_the_next_one(client, epo_on) -> 
 def test_manifest_exists_when_the_epo_lane_fails(client, epo_on) -> None:
     fake_provider.EPO_SCRIPT["epo:claim_only"] = ["깨진 응답"] * 5
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
     assert manifest["epo"]["lanes"], "실패한 레인의 기록이 없습니다."
     assert manifest["timing"]["completed_at"]
 

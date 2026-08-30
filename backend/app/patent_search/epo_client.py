@@ -37,7 +37,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from . import epo_quota
+from . import epo_parser, epo_quota
 from .base import PatentSearchError
 
 # --- 고정 주소. 설정으로도 응답으로도 바뀌지 않는다 -----------------------
@@ -166,10 +166,59 @@ class OpsCall:
     elapsed_seconds: float
     retries: int
     kind: str  # token | search | detail
+    # 검색 결과가 0건이라 OPS 가 404 로 답한 호출. 실패가 아니라 빈 결과다.
+    no_results: bool = False
 
     @property
     def byte_count(self) -> int:
         return len(self.body)
+
+
+_NO_RESULTS_FAULT_CODE = "SERVER.EntityNotFound"
+_NO_RESULTS_FAULT_MESSAGE = "No results found"
+
+
+def _local_name(tag) -> str:
+    """네임스페이스 접두를 떼어낸 태그 이름. OPS 는 기본 네임스페이스를 쓴다."""
+    return str(tag).rpartition("}")[2]
+
+
+def _fault_fields(body: bytes) -> dict[str, str]:
+    """OPS fault 문서의 code/message 를 읽는다. 아니면 빈 dict.
+
+    substring 검사를 쓰지 않는다. 검색 결과 본문 어딘가에 같은 문자열이
+    들어 있기만 해도 0건으로 오판하기 때문이다. 파싱은 epo_parser 의
+    경화된 경로를 쓴다 — DOCTYPE/ENTITY 선언과 크기 상한을 함께 거른다.
+    """
+    try:
+        root = epo_parser.parse_xml(body)
+    except Exception:
+        return {}
+    if _local_name(root.tag) != "fault":
+        return {}
+    fields = {}
+    for child in root:
+        name = _local_name(child.tag)
+        if name in ("code", "message"):
+            fields[name] = (child.text or "").strip()
+    return fields
+
+
+def _is_search_no_results(kind: str, status: int, body: bytes) -> bool:
+    """검색 엔드포인트의 '결과 0건'만 정상 빈 결과로 인정한다.
+
+    404 전체를 정상으로 돌리지 않는다. 상세 조회의 404 는 "그 문헌이 없다"는
+    다른 사실이고, 엔드포인트 자체가 사라져도 같은 상태 코드가 온다. 네 조건이
+    모두 맞을 때만 빈 결과로 취급한다 — 엔드포인트가 search 이고, 404 이고,
+    본문이 OPS fault 문서이고, code/message 가 정확히 일치할 때.
+    """
+    if kind != "search" or status != 404:
+        return False
+    fields = _fault_fields(body)
+    return (
+        fields.get("code") == _NO_RESULTS_FAULT_CODE
+        and fields.get("message") == _NO_RESULTS_FAULT_MESSAGE
+    )
 
 
 def _default_transport(request: urllib.request.Request, timeout: float) -> HttpResponse:
@@ -425,6 +474,22 @@ class OpsClient:
                 raise OpsUnavailable(
                     f"EPO OPS 가 계속 실패합니다(HTTP {response.status}, "
                     f"재시도 {retries}회)."
+                )
+            if _is_search_no_results(kind, response.status, response.body):
+                # OPS 는 "검색 결과 0건"을 404 + SERVER.EntityNotFound 로 알린다.
+                # 이걸 오류로 올리면 레인이 provider_error 로 끝나고, 그 앞
+                # 라운드에서 실제로 찾은 후보까지 채널 대조에서 통째로 빠진다
+                # (2026-08-30 실행에서 1라운드 후보 2건이 그렇게 사라졌다).
+                # 본문은 그대로 넘긴다 — 원본 fault 는 아티팩트로 보존한다.
+                return OpsCall(
+                    url=request.full_url,
+                    status=response.status,
+                    headers=dict(response.headers),
+                    body=response.body,
+                    elapsed_seconds=round(self.clock() - started, 3),
+                    retries=retries,
+                    kind=kind,
+                    no_results=True,
                 )
             if response.status >= 400:
                 detail = scrub(

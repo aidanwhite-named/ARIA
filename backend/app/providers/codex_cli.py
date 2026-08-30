@@ -55,7 +55,7 @@ from .base import (
     ProbeResult,
     Provider,
 )
-from .codex_stream import CodexStreamParser
+from .codex_stream import CodexStreamParser, split_call_kinds
 from .env import build_child_env
 from .resolver import ResolvedExecutable, resolve_simple
 
@@ -298,22 +298,49 @@ class CodexCliProvider(Provider):
             nonlocal budget_exceeded
             for event_type, payload in parser.feed(line):
                 await emit(event_type, payload)
+            if search_policy is None or budget_exceeded:
+                return
+            # 1층: 시작 이벤트 기준 전체 hard cap. 시작 시점에는 query 가 비어
+            # 있어 종류를 모르므로, 종류별 예산만으로는 폭주를 막을 수 없다.
+            over: tuple[int, str] | None = None
             if (
-                search_policy is not None
-                and search_policy.max_tool_calls
-                and not budget_exceeded
+                search_policy.max_tool_calls
                 and len(parser.state.tool_uses) > search_policy.max_tool_calls
             ):
+                over = (
+                    search_policy.max_tool_calls,
+                    f"도구 호출이 상한({search_policy.max_tool_calls}회)을 넘어 "
+                    "실행을 중단합니다.",
+                )
+            else:
+                # 2·3층: 완료 이벤트 기준. web_search 하나가 검색과 URL 조회를
+                # 겸하므로 한 예산에 섞으면 URL 을 몇 개 열어 보는 것만으로
+                # 검색 라운드가 마른다.
+                searches, lookups = split_call_kinds(parser.state.tool_calls)
+                if (
+                    search_policy.max_search_calls
+                    and searches > search_policy.max_search_calls
+                ):
+                    over = (
+                        search_policy.max_search_calls,
+                        f"검색 호출이 상한({search_policy.max_search_calls}회)을 "
+                        "넘어 실행을 중단합니다.",
+                    )
+                elif (
+                    search_policy.max_url_lookup_calls
+                    and lookups > search_policy.max_url_lookup_calls
+                ):
+                    over = (
+                        search_policy.max_url_lookup_calls,
+                        "URL 조회가 상한("
+                        f"{search_policy.max_url_lookup_calls}회)을 넘어 실행을 "
+                        "중단합니다.",
+                    )
+            if over is not None:
                 budget_exceeded = True
                 await emit(
                     "tool_budget_exceeded",
-                    {
-                        "limit": search_policy.max_tool_calls,
-                        "message": (
-                            f"도구 호출이 상한({search_policy.max_tool_calls}회)을 넘어 "
-                            "실행을 중단합니다."
-                        ),
-                    },
+                    {"limit": over[0], "message": over[1]},
                 )
                 await proc.cancel_job(request.job_id)
 

@@ -500,9 +500,20 @@ def render(manifest: dict) -> str:
         f"- 그룹 분류된 후보 {len(grouped)}건 · 미확인 검색 단서 {len(isolated)}건",
         f"- 페이지 본문을 읽은 것이 확인된 후보 {reviewed}건",
         f"- 원문 대조가 확인된 후보 {verified}건",
-        f"- 실제 검색 호출 {len(observed.get('search_queries') or [])}회",
+        # 옛 기록에는 search_call_count 가 없다. 그때는 호출당 질의 하나였으므로
+        # 질의 수가 곧 호출 수였다.
+        f"- 실제 검색 호출 "
+        f"{observed.get('search_call_count', len(observed.get('search_queries') or []))}회 "
+        f"(실제 질의 {len(observed.get('search_queries') or [])}개)",
+        # URL 조회는 검색이 아니고 페이지 열람도 아니다. 이 Provider 는 열람
+        # 성공을 알려주지 않으므로 "시도"까지만 적는다.
+        f"- URL 조회 시도 {len(observed.get('url_lookup_attempts') or [])}건 "
+        "(열람 성공 여부는 관측되지 않음)",
         f"- 페이지 열람 시도 {len(observed.get('attempted_fetch_urls') or [])}건 "
         f"(본문 읽음 {len(observed.get('succeeded_fetch_urls') or [])}건)",
+        # "확인된 실패 0건"이 "전부 성공"으로 읽히지 않게 둘을 나란히 적는다.
+        f"- 확인된 도구 실패 {len(observed.get('tool_failures') or [])}건 · "
+        f"결과 확인 불가 {len(observed.get('unknown_tool_outcomes') or [])}건",
         "",
     ]
 

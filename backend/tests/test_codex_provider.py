@@ -18,7 +18,11 @@ from pathlib import Path
 
 from app.providers.base import CODEX_WEB_SEARCH, NO_TOOLS, ExecutionRequest
 from app.providers.codex_cli import CodexCliProvider
-from app.providers.codex_stream import TOOL_ITEM_TYPES, CodexStreamParser
+from app.providers.codex_stream import (
+    TOOL_ITEM_TYPES,
+    CodexStreamParser,
+    split_call_kinds,
+)
 
 
 def _feed(parser: CodexStreamParser, payload: dict) -> list[tuple[str, dict]]:
@@ -143,7 +147,10 @@ def test_every_known_tool_item_is_detected() -> None:
             },
         )
         assert parser.state.tool_uses == [item_type], item_type
-        assert parser.state.tool_calls[0]["ok"] is True
+        # status 도 error 도 없는 완료 이벤트는 "끝났다"만 말한다. 성공했다는
+        # 뜻이 아니므로 판정 불가(None)로 남긴다. 도구 탐지는 그와 무관하게
+        # 되어야 한다 — 이 테스트가 보는 것은 탐지 쪽이다.
+        assert parser.state.tool_calls[0]["ok"] is None
 
 
 def test_started_and_completed_count_as_one_call() -> None:
@@ -158,7 +165,10 @@ def test_started_and_completed_count_as_one_call() -> None:
         )
     assert parser.state.tool_uses == ["web_search"]
     assert len(parser.state.tool_calls) == 1
-    assert parser.state.tool_calls[0]["input"] == {"query": "청구항 유사"}
+    assert parser.state.tool_calls[0]["input"] == {
+        "input_kind": "query",
+        "query": "청구항 유사",
+    }
 
 
 def test_failed_tool_call_is_recorded_as_failed() -> None:
@@ -278,3 +288,228 @@ def test_runner_picks_the_codex_context_for_the_codex_policy() -> None:
         _SEARCH_CONTEXT_BY_POLICY[CODEX_WEB_SEARCH.name]
         is CODEX_SEARCH_RUNTIME_CONTEXT
     )
+
+
+# --------------------------------------------- web_search 는 검색과 URL 조회를 겸한다
+#
+# 아래 이벤트는 2026-08-30 실측 기록에서 그대로 가져왔다. 한 턴 안에서 URL 세
+# 개는 열렸고 세 개는 실패했는데, 완료 이벤트가 필드 단위로 완전히 같았다.
+# 지어낸 픽스처로 바꾸면 이 사실이 테스트에서 사라진다.
+
+WIKIPEDIA_OPENED = "https://en.wikipedia.org/wiki/Radome"
+GOOGLE_PATENTS_FAILED = "https://patents.google.com/patent/EP2881320A1/en"
+
+
+def _url_lookup(parser: CodexStreamParser, call_id: str, url: str) -> None:
+    """실측 그대로: started 는 query 가 비어 있고 action.type 은 'other'."""
+    _feed(
+        parser,
+        {
+            "type": "item.started",
+            "item": {
+                "id": call_id,
+                "type": "web_search",
+                "query": "",
+                "action": {"type": "other"},
+            },
+        },
+    )
+    _feed(
+        parser,
+        {
+            "type": "item.completed",
+            "item": {
+                "id": call_id,
+                "type": "web_search",
+                "query": url,
+                "action": {"type": "other"},
+            },
+        },
+    )
+
+
+def test_opened_and_failed_url_lookups_are_indistinguishable() -> None:
+    """열린 URL 과 실패한 URL 을 가를 구조화된 신호가 없다.
+
+    그러므로 둘 다 ok=None 이어야 한다. 하나라도 True 가 되면 "확인된 실패가
+    없다"가 "성공했다"로 승격되고, 그 거짓이 그대로 증거 등급이 된다.
+    """
+    parser = CodexStreamParser()
+    _url_lookup(parser, "exec-1", WIKIPEDIA_OPENED)
+    _url_lookup(parser, "exec-2", GOOGLE_PATENTS_FAILED)
+
+    assert len(parser.state.tool_calls) == 2
+    for call in parser.state.tool_calls:
+        assert call["ok"] is None, call
+        assert call["input"]["input_kind"] == "url"
+        # 원형 보존. "other" 를 "open_page" 로 바꾸지 않는다.
+        assert call["input"]["reported_action"] == {"type": "other"}
+        assert "query" not in call["input"]
+
+
+def test_completed_event_overwrites_the_empty_started_input() -> None:
+    """started 에는 action 만 있고 query 가 비어 있다.
+
+    "비어 있지 않다"는 이유로 갱신을 건너뛰면 그 호출은 검색인지 URL 조회인지
+    영원히 미상으로 남는다.
+    """
+    parser = CodexStreamParser()
+    _url_lookup(parser, "exec-3", WIKIPEDIA_OPENED)
+    assert parser.state.tool_calls[0]["input"]["url"] == WIKIPEDIA_OPENED
+
+
+def test_search_call_keeps_its_queries_and_is_not_a_url_lookup() -> None:
+    parser = CodexStreamParser()
+    _feed(
+        parser,
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "exec-4",
+                "type": "web_search",
+                "query": "radar EO IR rotating turret ...",
+                "action": {
+                    "type": "search",
+                    "queries": ["radar EO IR rotating turret", "감시정찰 회전부"],
+                },
+            },
+        },
+    )
+    call = parser.state.tool_calls[0]
+    assert call["input"]["input_kind"] == "query"
+    assert call["input"]["queries"] == [
+        "radar EO IR rotating turret",
+        "감시정찰 회전부",
+    ]
+    assert "url" not in call["input"]
+
+
+def test_mixed_run_counts_searches_and_lookups_separately() -> None:
+    parser = CodexStreamParser()
+    _feed(
+        parser,
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "exec-5",
+                "type": "web_search",
+                "query": "radar camera fusion",
+                "action": {"type": "other"},
+            },
+        },
+    )
+    _url_lookup(parser, "exec-6", WIKIPEDIA_OPENED)
+    _url_lookup(parser, "exec-7", GOOGLE_PATENTS_FAILED)
+
+    searches, lookups = split_call_kinds(parser.state.tool_calls)
+    assert (searches, lookups) == (1, 2)
+    # 전체 hard cap 은 시작 이벤트 기준이라 종류와 무관하게 셋이다.
+    assert len(parser.state.tool_uses) == 3
+
+
+# ------------------------------------------ 실시간 진행 표시는 완료 시점에 센다
+
+
+def _events(parser: CodexStreamParser, envelope: str, item: dict):
+    return _feed(parser, {"type": envelope, "item": item})
+
+
+def test_started_event_marks_web_search_kind_as_pending() -> None:
+    """시작 시점에는 검색인지 URL 조회인지 알 수 없다.
+
+    진행 표시가 이름만 보고 세면 URL 조회가 "검색어 없는 검색" 으로 찍힌다.
+    """
+    parser = CodexStreamParser()
+    events = _events(
+        parser,
+        "item.started",
+        {"id": "e1", "type": "web_search", "query": "", "action": {"type": "other"}},
+    )
+    tool_use = [payload for name, payload in events if name == "tool_use"]
+    assert len(tool_use) == 1
+    assert tool_use[0]["kind_pending"] is True
+
+
+def test_completed_event_resolves_a_url_lookup() -> None:
+    parser = CodexStreamParser()
+    _events(
+        parser,
+        "item.started",
+        {"id": "e2", "type": "web_search", "query": "", "action": {"type": "other"}},
+    )
+    events = _events(
+        parser,
+        "item.completed",
+        {
+            "id": "e2",
+            "type": "web_search",
+            "query": WIKIPEDIA_OPENED,
+            "action": {"type": "other"},
+        },
+    )
+    resolved = [p for name, p in events if name == "tool_use_resolved"]
+    assert len(resolved) == 1
+    assert resolved[0]["id"] == "e2"
+    assert resolved[0]["input"]["input_kind"] == "url"
+    # 성공 여부는 여전히 모른다.
+    assert resolved[0]["ok"] is None
+
+
+def test_completed_event_resolves_a_search() -> None:
+    parser = CodexStreamParser()
+    _events(
+        parser,
+        "item.started",
+        {"id": "e3", "type": "web_search", "query": "", "action": {"type": "other"}},
+    )
+    events = _events(
+        parser,
+        "item.completed",
+        {
+            "id": "e3",
+            "type": "web_search",
+            "query": "radar EO IR ...",
+            "action": {"type": "search", "queries": ["radar EO IR", "감시정찰"]},
+        },
+    )
+    resolved = [p for name, p in events if name == "tool_use_resolved"]
+    assert resolved[0]["input"]["input_kind"] == "query"
+    assert resolved[0]["input"]["queries"] == ["radar EO IR", "감시정찰"]
+
+
+def test_url_detection_rejects_a_query_that_merely_starts_with_a_url() -> None:
+    """모델이 검색어에 도메인을 섞는 것은 흔하다. 그걸 URL 조회로 세면
+    실제 검색어 목록에서 빠지고 URL 예산까지 먹는다."""
+    parser = CodexStreamParser()
+    _events(
+        parser,
+        "item.completed",
+        {
+            "id": "e4",
+            "type": "web_search",
+            "query": "https://patents.google.com radar EO IR turret",
+            "action": {"type": "other"},
+        },
+    )
+    call = parser.state.tool_calls[0]
+    assert call["input"]["input_kind"] == "query"
+    assert "url" not in call["input"]
+
+
+def test_unknown_status_is_not_promoted_to_success() -> None:
+    """실패 목록에 없다는 이유로 성공 처리하면 incomplete 가 성공이 된다."""
+    for status in ("incomplete", "in_progress", "something_new"):
+        parser = CodexStreamParser()
+        _events(
+            parser,
+            "item.completed",
+            {"id": "e5", "type": "command_execution", "command": "x", "status": status},
+        )
+        assert parser.state.tool_calls[0]["ok"] is None, status
+    parser = CodexStreamParser()
+    _events(
+        parser,
+        "item.completed",
+        {"id": "e6", "type": "command_execution", "command": "x", "status": "completed"},
+    )
+    assert parser.state.tool_calls[0]["ok"] is True
