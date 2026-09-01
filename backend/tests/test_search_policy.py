@@ -221,6 +221,148 @@ def test_agy_headless_read_url_denial_is_not_reported_as_empty_result() -> None:
     assert "read_url(patents.google.com)" in " ".join(verdict.errors)
 
 
+def test_agy_canceled_read_url_denial_beats_generic_provider_error() -> None:
+    """실제 agy 1.1.22의 CANCELED 결과도 권한 원인으로 분류한다."""
+    outcome = ExecutionOutcome(
+        result_text="",
+        exit_code=0,
+        terminal_reason="CANCELED",
+        is_error=True,
+        tool_policy=AGY_WEB_SEARCH,
+        tool_uses=["search_web", "read_url_content"],
+        tool_calls=[
+            {
+                "name": "read_url_content",
+                "input": {"url": "https://www.mdpi.com/1424-8220/20/13/3649"},
+                "ok": None,
+                "error": None,
+            }
+        ],
+        raw_stderr=(
+            'a tool required the "read_url" permission that headless mode cannot '
+            "prompt for, so it was auto-denied"
+        ),
+    )
+
+    verdict = evaluate(outcome)
+
+    assert verdict.status == JobStatus.FAILED
+    assert verdict.error_code == ErrorCode.SEARCH_PERMISSION_DENIED
+    assert "read_url(www.mdpi.com)" in " ".join(verdict.errors)
+
+
+# --- 2026-09-01 실행 재현: 어느 도메인이 거부됐는가 -------------------------
+#
+# job 5d00b466 의 실제 순서다. 세 호출의 스트림 상태만 보면 범인을 가릴 수 없다.
+# 자동 거부된 호출도 DONE 으로 오기 때문이다(성공 2.9초 / 거부 0.05초, 필드는
+# 동일). Provider 가 남긴 content_read 만이 둘을 가른다.
+
+
+def _the_2026_09_01_run() -> ExecutionOutcome:
+    """실제 실행의 도구 호출·종료 상태를 그대로 옮긴 결과."""
+    return ExecutionOutcome(
+        result_text="",
+        exit_code=0,
+        terminal_reason="CANCELED",
+        is_error=True,
+        tool_policy=AGY_WEB_SEARCH,
+        tool_uses=["search_web", "read_url_content", "view_file"],
+        tool_calls=[
+            {
+                "name": "search_web",
+                "input": {"query": "저전력 이미지 센서 모션 감지", "input_kind": "query"},
+                "ok": True,
+                "error": None,
+            },
+            # step 10: 열람에 성공했고 view_file 로 본문까지 읽었다.
+            {
+                "name": "read_url_content",
+                "input": {"url": "https://patents.google.com/patent/US10186205B2/en"},
+                "ok": True,
+                "error": None,
+                "content_read": True,
+            },
+            {
+                "name": "view_file",
+                "input": {"path": r"...\.system_generated\steps\content.md"},
+                "ok": True,
+                "error": None,
+                "scope_ok": True,
+            },
+            # step 18: 권한은 이미 허용돼 있었고, 막은 것은 사이트의 HTTP 403 이다.
+            {
+                "name": "read_url_content",
+                "input": {"url": "https://www.mdpi.com/1424-8220/25/10/3219"},
+                "ok": False,
+                "error": (
+                    "{'type': 'TOOL_ERROR', 'message': 'Failed to fetch document "
+                    "content at https://www.mdpi.com/1424-8220/25/10/3219: failed "
+                    "to get URL https://www.mdpi.com/1424-8220/25/10/3219: status "
+                    "code 403'}"
+                ),
+                "content_read": False,
+            },
+            # step 20: DONE 으로 왔지만 산출물이 없다. 이것이 자동 거부된 호출이다.
+            {
+                "name": "read_url_content",
+                "input": {"url": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11124409/"},
+                "ok": True,
+                "error": None,
+                "content_read": False,
+            },
+        ],
+        raw_stderr=(
+            "jetski: no output produced — a tool required the \"read_url\" "
+            "permission that headless mode cannot prompt for, so it was "
+            "auto-denied. Add an allow-rule under permissions.allow in "
+            "settings.json (e.g. read_url(<target>))."
+        ),
+    )
+
+
+def test_the_denied_host_is_the_one_without_a_content_read() -> None:
+    """DONE 이어도 본문을 못 읽은 호출이 범인이다. 상태만으로는 못 가른다."""
+    verdict = evaluate(_the_2026_09_01_run())
+    message = " ".join(verdict.errors)
+
+    assert verdict.status == JobStatus.FAILED
+    assert verdict.error_code == ErrorCode.SEARCH_PERMISSION_DENIED
+    assert "read_url(www.ncbi.nlm.nih.gov)" in message
+
+
+def test_an_http_403_is_never_named_as_the_denied_domain() -> None:
+    """403 은 접근 실패다. 이미 허용해 둔 도메인을 다시 허용하라고 하면 안 된다.
+
+    이 안내가 틀리면 사용자는 고칠 수 없는 실패를 반복한다 — 시키는 대로
+    settings.json 을 고쳐도 그 도메인은 원래부터 허용돼 있었기 때문이다.
+    """
+    message = " ".join(evaluate(_the_2026_09_01_run()).errors)
+
+    assert "mdpi" not in message.lower()
+
+
+def test_a_page_that_was_actually_read_is_never_named() -> None:
+    """본문까지 읽은 도메인은 거부 대상이 될 수 없다."""
+    message = " ".join(evaluate(_the_2026_09_01_run()).errors)
+
+    assert "patents.google.com" not in message
+
+
+def test_the_403_stays_an_access_failure_in_the_manifest() -> None:
+    """같은 호출 기록에서 MDPI 는 접근 실패로, 성공 열람에서는 빠진 채로 남는다."""
+    observed = search_manifest.observed(
+        _the_2026_09_01_run().tool_calls, ["search_web", "read_url_content"]
+    )
+
+    failures = [row["input"]["url"] for row in observed["tool_failures"]]
+    assert failures == ["https://www.mdpi.com/1424-8220/25/10/3219"]
+    # 본문을 읽은 주소만 열람 성공이다. 거부된 NCBI 도 여기 없다.
+    assert observed["succeeded_fetch_urls"] == [
+        "https://patents.google.com/patent/US10186205B2/en"
+    ]
+    assert len(observed["attempted_fetch_urls"]) == 3
+
+
 def test_agy_permission_denial_does_not_discard_a_nonempty_search_report() -> None:
     """모델이 접근 실패를 포함한 보고서를 냈다면 한 URL 거부만으로 폐기하지 않는다."""
     outcome = _ok(
