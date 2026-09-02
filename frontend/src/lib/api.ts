@@ -209,6 +209,10 @@ export const api = {
     }),
   resetRuntimeContext: () =>
     request<AppSettings>("/api/settings/runtime-context/reset", { method: "POST" }),
+  // 권장 열람 허용 목록을 agy 설정 파일에 다시 병합한다. 자동 적용은 설치당
+  // 한 번뿐이므로, 그 뒤에 다시 넣는 유일한 경로가 이 호출이다.
+  applyAgyPermissions: () =>
+    request<AppSettings>("/api/settings/agy-permissions/apply", { method: "POST" }),
   // 저장된 자격증명으로 토큰 발급을 한 번 시도한다. 키를 본문으로 보내지
   // 않는다 — 백엔드가 저장된 값을 읽는다.
   checkEpoCredentials: () =>

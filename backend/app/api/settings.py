@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .. import patent_search, settings_service
 from ..config import DEFAULT_RUNTIME_CONTEXT, PATHS
 from ..db import get_db
+from ..providers import agy_permissions
 from ..providers.env import describe_filtering
 from ..providers.registry import invalidate
 from ..schemas import CredentialCheckOut, SettingsOut, SettingsUpdate
@@ -41,6 +42,9 @@ def _payload(session: Session) -> SettingsOut:
         env_filtering=describe_filtering(),
         secrets_set=settings_service.secrets_set(values),
         epo_quota=settings_service.epo_quota_snapshot(values),
+        # 읽기만 한다. 이 화면에서 파일을 고치지 않는다 — 적용은 agy Provider
+        # 검사 경로 한 곳에서만 일어나고, 여기는 그 결과를 보여 준다.
+        agy_permissions=agy_permissions.read_state().to_dict(),
     )
 
 
@@ -85,6 +89,27 @@ def check_epo_credentials(session: Session = Depends(get_db)) -> CredentialCheck
         http_status=result.http_status,
         expires_in=result.expires_in,
     )
+
+
+@router.post("/agy-permissions/apply", response_model=SettingsOut)
+def apply_agy_permissions(session: Session = Depends(get_db)) -> SettingsOut:
+    """권장 논문 출처를 agy 의 허용 목록에 다시 병합한다.
+
+    ARIA 가 이 파일을 자동으로 고치는 것은 설치당 한 번뿐이다(앱 시작 시의
+    일회성 마이그레이션). 그 뒤에 다시 넣는 유일한 방법이 이 버튼이다 —
+    사용자가 지운 호스트를 프로그램이 되살리지 않기 위해서다.
+
+    병합만 한다. 기존 항목을 덮어쓰지 않고, 와일드카드를 만들지 않으며,
+    파일이 손상돼 있으면 손대지 않고 400 으로 알린다.
+    """
+    from ..providers.agy_permissions import AgyPermissionsError
+
+    try:
+        settings_service.apply_agy_allowlist(session, forced=True)
+    except AgyPermissionsError as exc:
+        raise HTTPException(400, str(exc)) from None
+    session.commit()
+    return _payload(session)
 
 
 @router.post("/runtime-context/reset", response_model=SettingsOut)

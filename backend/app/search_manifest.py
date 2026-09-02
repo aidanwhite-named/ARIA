@@ -287,6 +287,22 @@ def discovery_origins(candidate: dict) -> list[str]:
     ]
     return found or [DISCOVERY_WEB]
 
+
+def unverified_title(candidate: dict) -> str:
+    """검증된 명칭이 없을 때 보여 줄 미검증 제목. 없으면 빈 문자열.
+
+    보고서와 화면이 **같은 규칙**으로 고르게 하려고 한 곳에 둔다. 규칙은 하나다 —
+    검증된 title 이 있으면 미검증 제목은 쓰지 않는다. 둘을 나란히 보여 주면 같은
+    위계로 읽히고, 그러면 칸을 나눈 의미가 없다.
+
+    나중에 페이지 열람이나 공식 서지 대조로 title 이 채워지면 이 함수는 자동으로
+    빈 문자열을 돌려준다. 승격에 별도 단계가 필요 없다.
+    """
+    entry = candidate or {}
+    if _text(entry.get("title"), 500):
+        return ""
+    return _text(entry.get("reported_title"), 500)
+
 # --- 레인 ------------------------------------------------------------------
 #
 # 레인은 (검색 경로 × 검색 기원)이다. 네 개가 전부이고 id 는 고정이다.
@@ -509,16 +525,20 @@ def normalize_url(raw) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
+    # hostname 과 port 는 지연 계산 속성이라 **접근하는 순간** 터진다.
+    # urlsplit 만 감싸면 "vbscript:msgbox(1)" 같은 값에서 포트 파싱이 ValueError
+    # 를 내고, 그 예외가 감사 블록 파싱 전체를 무너뜨린다. 이 칸은 모델이 적는
+    # 값이므로 어떤 문자열이 와도 판정만 실패해야 한다.
     try:
         parsed = urlsplit(text if "//" in text else f"//{text}", scheme="https")
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
     except ValueError:
         return ""
-    host = (parsed.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
     if not host:
         return ""
-    port = parsed.port
     if port in (80, 443):
         port = None
     netloc = f"{host}:{port}" if port else host
@@ -537,6 +557,41 @@ _SEARCH_QUERY_KEYS = frozenset({"q", "query", "searchquery", "kw", "keyword", "s
 _SEARCH_PATH_HINTS = ("/search", "/results", "/result", "/list")
 
 
+#: 클릭 가능한 링크로 만들어도 되는 스킴. 화이트리스트다.
+#
+# 후보의 url 은 모델이 적은 값이고, 모델의 입력에는 검색 결과와 페이지 본문이
+# 섞여 있다. 즉 이 칸은 비신뢰 데이터가 도달할 수 있는 자리다. javascript:,
+# data:, file: 같은 값을 그대로 링크로 만들면 보고서를 여는 것만으로 사용자가
+# 그것을 한 번 클릭할 수 있는 위치에 놓인다.
+#
+# 렌더러의 sanitize 는 마지막 방어선이지 유일한 방어선이 아니어야 한다. 그래서
+# 만들어 놓고 지우는 대신 애초에 만들지 않는다.
+LINKABLE_SCHEMES = frozenset({"http", "https"})
+
+
+def is_linkable_url(raw) -> bool:
+    """이 주소를 클릭 가능한 링크로 표시해도 되는가.
+
+    거짓이어도 값을 버리지 않는다. 모델이 무엇을 적었는지는 그 자체로 기록이고,
+    평문으로 두면 클릭되지 않는다. 화면과 보고서가 **같은 규칙**을 쓰도록 판정을
+    여기 한 곳에 둔다(프런트의 linkableUrl 이 같은 규칙을 따른다).
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    try:
+        scheme = urlsplit(text).scheme.lower()
+    except ValueError:
+        return False
+    if scheme not in LINKABLE_SCHEMES:
+        return False
+    # 스킴만 맞고 호스트가 없는 값(http:///, https://)은 링크가 아니다.
+    try:
+        return bool(urlsplit(text).hostname)
+    except ValueError:
+        return False
+
+
 def is_document_url(raw) -> bool:
     """이 주소가 문헌 하나를 가리키는 전용 페이지인가.
 
@@ -548,9 +603,10 @@ def is_document_url(raw) -> bool:
         return False
     try:
         parsed = urlsplit(text if "//" in text else f"//{text}", scheme="https")
+        # normalize_url 과 같은 이유로 hostname 접근까지 감싼다.
+        if not (parsed.hostname or ""):
+            return False
     except ValueError:
-        return False
-    if not (parsed.hostname or ""):
         return False
     path = (parsed.path or "").rstrip("/")
     query = parsed.query or ""
@@ -914,10 +970,27 @@ def _normalize_candidate(
             "제외하고 미확인 검색 단서로 격리했습니다."
         )
 
+    # 모델이 보고한 제목. 대조를 통과하지 못하면 title 은 비지만 이 칸은 남는다.
+    #
+    # 예전에는 여기서 제목이 통째로 사라졌다. 그 결과 사용자에게 남는 것이 번호와
+    # 주소뿐이라, 직접 확인해 보려 해도 그 후보가 무엇이었는지 알 수 없었다.
+    # 검증되지 않은 값을 지우는 것과 감추는 것은 다르다 — 지울 이유는 "검증되지
+    # 않았다"는 것뿐이고, 그건 값을 없애는 대신 칸을 나눠서 말하면 된다
+    # (provisional_group 과 같은 원칙이다).
+    #
+    # 이 칸은 **어떤 게이트도 통과시키지 않는다.** group_eligible, A/B 등급,
+    # 구성 대응표, 직접 발췌는 아래에서 title 이 아니라 identifier_url_matched 와
+    # page_supported_rows 로만 판정되며, 이 값은 그 계산에 들어가지 않는다.
+    reported_title = _text(entry.get("reported_title"), 500) or title
     if not identifier_url_matched and (title or applicant or family):
         notes.append(
             f"후보 {index}: 문헌번호와 페이지가 같은 문헌임을 확인하지 못해 "
-            "명칭·출원인·패밀리를 출력에서 제외했습니다."
+            "명칭·출원인·패밀리를 검증된 값에서 제외했습니다."
+            + (
+                " 명칭은 '검색 결과 기반·미검증' 으로 따로 보존했습니다."
+                if reported_title
+                else ""
+            )
         )
         title = ""
         applicant = ""
@@ -1034,6 +1107,10 @@ def _normalize_candidate(
         "doc_number": doc_number,
         "doi": doi,
         "title": title,
+        # 검증되지 않은 제목. title 이 비어 있을 때만 화면과 보고서가 쓰고, 쓸
+        # 때는 반드시 '검색 결과 기반·미검증' 이라고 밝힌다. 나중에 페이지나
+        # 공식 서지에서 확인되면 title 이 채워지고 표시는 그쪽으로 넘어간다.
+        "reported_title": reported_title,
         "applicant": applicant,
         "url": url,
         "canonical_url": canonical,
@@ -1424,6 +1501,10 @@ def merge_reported(*reports: dict | None) -> dict | None:
             existing["origin_provisional_groups"] = origin_provisional_groups
             existing["discovery_origins"] = discovered
             existing["epo_discovery"] = epo_discovery
+            # 미검증 제목은 한쪽 레인에만 있을 수 있다. 값이 있는 쪽을 남긴다.
+            # 검증된 title 을 덮지는 않는다 — 표시할 때 title 이 언제나 우선한다.
+            if not existing.get("reported_title"):
+                existing["reported_title"] = candidate.get("reported_title") or ""
             if candidate.get("note") and candidate.get("note") != existing.get("note"):
                 notes = [value for value in (existing.get("note"), candidate.get("note")) if value]
                 existing["note"] = " / ".join(dict.fromkeys(notes))
@@ -1684,6 +1765,8 @@ def epo_candidate(
         "doc_number": _text(doc_number, 120),
         "doi": "",
         "title": _text(title, 500),
+        # OPS 응답에서 온 명칭이라 검증된 값이다. 미검증 제목 칸은 비워 둔다.
+        "reported_title": "",
         "applicant": "",
         "url": url,
         "canonical_url": normalize_url(url),
@@ -2001,6 +2084,10 @@ def literature_candidate(
         "doc_number": key,
         "doi": key,
         "title": _text(title, 500),
+        # 서지 API 가 확인해 준 제목이므로 검증된 title 칸에 들어간다. 다만 이것은
+        # "등록 서지가 그 제목을 말한다"이지 "논문 원문을 대조했다"가 아니다 —
+        # 그 구분은 provenance/evidence_status 가 하고, 보고서도 그렇게 적는다.
+        "reported_title": "",
         # 논문에는 출원인이 없다. 저자를 그 칸에 넣되 라벨은 보고서가 정한다.
         "applicant": _text(authors, 500),
         "url": url,
@@ -2104,6 +2191,11 @@ def merge_literature_discoveries(
             # 웹 후보가 DOI 만 적고 제목을 못 적은 경우가 흔하다. ARIA 가 공식
             # 응답에서 받은 제목으로 빈 칸만 채운다 — 이미 있는 값은 덮지 않는다.
             if not _text(matched.get("title"), 500) and row.get("title"):
+                # 등록 서지가 확인해 준 제목이므로 검증된 칸으로 올린다. 이
+                # 승격은 "서지 API 가 그 제목을 말한다"이지 "논문 원문을
+                # 대조했다"가 아니며, 그 구분은 provenance 와 evidence_status 가
+                # 유지한다. reported_title 은 지우지 않고 그대로 둔다 — 검색
+                # 결과가 뭐라고 했는지도 기록이다.
                 matched["title"] = _text(row.get("title"), 500)
             notes.append(
                 f"후보 {matched.get('index')}: 같은 DOI 를 ARIA 서지 검색도 찾아 "

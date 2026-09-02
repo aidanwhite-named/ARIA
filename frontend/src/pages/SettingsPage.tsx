@@ -66,6 +66,7 @@ export default function SettingsPage() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [probing, setProbing] = useState(false);
+  const [applyingAgy, setApplyingAgy] = useState(false);
   const [smoke, setSmoke] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -212,6 +213,26 @@ export default function SettingsPage() {
       setError((e as Error).message);
     } finally {
       setProbing(false);
+    }
+  };
+
+  // 권장 열람 허용 목록 재적용. ARIA 가 이 파일을 자동으로 고치는 것은 설치당
+  // 한 번뿐이므로, 그 뒤에 다시 넣는 유일한 경로가 이 버튼이다.
+  const applyAgyPermissions = async () => {
+    setApplyingAgy(true);
+    try {
+      const updated = await api.applyAgyPermissions();
+      setSettings(updated);
+      const missing = updated.agy_permissions?.missing?.length ?? 0;
+      notify(
+        missing === 0
+          ? "권장 논문 출처를 허용 목록에 적용했습니다."
+          : "일부 권장 출처를 적용하지 못했습니다. 아래 상태를 확인하십시오.",
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setApplyingAgy(false);
     }
   };
 
@@ -400,6 +421,9 @@ export default function SettingsPage() {
   }
 
   const v = settings.values;
+  // agy 의 허용 목록은 ARIA 설정값이 아니라 다른 도구의 파일에서 읽은 사실이라
+  // values 가 아니라 별도 칸으로 온다. 옛 백엔드는 보내지 않는다.
+  const agyPermissions = settings.agy_permissions;
   // Secret 은 values 로 내려오지 않는다. 저장 여부의 근거는 이쪽뿐이다.
   const epoSecretSaved = settings.secrets_set?.epo_consumer_secret === true;
   // 사용량은 백엔드가 한도까지 계산해서 준다. 화면이 다시 계산하면 경고 문구와
@@ -898,6 +922,107 @@ export default function SettingsPage() {
               />
             </div>
           </div>
+        )}
+      </div>
+
+      <div className="card settings-agy-permissions">
+        <div className="split" style={{ marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>논문 페이지 열람 허용 목록 (agy)</h2>
+          <button
+            className="btn small"
+            onClick={applyAgyPermissions}
+            disabled={applyingAgy}
+          >
+            {applyingAgy ? "적용 중…" : "권장 목록 다시 적용"}
+          </button>
+        </div>
+        <p className="muted settings-integration-copy">
+          agy 는 승인 창을 띄울 수 없는 실행에서 허용 목록에 없는 주소를 자동으로
+          거부하고, <b>그 자리에서 실행 전체를 빈 응답으로 종료합니다.</b> 이미
+          끝난 검색 결과와 감사 블록까지 함께 사라집니다. 그래서 ARIA 는 논문
+          출처로 자주 필요한 호스트를 <code>permissions.allow</code> 에 넣어
+          둡니다. 매 검색 실행은 이 목록을 그대로 읽어 모델에게 "지금 열 수 있는
+          주소"로 알려줍니다.
+        </p>
+        <p className="muted settings-integration-copy">
+          <b>자동 적용은 설치당 한 번뿐입니다.</b> 그 뒤로 ARIA 는 이 파일을 읽기만
+          하며, Provider 를 다시 검사해도 목록을 고치지 않습니다 — 여기서 호스트를
+          지운 것은 그러기로 한 선택이고, 프로그램이 되살릴 일이 아니기 때문입니다.
+          나중에 권장 목록이 늘어나도 <b>그때 새로 추가된 호스트만</b> 넣습니다.
+          지우신 항목은 그대로 둡니다. 전체 목록을 다시 넣는 유일한 방법이 위
+          버튼입니다. 어느 경우에도 기존 항목을 덮어쓰지 않고,{" "}
+          <code>read_url(*)</code> 처럼 범위를 넓히는 규칙은 만들지 않습니다.
+        </p>
+        {agyPermissions ? (
+          <>
+            <div className="faint break" style={{ marginBottom: 8 }}>
+              설정 파일: <span className="mono-text">{agyPermissions.path}</span>
+            </div>
+            {agyPermissions.error ? (
+              <div className="notice danger">
+                <strong>허용 목록을 읽지 못했습니다</strong>
+                <div>{agyPermissions.error}</div>
+              </div>
+            ) : !agyPermissions.exists ? (
+              <div className="notice info">
+                설정 파일이 아직 없습니다. agy 를 한 번 실행하면 만들어지고, 그때
+                ARIA 가 권장 호스트를 한 번 넣습니다. 지금 바로 만들려면 위의
+                「권장 목록 다시 적용」을 누르십시오.
+              </div>
+            ) : (
+              <>
+                <div className="pill-row" style={{ marginBottom: 8 }}>
+                  {agyPermissions.recommended.map((host) => {
+                    const applied = agyPermissions.applied.includes(host);
+                    return (
+                      <span
+                        key={host}
+                        className={`pill ${applied ? "ok" : "warn"}`}
+                        title={
+                          applied
+                            ? "적용됨 — 이 호스트는 지금 열 수 있습니다."
+                            : "아직 없습니다. agy 를 다시 검사하면 추가합니다."
+                        }
+                      >
+                        {applied ? "적용됨" : "미적용"} · {host}
+                      </span>
+                    );
+                  })}
+                </div>
+                {agyPermissions.missing.length > 0 && (
+                  <div className="notice info">
+                    적용되지 않은 권장 호스트가 {agyPermissions.missing.length}곳
+                    있습니다. 직접 지우신 것이라면 그대로 두십시오 — ARIA 는 다시
+                    넣지 않습니다. 넣으려면 위의 <b>권장 목록 다시 적용</b>을
+                    누르십시오.
+                  </div>
+                )}
+                {agyPermissions.wildcard && (
+                  <div className="notice danger">
+                    <strong>read_url(*) 가 들어 있습니다</strong>
+                    <div>
+                      모든 주소의 열람이 허용된 상태입니다. ARIA 가 넣은 값이
+                      아니며 지우지도 않았습니다. 어떤 페이지를 열었는지 사후에
+                      가려낼 수 없으므로 직접 확인하십시오.
+                    </div>
+                  </div>
+                )}
+                <div className="faint" style={{ marginTop: 8 }}>
+                  허용은 접근 권한일 뿐 열람 성공을 보장하지 않습니다. 로그인·
+                  유료벽·봇 차단이 걸리면 그 문헌을 미검증 후보로 남기고 나머지
+                  검색을 계속하도록 <b>모델에게 지시합니다.</b> ARIA 가 강제할
+                  수 있는 동작은 아닙니다 — 모델이 이 지시를 무시하면 그 실행은
+                  실패로 기록됩니다.
+                </div>
+                <div className="faint break" style={{ marginTop: 8 }}>
+                  이 파일에 등록된 전체 호스트({agyPermissions.allowed_hosts.length}
+                  곳): {agyPermissions.allowed_hosts.join(", ") || "없음"}
+                </div>
+              </>
+            )}
+          </>
+        ) : (
+          <div className="faint">허용 목록 정보를 받지 못했습니다.</div>
         )}
       </div>
 

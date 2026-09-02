@@ -13,7 +13,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import SearchManifestView from "./SearchManifestView";
+import SearchManifestView, { linkableUrl } from "./SearchManifestView";
 import type { Job, SearchCandidate, SearchManifest } from "../lib/types";
 
 afterEach(cleanup);
@@ -609,5 +609,138 @@ describe("최종 선택 턴", () => {
 
     fireEvent.click(screen.getByText("실제 검색 기록 보기"));
     expect(screen.getByText(/돌리지 않음 — EPO 채널 제한시간/)).toBeTruthy();
+  });
+});
+
+describe("미검증 제목", () => {
+  it("페이지를 열지 못한 후보도 제목·링크·상태를 함께 보여 준다", () => {
+    render(
+      panel(
+        withCandidates(
+          candidate({
+            reported_title: "HumanRig: Learning Automatic Rigging",
+            url: "https://arxiv.org/abs/2412.02317",
+            quarantined: true,
+            quarantine_reason: "이 주소로 성공한 페이지 열람 기록이 없습니다.",
+          }),
+        ),
+      ),
+    );
+
+    // 라벨 없이 제목만 나가면 검증된 명칭으로 읽힌다. 셋은 항상 함께 나간다.
+    expect(screen.getByText("검색 결과 기반 · 미검증")).toBeTruthy();
+    expect(
+      screen.getByText(/HumanRig: Learning Automatic Rigging/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요/),
+    ).toBeTruthy();
+    // 링크는 클릭할 수 있어야 한다. 사용자가 직접 확인하는 경로가 이것뿐이다.
+    const link = screen.getByRole("link", {
+      name: "https://arxiv.org/abs/2412.02317",
+    });
+    expect(link.getAttribute("href")).toBe("https://arxiv.org/abs/2412.02317");
+  });
+
+  it("검증된 명칭이 있으면 미검증 제목을 보여 주지 않는다", () => {
+    render(
+      panel(
+        withCandidates(
+          candidate({
+            group: "A",
+            group_eligible: true,
+            page_fetch_succeeded: true,
+            identifier_url_matched: true,
+            page_supported_rows: 1,
+            title: "페이지에서 확인한 명칭",
+            reported_title: "검색 결과에서 본 제목",
+          }),
+        ),
+      ),
+    );
+
+    expect(screen.getByText("페이지에서 확인한 명칭")).toBeTruthy();
+    expect(screen.queryByText("검색 결과 기반 · 미검증")).toBeNull();
+    expect(screen.queryByText(/검색 결과에서 본 제목/)).toBeNull();
+  });
+
+  it("제목이 없으면 빈 라벨만 남기지 않는다", () => {
+    render(panel(withCandidates(candidate({ url: "https://example.com/x" }))));
+
+    expect(screen.queryByText("검색 결과 기반 · 미검증")).toBeNull();
+  });
+});
+
+describe("링크로 만들 수 있는 주소", () => {
+  // 후보의 url 은 모델이 적은 값이고, 모델의 입력에는 검색 결과와 페이지 본문이
+  // 섞여 있다. 즉 비신뢰 데이터가 도달할 수 있는 자리다. 렌더러의 sanitize 는
+  // 마지막 방어선이지 유일한 방어선이 아니어야 한다.
+  const dangerous = [
+    "javascript:alert(1)",
+    "JavaScript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+    "file:///C:/Windows/System32/drivers/etc/hosts",
+    "vbscript:msgbox(1)",
+  ];
+
+  it.each(dangerous)("%s 는 링크로 만들지 않는다", (url) => {
+    expect(linkableUrl(url)).toBeNull();
+  });
+
+  it.each([
+    "",
+    "   ",
+    "확인 필요",
+    "patents.example.com/AB1234",
+    "://broken",
+    "https://",
+  ])("파싱할 수 없거나 절대 주소가 아닌 %s 도 링크가 아니다", (url) => {
+    expect(linkableUrl(url)).toBeNull();
+  });
+
+  it.each(["https://arxiv.org/abs/2412.02317", "http://www.kipris.or.kr/AB1234"])(
+    "%s 는 링크로 만든다",
+    (url) => {
+      expect(linkableUrl(url)).toBe(url);
+    },
+  );
+
+  it("위험한 스킴은 anchor 없이 평문으로만 보여 준다", () => {
+    render(
+      panel(
+        withCandidates(
+          candidate({
+            reported_title: "미검증 제목",
+            url: "javascript:alert(1)",
+            quarantined: true,
+          }),
+        ),
+      ),
+    );
+
+    // 값은 지우지 않는다. 모델이 무엇을 적었는지도 기록이다.
+    expect(screen.getAllByText("javascript:alert(1)").length).toBeGreaterThan(0);
+    // 다만 클릭할 수 있는 자리에 놓지 않는다.
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
+  it("http 주소는 새 탭으로 여는 링크가 된다", () => {
+    render(
+      panel(
+        withCandidates(
+          candidate({
+            reported_title: "미검증 제목",
+            url: "https://arxiv.org/abs/2412.02317",
+            quarantined: true,
+          }),
+        ),
+      ),
+    );
+
+    const link = screen.getByRole("link", {
+      name: "https://arxiv.org/abs/2412.02317",
+    });
+    expect(link.getAttribute("href")).toBe("https://arxiv.org/abs/2412.02317");
+    expect(link.getAttribute("rel")).toContain("noopener");
   });
 });

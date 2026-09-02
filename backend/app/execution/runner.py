@@ -1421,6 +1421,9 @@ class JobRunner:
                     prior_report=prior_report,
                     prior_citation_mapping=prior_mapping,
                     tool_policy_name=tool_policy.name,
+                    agy_allowed_hosts=job_assembly.allowed_hosts_for(
+                        tool_policy.name
+                    ),
                     retrieval_mode=retrieval_mode,
                     provider_byte_budget=getattr(provider, "max_input_bytes", None),
                     retrieval_budget=retrieval_budget,
@@ -2111,6 +2114,19 @@ class JobRunner:
                     reported = search_manifest.merge_reported(*lane_reports)
                 else:
                     manifest_error = " / ".join(manifest_errors)
+                    # 권한 거부로 빈 응답이 온 실행에서는 "감사 블록이 없다"가
+                    # 별개의 원인이 아니라 그 거부의 후속 증상이다. 둘을 나란히
+                    # 적으면 사용자는 고칠 곳을 두 군데로 읽는데, 실제로 고칠
+                    # 곳은 허용 목록 하나뿐이다. 원래 파서 메시지는 버리지 않고
+                    # 정규화 메모로 내린다 — 증상도 기록이지만 원인은 아니다.
+                    if verdict.error_code is ErrorCode.SEARCH_PERMISSION_DENIED:
+                        notes.append(
+                            f"웹 채널 감사 블록 파싱 결과: {manifest_error}"
+                        )
+                        manifest_error = (
+                            "웹페이지 읽기 권한이 거부되어 이 채널이 빈 응답으로 "
+                            "끝났습니다. 감사 블록이 없는 것은 그 후속 증상입니다."
+                        )
 
                 # --- EPO 독립 검색 후보를 주 대응표에 연결 ------------------
                 #
@@ -2332,15 +2348,27 @@ class JobRunner:
                         # 보고서는 나왔지만 웹 채널은 실패했다. 성공으로만 적으면
                         # 그 실패가 기록에서 사라진다 — 이 실행의 후보에는 웹
                         # 검색이 찾은 문헌이 하나도 없다는 사실이 남아야 한다.
+                        #
+                        # 다만 권한 거부가 원인일 때는 그 사유를 원인으로 다시
+                        # 적지 않는다. 이미 verdict.errors 의 첫 줄이 그것을
+                        # 말하고 있고, 여기서 또 적으면 원인 하나가 오류 두 개로
+                        # 보인다. 이 줄이 더할 것은 "그래서 어떻게 됐는가" 뿐이다.
+                        if verdict.error_code is ErrorCode.SEARCH_PERMISSION_DENIED:
+                            salvage = (
+                                "그 결과 웹 채널은 후보를 하나도 내지 못했습니다. "
+                                "완료된 EPO 독립 검색이 있어 EPO 후보만으로 "
+                                "보고서를 만들었습니다."
+                            )
+                        else:
+                            salvage = (
+                                "웹 채널의 검색 감사 블록을 읽지 못했습니다: "
+                                f"{manifest_error} 완료된 EPO 독립 검색이 있어 "
+                                "EPO 후보만으로 보고서를 만들었습니다."
+                            )
                         verdict = Verdict(
                             verdict.status,
                             verdict.error_code,
-                            [
-                                *verdict.errors,
-                                "웹 채널의 검색 감사 블록을 읽지 못했습니다: "
-                                f"{manifest_error} 완료된 EPO 독립 검색이 있어 "
-                                "EPO 후보만으로 보고서를 만들었습니다.",
-                            ],
+                            [*verdict.errors, salvage],
                         )
 
             # 2차 분류까지 취소 대상으로 남겨 둔다. 이보다 일찍 제거하면 사용자가

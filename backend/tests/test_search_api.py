@@ -204,7 +204,14 @@ def test_reviewed_claim_on_never_fetched_url_is_downgraded(client) -> None:
     assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
     assert "### 잠정 분류" in report
     assert "### 정식 분류" not in report
-    assert "테스트 특허" not in report
+    # 명칭은 검증된 값으로 인쇄되지 않는다. 다만 지우지도 않는다 — 사용자가
+    # 직접 확인할 단서가 없으면 "다시 확인해 보라"가 실행 불가능한 안내가 된다.
+    # 등급 라벨과 상태 줄이 항상 함께 나가므로 검증된 명칭과 섞이지 않는다.
+    assert "- 명칭: 테스트 특허" not in report
+    assert "제목(검색 결과 기반·미검증): 테스트 특허" in report
+    assert "상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요" in report
+    assert candidate["title"] == ""
+    assert candidate["reported_title"] == "테스트 특허"
 
 
 def test_similarity_runner_calls_the_candidate_verification_stage(
@@ -757,3 +764,64 @@ def test_preflight_does_not_create_a_job(client) -> None:
     _preflight(client)
     after = len(client.get("/api/history").json())
     assert before == after
+
+
+# ------------------------------------------- 접근 실패는 실행을 끝내지 않는다
+#
+# 허용 목록 밖 호스트, 403, 로그인 요구, 유료벽 — 검색 실행에서 흔한 일이다.
+# 이것들이 실행을 중단시키면 그때까지 한 검색이 통째로 버려진다. 열지 못한
+# 문헌은 미검증 후보로 남고, 감사 블록은 어떤 경우에도 나가야 한다.
+
+
+def test_blocked_pages_keep_the_audit_block_and_the_rest_of_the_search(
+    client,
+) -> None:
+    """403·로그인·유료벽에 다 막혀도 후보와 감사 블록이 살아남는다."""
+    job = wait_for_job(client, _start(client, claim=f"{CLAIM}\nSEARCH_BLOCKED")["id"])
+
+    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+    manifest = job["search_manifest"]
+    # 감사 블록을 읽었다. 이것이 없으면 결과가 통째로 사라진다.
+    assert job["search_manifest_error"] is None
+    assert manifest["reported"] is not None
+
+    observed = manifest["observed"]
+    # 한 건도 열지 못했다는 사실은 그대로 기록된다.
+    assert observed["succeeded_fetch_urls"] == []
+    assert len(observed["attempted_fetch_urls"]) == 2
+
+    candidates = manifest["reported"]["candidates"]
+    assert len(candidates) == 2
+    for item in candidates:
+        assert item["evidence_status"] == "candidate_only"
+        assert item["group"] is None
+        assert item["mapping"] == []
+        # 열지 못했어도 검색 결과에서 본 제목은 남는다.
+        assert item["reported_title"]
+        assert item["title"] == ""
+
+    # 접근 실패 사유가 남는다 — 허용 목록 밖 호스트도 여기에 적힌다.
+    reasons = {row["reason"] for row in manifest["reported"]["access_failures"]}
+    assert "로그인 요구" in reasons
+    assert "유료벽 403" in reasons
+    assert "허용 목록에 없는 호스트라 열지 않음" in reasons
+
+    # 보고서에도 미검증 제목이 링크·상태와 함께 나간다.
+    report = job["result_text"]
+    assert "제목(검색 결과 기반·미검증): " in report
+    assert "상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요" in report
+
+
+def test_a_host_outside_the_allowlist_is_never_opened(client) -> None:
+    """허용 목록 밖 주소로는 열람 호출 자체가 나가지 않는다."""
+    job = wait_for_job(client, _start(client, claim=f"{CLAIM}\nSEARCH_BLOCKED")["id"])
+    attempted = job["search_manifest"]["observed"]["attempted_fetch_urls"]
+
+    assert not any("sciencedirect" in url for url in attempted)
+    blocked = next(
+        item
+        for item in job["search_manifest"]["reported"]["candidates"]
+        if "sciencedirect" in item["url"]
+    )
+    assert blocked["evidence_status"] == "candidate_only"
+    assert blocked["page_fetch_succeeded"] is False

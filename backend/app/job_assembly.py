@@ -12,6 +12,7 @@ runner 와 preflight 가 **같은 함수**를 부른다.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from . import retrieval, search_manifest, search_prompt
@@ -19,9 +20,10 @@ from .config import (
     AGY_SEARCH_RUNTIME_CONTEXT,
     CODEX_SEARCH_RUNTIME_CONTEXT,
     SEARCH_RUNTIME_CONTEXT,
+    with_agy_allowlist,
 )
 from .enums import AttachmentRole, DeliveryPlan, JobKind, RetrievalMode
-from .providers import model_limits
+from .providers import agy_permissions, model_limits
 from .ingestion.service import IngestedFile, read_normalized
 from .prompt_assembly import (
     AssembledPrompt,
@@ -41,6 +43,22 @@ SEARCH_CONTEXT_BY_POLICY = {
     "agy_web_search": AGY_SEARCH_RUNTIME_CONTEXT,
     "codex_web_search": CODEX_SEARCH_RUNTIME_CONTEXT,
 }
+
+# 실행 시점의 허용 목록을 프롬프트에 붙이는 정책. agy 만 호스트 단위 승인
+# 파일을 갖고 있으므로 여기 하나뿐이다.
+ALLOWLIST_POLICY = "agy_web_search"
+
+
+def allowed_hosts_for(tool_policy_name: str) -> tuple[str, ...]:
+    """이 정책이 지금 실제로 열 수 있는 호스트.
+
+    파일을 읽는 일은 assemble_job 안에서 하지 않는다. 준비 화면과 실행이 **같은
+    함수**로 값을 얻어 같은 크기를 보게 하되, 조립 함수 자체는 순수하게 두어
+    테스트가 사용자 홈 디렉터리를 건드리지 않게 하기 위해서다.
+    """
+    if tool_policy_name != ALLOWLIST_POLICY:
+        return ()
+    return agy_permissions.allowed_hosts()
 
 # 분석 경로에는 레인이 없다. 하나뿐인 조립본을 담는 이름.
 LANE_SINGLE = "single"
@@ -526,6 +544,10 @@ def assemble_job(
     prior_report: str = "",
     prior_citation_mapping: dict | None = None,
     tool_policy_name: str = "",
+    # agy 가 지금 실제로 열 수 있는 호스트. 검색 조립에서만 쓰이며, 호출부가
+    # 넘기지 않으면 "하나도 열 수 없음"으로 안내한다 — 모르는 상태를 제한 없음
+    # 으로 읽게 두면 거부 한 번에 실행 전체가 사라진다.
+    agy_allowed_hosts: Sequence[str] | None = None,
     retrieval_mode: str = RetrievalMode.AUTO,
     provider_byte_budget: int | None = None,
     retrieval_budget: retrieval.RetrievalBudget | None = None,
@@ -672,6 +694,12 @@ def assemble_job(
     search_context = SEARCH_CONTEXT_BY_POLICY.get(
         tool_policy_name, SEARCH_RUNTIME_CONTEXT
     )
+    # 허용 목록은 조립 시점의 실제 파일에서 온다. 목록이 비어 있어도 절을 붙인다 —
+    # 빼면 모델이 "제한이 없다"로 읽고, 그 오해 한 번이 실행 전체를 날린다.
+    # 준비 화면(preflight)과 실행이 같은 함수를 지나므로 안내한 크기와 실제로
+    # 나가는 크기가 이 절 때문에 어긋나지 않는다.
+    if tool_policy_name == ALLOWLIST_POLICY:
+        search_context = with_agy_allowlist(search_context, agy_allowed_hosts)
     lanes: dict[str, AssembledPrompt] = {
         search_manifest.ORIGIN_CLAIM_ONLY: assemble_search(
             search_prompt_body=claim_rendered.body,

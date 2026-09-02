@@ -1007,6 +1007,18 @@ h2.card-head-mode { display: flex; align-items: center; flex-wrap: wrap; gap: 10
   margin-bottom: 4px;
 }
 .search-candidate-title { font-weight: 650; color: var(--text); }
+/* 검증되지 않은 제목 블록. 검증된 명칭과 같은 위계로 읽히지 않게 왼쪽 경계선과
+   흐린 배경을 준다 — 라벨만으로는 훑어볼 때 구별되지 않는다. */
+.search-candidate-unverified-title {
+  margin: 4px 0;
+  padding: 6px 9px;
+  border-left: 2px solid var(--warn);
+  background: var(--warn-soft);
+  border-radius: 0 6px 6px 0;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.pill-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .search-candidate-note { margin-top: 4px; color: var(--text-muted); }
 .search-query-list { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.7; }
 .search-query-list li { margin-bottom: 3px; overflow-wrap: anywhere; }

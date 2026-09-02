@@ -184,10 +184,15 @@ def test_report_shows_unfetched_candidate_as_provisional_group() -> None:
     assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
     assert "### 잠정 분류" in report
     assert "### 정식 분류" not in report
-    # 검증되지 않은 서지정보와 대응 서술은 인쇄하지 않는다.
-    assert "테스트 특허" not in report
+    # 검증되지 않은 서지정보와 대응 서술은 인쇄하지 않는다. 출원인과 대응
+    # 서술은 그대로 빠진다.
     assert "테스트 주식회사" not in report
     assert "센서 모듈 110" not in report
+    # 제목만 예외다. 지우면 사용자가 직접 확인할 단서가 사라지므로, 등급 라벨과
+    # "수동 확인 필요" 상태를 붙여 적는다. 검증된 명칭 자리에는 들어가지 않는다.
+    assert "- 명칭: 테스트 특허" not in report
+    assert "제목(검색 결과 기반·미검증): 테스트 특허" in report
+    assert "상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요" in report
 
 
 def test_past_manifest_group_without_gate_is_not_rendered_as_formal() -> None:

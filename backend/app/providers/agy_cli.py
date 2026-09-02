@@ -46,6 +46,7 @@ from pathlib import Path
 
 from ..enums import AuthState
 from ..execution import process as proc
+from . import agy_permissions
 from .agy_stream import AgyStreamParser, build_stdin_message
 from .base import (
     AGY_WEB_SEARCH,
@@ -310,6 +311,31 @@ class AgyCliProvider(Provider):
 
         result.executable_ok = True
         result.version = (version_run.stdout or "").strip().splitlines()[0] or None
+
+        # 페이지 열람 허용 목록은 **읽기만 한다.**
+        #
+        # 예전에는 여기서 권장 호스트를 병합했다. 그러면 사용자가 지운 호스트가
+        # 다음 검사에서 되살아난다 — 설정 화면을 여는 것만으로도 probe 가 돌기
+        # 때문에, 지운 사람은 자기가 지웠다는 사실조차 확인할 수 없다. 자동
+        # 적용은 일회성 마이그레이션 한 번뿐이고(settings_service), 그 뒤로
+        # 다시 넣는 것은 사용자가 버튼을 눌렀을 때만이다.
+        state = agy_permissions.read_state()
+        if state.error:
+            result.notes.append(f"페이지 열람 허용 목록을 읽지 못했습니다: {state.error}")
+        elif not state.exists:
+            result.notes.append(
+                "페이지 열람 허용 목록 파일이 없습니다. 권장 출처를 넣으려면 "
+                "설정 화면에서 「권장 목록 다시 적용」을 누르십시오."
+            )
+        elif state.missing:
+            result.notes.append(
+                "페이지 열람 허용 목록에 없는 권장 출처: " + ", ".join(state.missing)
+            )
+        else:
+            result.notes.append(
+                f"페이지 열람 허용 목록에 권장 논문 출처 "
+                f"{len(state.applied)}곳이 모두 있습니다."
+            )
 
         # 인증 확인. 모델 추론을 돌리지 않으므로 토큰 사용량이 발생하지 않는다.
         models_run = await proc.run_capture(

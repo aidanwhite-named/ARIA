@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, settings_service
 from .api import history, jobs, prompts, providers, settings
 from .config import HOST, PATHS, PORT
 from .db import init_engine
@@ -39,6 +39,10 @@ async def lifespan(app: FastAPI):
     PATHS.ensure()
     PROMPT_STORE.ensure()
     init_engine()
+    # agy 권장 열람 허용 목록의 **일회성** 적용. 여기 한 곳에서만 자동으로
+    # 병합하고, Provider 검사는 읽기 전용이다. 사용자가 지운 호스트가 다음
+    # 검사에서 되살아나지 않게 하는 것이 이 배치의 이유다.
+    settings_service.run_agy_allowlist_migration()
     try:
         yield
     finally:

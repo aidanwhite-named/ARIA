@@ -321,6 +321,10 @@ class SettingsOut(BaseModel):
     # EPO OPS 사용량. values 의 날것 상태가 아니라 한도·남은 양까지 계산된 값
     # 이다. 화면과 경고 문구가 같은 숫자를 봐야 하기 때문이다.
     epo_quota: dict[str, Any] = Field(default_factory=dict)
+    # agy 의 페이지 열람 허용 목록. ARIA 설정값이 아니라 **다른 도구의 설정
+    # 파일에서 읽은 사실**이므로 values 가 아니라 별도 칸이다. 화면이 "권장
+    # 호스트가 실제로 적용됐는가"를 그릴 유일한 근거다.
+    agy_permissions: dict[str, Any] = Field(default_factory=dict)
 
 
 class SettingsUpdate(BaseModel):

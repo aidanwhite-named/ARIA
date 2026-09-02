@@ -345,6 +345,11 @@ export interface SearchCandidate {
   doc_number: string;
   doi: string;
   title: string;
+  /** 검증되지 않은 제목. 문헌번호-주소 대조를 통과하지 못하면 title 이 비고
+   *  이 칸에만 남는다. 표시할 때는 반드시 "검색 결과 기반·미검증" 이라고
+   *  밝히며, 이 값만으로는 A/B 등급도 구성 대응표도 만들어지지 않는다.
+   *  옛 매니페스트에는 없다. */
+  reported_title?: string;
   applicant: string;
   url: string;
   /** 관측 기록과 대조하기 위해 정규화한 URL. */
@@ -1080,6 +1085,28 @@ export interface AppSettings {
   secrets_set: Record<string, boolean>;
   /** EPO OPS 사용량. 백엔드가 한도·남은 양까지 계산해서 준다. */
   epo_quota: EpoQuotaSnapshot;
+  /** agy 의 페이지 열람 허용 목록. ARIA 설정값이 아니라 다른 도구의 설정
+   *  파일에서 읽은 사실이라 values 가 아니라 이 칸으로 온다. 옛 백엔드는
+   *  보내지 않으므로 선택 값이다. */
+  agy_permissions?: AgyPermissionState;
+}
+
+/** agy settings.json 의 read_url 허용 목록 상태. */
+export interface AgyPermissionState {
+  path: string;
+  exists: boolean;
+  /** 지금 열 수 있는 호스트 전부. 사용자가 직접 넣은 것을 포함한다. */
+  allowed_hosts: string[];
+  /** ARIA 가 권장하는 논문 출처. */
+  recommended: string[];
+  /** 권장 목록 중 실제로 적용된 것. */
+  applied: string[];
+  /** 권장 목록 중 아직 없는 것. */
+  missing: string[];
+  /** read_url(*) 가 이미 들어 있는가. ARIA 는 이 값을 만들지 않는다. */
+  wildcard: boolean;
+  /** 읽지 못한 이유. 비어 있지 않으면 다른 칸은 신뢰할 수 없다. */
+  error: string;
 }
 
 /** EPO OPS 사용량 스냅샷.

@@ -948,6 +948,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             prior_report=prior_report,
             prior_citation_mapping=prior_mapping,
             tool_policy_name=tool_policy_name,
+            agy_allowed_hosts=job_assembly.allowed_hosts_for(tool_policy_name),
             retrieval_mode=str(values.get("retrieval_mode") or "auto"),
             provider_byte_budget=byte_budget,
             retrieval_budget=retrieval_budget,

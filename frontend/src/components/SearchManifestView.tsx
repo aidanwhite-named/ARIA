@@ -53,6 +53,87 @@ export function discoveryOrigins(
   return found.length > 0 ? [...found] : ["web"];
 }
 
+/** 클릭 가능한 링크로 만들어도 되는 주소인가. 아니면 null.
+ *
+ *  백엔드의 search_manifest.is_linkable_url 과 **같은 규칙**이다. 후보의 url 은
+ *  모델이 적은 값이고, 모델의 입력에는 검색 결과와 페이지 본문이 섞여 있다.
+ *  즉 이 칸은 비신뢰 데이터가 도달할 수 있는 자리다. javascript:, data:, file:
+ *  같은 값을 그대로 href 에 넣으면 화면을 여는 것만으로 사용자가 그것을 한 번
+ *  클릭할 수 있는 위치에 놓인다.
+ *
+ *  거짓이어도 값을 지우지 않는다. 모델이 무엇을 적었는지는 그 자체로 기록이고,
+ *  평문으로 두면 클릭되지 않는다.
+ */
+export function linkableUrl(raw?: string): string | null {
+  const text = (raw ?? "").trim();
+  if (!text) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    // 상대 주소나 파싱 불가. base 를 붙여 절대 주소로 만들지 않는다 — 그러면
+    // 모델이 적은 값이 ARIA 자신의 출처를 가리키게 된다.
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  if (!parsed.hostname) return null;
+  return text;
+}
+
+/** 주소 한 줄. 열 수 있으면 링크로, 아니면 평문으로 보여 준다. */
+function CandidateUrl({ url }: { url: string }) {
+  const safe = linkableUrl(url);
+  if (!safe) {
+    return (
+      <span className="mono-text" title="http/https 주소가 아니라 링크로 열지 않습니다.">
+        {url}
+      </span>
+    );
+  }
+  return (
+    <a href={safe} target="_blank" rel="noreferrer noopener">
+      {safe}
+    </a>
+  );
+}
+
+/** 검증된 명칭이 없을 때 보여 줄 미검증 제목. 없으면 빈 문자열.
+ *
+ *  백엔드의 search_manifest.unverified_title 과 **같은 규칙**이다. 검증된 title
+ *  이 있으면 미검증 제목은 쓰지 않는다 — 둘을 나란히 보여 주면 같은 위계로
+ *  읽히고, 그러면 칸을 나눈 의미가 없다.
+ */
+function unverifiedTitle(item: SearchCandidate): string {
+  if ((item.title ?? "").trim()) return "";
+  return (item.reported_title ?? "").trim();
+}
+
+/** 검증되지 않은 제목·링크·상태를 한 덩어리로 보여 준다.
+ *
+ *  이 후보의 명칭은 확인되지 않았다. 그래도 감추지 않는 이유는, 번호와 주소만
+ *  남기면 "직접 확인해 보라"는 안내가 실행 불가능해지기 때문이다. 대신 라벨과
+ *  "수동 확인 필요" 상태를 항상 함께 붙여 검증된 명칭과 섞이지 않게 한다.
+ */
+function UnverifiedTitle({ item }: { item: SearchCandidate }) {
+  const title = unverifiedTitle(item);
+  if (!title) return null;
+  return (
+    <div className="search-candidate-unverified-title">
+      <div>
+        <span className="pill warn">검색 결과 기반 · 미검증</span> 제목: {title}
+      </div>
+      {item.url && (
+        <div className="break">
+          링크: <CandidateUrl url={item.url} />
+        </div>
+      )}
+      <div className="faint">
+        상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요
+      </div>
+    </div>
+  );
+}
+
 // 사후 탐지는 **차단이 아니다.** 이 값이 붙은 실행에서 외부 호출은 이미 나갔고,
 // ARIA 가 한 일은 그 응답을 검색 계획으로 쓰지 않기로 한 것뿐이다.
 const ISOLATION_LABEL: Record<string, string> = {
@@ -339,6 +420,7 @@ function CandidateRow({
         ))}
       </div>
       {item.title && <div className="search-candidate-title">{item.title}</div>}
+      <UnverifiedTitle item={item} />
       <div className="faint">
         {item.applicant && <>{item.applicant} · </>}
         {item.family && <>패밀리 {item.family} · </>}
@@ -413,15 +495,10 @@ function CandidateRow({
         )
       )}
       {item.note && <div className="search-candidate-note">{item.note}</div>}
-      {item.url && (
-        <a
-          className="break"
-          href={item.url}
-          target="_blank"
-          rel="noreferrer noopener"
-        >
-          {item.url}
-        </a>
+      {item.url && !unverifiedTitle(item) && (
+        <div className="break">
+          <CandidateUrl url={item.url} />
+        </div>
       )}
       {(item.mapping ?? []).length > 0 && (
         <div className="table-scroll" style={{ marginTop: 8 }}>
@@ -992,9 +1069,10 @@ export default function SearchManifestView({ job }: { job: Job }) {
                               정식 승격되지 않은 이유: {item.quarantine_reason}
                             </div>
                           )}
-                          {item.url && (
+                          <UnverifiedTitle item={item} />
+                          {item.url && !unverifiedTitle(item) && (
                             <div className="faint break">
-                              모델이 제시한 주소: {item.url}
+                              모델이 제시한 주소: <CandidateUrl url={item.url} />
                             </div>
                           )}
                         </li>
@@ -1042,8 +1120,9 @@ export default function SearchManifestView({ job }: { job: Job }) {
             아직 그룹 분류와 구성 대응표에 들어가지 못한 후보입니다. 웹 후보는
             문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어서이고,
             EPO 독립 검색 후보는 공식 응답에 구성 대응이 아직 대조되지
-            않아서입니다. 문헌번호는 다시 확인해 볼 단서로 남기며, 검증되지 않은
-            대응 내용은 표시하지 않습니다.
+            않아서입니다. 문헌번호와 검색 결과에서 본 제목은 다시 확인해 볼
+            단서로 남기되 미검증으로 표시하며, 검증되지 않은 대응 내용은
+            표시하지 않습니다.
           </p>
           <ul className="search-candidate-list">
             {isolated.map((item) => {
@@ -1093,10 +1172,11 @@ export default function SearchManifestView({ job }: { job: Job }) {
                       : item.quarantine_reason ||
                         "페이지 관측에 근거한 대응표 행이 없습니다."}
                   </div>
-                  {item.url && (
+                  <UnverifiedTitle item={item} />
+                  {item.url && !unverifiedTitle(item) && (
                     <div className="faint break">
                       {epoOnly ? "공식 응답의 주소: " : "모델이 제시한 주소: "}
-                      {item.url}
+                      <CandidateUrl url={item.url} />
                     </div>
                   )}
                 </li>

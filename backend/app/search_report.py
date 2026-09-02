@@ -192,6 +192,57 @@ def _cell(value: str) -> str:
     return " ".join(text.split()) or "-"
 
 
+def _link(url) -> str:
+    """클릭 가능한 마크다운 자동 링크. 아니면 평문 주소 그대로.
+
+    링크로 만들지 않는 경우가 둘이다.
+
+      - http/https 가 아닌 값. 이 칸은 모델이 적으며 그 입력에는 검색 결과와
+        페이지 본문이 섞여 있다. javascript:·data:·file: 을 링크로 만들면
+        보고서를 여는 것만으로 사용자가 한 번 클릭할 수 있는 자리에 놓인다.
+        판정은 search_manifest.is_linkable_url 한 곳에서 하고 화면도 같은
+        규칙을 쓴다.
+      - 자동 링크 문법을 깨뜨리는 문자가 든 값. 깨진 링크보다 평문이 낫다.
+
+    어느 쪽이든 **값을 지우지는 않는다.** 모델이 무엇을 적었는지는 그 자체로
+    기록이고, 평문이면 클릭되지 않는다.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if any(ch.isspace() or ch in "<>" for ch in text):
+        return text
+    if not search_manifest.is_linkable_url(text):
+        return text
+    return f"<{text}>"
+
+
+def _unverified_title_lines(item: dict, *, indent: str = "") -> list[str]:
+    """검증되지 않은 제목을 사용자가 직접 확인할 수 있게 적는다.
+
+    왜 지우지 않고 적는가
+    ---------------------
+    이 후보의 명칭은 검증되지 않았다. 그래서 title 칸에서는 빠진다. 그런데
+    사용자에게 번호와 주소만 남기면 "직접 확인해 보라"는 말이 실행 불가능해진다 —
+    무엇을 확인해야 하는지가 사라지기 때문이다.
+
+    그래서 값을 감추는 대신 **등급을 붙여** 적는다. 라벨과 상태 줄이 항상 함께
+    나가므로 검증된 명칭과 같은 위계로 읽힐 수 없고, 이 값은 A/B 등급·구성
+    대응표·직접 발췌 어디에도 쓰이지 않는다(search_manifest 의 게이트는 이
+    칸을 보지 않는다).
+    """
+    title = search_manifest.unverified_title(item)
+    if not title:
+        return []
+    lines = [f"{indent}- 제목(검색 결과 기반·미검증): {_cell(title)}"]
+    if item.get("url"):
+        lines.append(f"{indent}- 링크: {_link(item['url'])}")
+    lines.append(
+        f"{indent}- 상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요"
+    )
+    return lines
+
+
 def _verification_detail(value) -> str:
     """옛 기록에 저장된 EPO XML 오류가 보고서 본문을 밀어내지 않게 줄인다."""
     text = str(value or "").strip()
@@ -233,13 +284,18 @@ def _candidate_section(item: dict) -> list[str]:
     lines = [f"#### {identity}"]
     if item["title"]:
         lines.append(f"- 명칭: {_cell(item['title'])}")
+    # 미검증 제목은 링크·상태와 한 덩어리로 나간다. 셋이 떨어져 있으면 "무엇을
+    # 어디서 확인해야 하는가"가 다시 흩어진다. 그래서 이 블록이 나가면 아래의
+    # 원문 링크 줄은 생략한다 — 같은 주소를 두 번 적지 않는다.
+    unverified_lines = _unverified_title_lines(item)
+    lines += unverified_lines
     if item["applicant"]:
         lines.append(f"- 출원인·저자: {_cell(item['applicant'])}")
     if item["doi"] and item["doc_number"]:
         lines.append(f"- DOI: {item['doi']}")
     lines.append(f"- 패밀리: {_cell(item['family'] or '확인 필요')}")
-    if item["url"]:
-        lines.append(f"- 원문 링크: {item['url']}")
+    if item["url"] and not unverified_lines:
+        lines.append(f"- 원문 링크: {_link(item['url'])}")
     lines.append(
         "- 증거 등급: "
         + _PROVENANCE_LABEL.get(item["provenance"], item["provenance"])
@@ -432,10 +488,12 @@ def _provisional_candidates(items: list[tuple[dict, dict]]) -> list[str]:
             "  - 발견 경로: "
             + " + ".join(_DISCOVERY_LABEL.get(origin, origin) for origin in discovered)
         )
-        if item.get("url"):
+        unverified_lines = _unverified_title_lines(item, indent="  ")
+        lines += unverified_lines
+        if item.get("url") and not unverified_lines:
             lines.append(
                 ("  - 공식 응답의 주소: " if epo_only else "  - 모델이 제시한 주소: ")
-                + item["url"]
+                + _link(item["url"])
             )
         lines.append(
             "  - 분류 근거: "
@@ -555,10 +613,16 @@ def _isolated_section(items: list[dict]) -> list[str]:
     때문이고, 그룹에 넣지 않는 이유는 검증된 후보와 같은 위계로 읽히면 안 되기
     때문이다.
 
-    명칭·출원인·비고·구성 대응표는 인쇄하지 않는다. 정규화 단계에서 이미
+    검증된 명칭·출원인·비고·구성 대응표는 인쇄하지 않는다. 정규화 단계에서 이미
     비워지지만, 값이 남아 있더라도 이 자리에서 다시 인쇄하지 않는다. 격리
-    영역에 그럴듯한 명칭이 찍히면 사용자는 번호와 명칭의 결합을 믿게 되고,
-    그것이 애초에 막으려던 실패다.
+    영역에 그럴듯한 명칭이 검증된 것처럼 찍히면 사용자는 번호와 명칭의 결합을
+    믿게 되고, 그것이 애초에 막으려던 실패다.
+
+    다만 **검색 결과에서 본 제목은 등급을 붙여 적는다.** 예전에는 그것마저
+    지웠는데, 그러면 남는 것이 번호와 주소뿐이라 "직접 확인해 보라"는 안내가
+    실행 불가능해진다. 지우는 것과 등급을 낮춰 적는 것은 다르다 — 라벨과
+    "수동 확인 필요" 상태가 항상 함께 나가므로 검증된 명칭과 같은 위계로 읽힐
+    수 없고, 이 값은 어떤 게이트도 통과시키지 않는다.
     """
     lines = [
         "## 미검증 참고 후보",
@@ -604,10 +668,12 @@ def _isolated_section(items: list[dict]) -> list[str]:
                     or "페이지 관측에 근거한 대응표 행이 없습니다."
                 )
             )
-        if item["url"]:
+        unverified_lines = _unverified_title_lines(item, indent="  ")
+        lines += unverified_lines
+        if item["url"] and not unverified_lines:
             lines.append(
                 ("  - 공식 응답의 주소: " if epo_only else "  - 모델이 제시한 주소: ")
-                + item["url"]
+                + _link(item["url"])
             )
         lines.append(
             "  - 증거 등급: "

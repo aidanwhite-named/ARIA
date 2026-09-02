@@ -14,6 +14,16 @@ _TEST_PROMPT_DIR = tempfile.mkdtemp(prefix="aria-prompts-test-")
 os.environ["ARIA_DATA_DIR"] = _TEST_DATA_DIR
 os.environ["ARIA_PROMPT_DIR"] = _TEST_PROMPT_DIR
 
+# agy 의 열람 허용 목록도 임시 경로로 돌린다. **ARIA 데이터 디렉터리와 같은
+# 이유이고, 이쪽이 더 위험하다** — 여기는 ARIA 가 아니라 다른 프로그램의 설정
+# 파일이고, 앱 시작 시의 일회성 마이그레이션이 실제로 그 파일을 고친다.
+# TestClient 가 lifespan 을 돌리므로, 이 값을 세우지 않으면 테스트를 한 번
+# 돌리는 것만으로 개발자의 진짜 ~/.gemini 가 바뀐다.
+_TEST_AGY_SETTINGS = os.path.join(
+    tempfile.mkdtemp(prefix="aria-agy-test-"), "settings.json"
+)
+os.environ["ARIA_AGY_SETTINGS_PATH"] = _TEST_AGY_SETTINGS
+
 import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
 

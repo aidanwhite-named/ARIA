@@ -517,6 +517,8 @@ _SEARCH_KEYWORDS = """유사 문헌 검색 경로 전용 키워드.
   SEARCH_FAKE_URL    열어 본 적 없는 URL 에 열람 성공을 주장한다
   SEARCH_PAYWALL_URL 열다가 실패한 URL 에 열람 성공을 주장한다
   SEARCH_QUOTE_PROSE 산문 본문에 원문 인용처럼 보이는 문장을 넣는다
+  SEARCH_DENIED      허용 목록에 없는 주소를 열려다 자동 거부되고 빈 응답으로 끝난다
+  SEARCH_BLOCKED     403·로그인·유료벽에 막혀도 후보와 감사 블록은 남긴다
 """
 
 
@@ -813,7 +815,9 @@ class DeterministicSearchProvider(Provider):
 
         calls: list[dict] = []
 
-        async def call(name: str, payload: dict, ok: bool = True) -> None:
+        async def call(
+            name: str, payload: dict, ok: bool = True, error: str | None = None
+        ) -> None:
             outcome.tool_uses.append(name)
             record = {
                 "id": f"call-{len(outcome.tool_uses)}",
@@ -821,7 +825,9 @@ class DeterministicSearchProvider(Provider):
                 "ts": "2026-08-21T00:00:00+00:00",
                 "input": payload,
                 "ok": ok,
-                "error": None if ok else "접근 거부",
+                # 오류 문구를 바꿔 끼울 수 있어야 한다. 권한 거부와 403 은
+                # 판정이 다른데 문구가 하나뿐이면 그 차이를 재현할 수 없다.
+                "error": error if error is not None else (None if ok else "접근 거부"),
             }
             calls.append(record)
             await emit("tool_use", {"name": name, "id": record["id"], "input": payload})
@@ -836,6 +842,30 @@ class DeterministicSearchProvider(Provider):
                     outcome.terminal_reason = "cancelled"
                     return outcome
 
+        if "SEARCH_DENIED" in message:
+            # agy 의 실측 동작. 검색은 끝냈는데 허용 목록에 없는 주소를 열려다
+            # 자동 거부됐고, 그 한 번의 거부가 **턴 전체**를 취소시켰다. 이미
+            # 끝난 검색 결과도 감사 블록도 함께 사라진다.
+            await call("WebSearch", {"query": "권한 거부 재현"})
+            await call(
+                "WebFetch",
+                {"url": "https://arxiv.org/abs/2412.02317"},
+                ok=False,
+                error="auto-denied: read_url permission",
+            )
+            outcome.tool_calls = calls
+            outcome.exit_code = 0
+            outcome.terminal_reason = "cancelled"
+            outcome.result_text = ""
+            outcome.raw_stdout = ""
+            outcome.raw_stderr = (
+                'jetski: no output produced - a tool required the "read_url" '
+                "permission that headless mode cannot prompt for, so it was "
+                "auto-denied."
+            )
+            await emit("provider_done", {"message": "권한 거부"})
+            return outcome
+
         if "SEARCH_STRAY_TOOL" in message:
             await call("Bash", {"keys": ["command"]})
         elif "SEARCH_BUDGET" in message:
@@ -845,6 +875,22 @@ class DeterministicSearchProvider(Provider):
                     outcome.tool_budget_exceeded = True
                     outcome.cancelled = True
                     break
+        elif "SEARCH_BLOCKED" in message:
+            # 검색은 정상, 열람만 전멸. 허용 목록 밖 주소(elsevier)는 아예
+            # 부르지 않고, 허용된 주소는 403·로그인·유료벽에 막힌다.
+            await call("WebSearch", {"query": "열람 실패 재현"})
+            await call(
+                "WebFetch",
+                {"url": "https://ieeexplore.ieee.org/document/1"},
+                ok=False,
+                error="HTTP 403 - institutional login required",
+            )
+            await call(
+                "WebFetch",
+                {"url": "https://dl.acm.org/doi/10.1145/1"},
+                ok=False,
+                error="HTTP 403 - paywall",
+            )
         elif "SEARCH_NO_TOOL" not in message:
             spec_assisted = "<SPEC_TEXT>" in message
             prefix = "명세서 확장 " if spec_assisted else ""
@@ -887,6 +933,76 @@ def _search_report(message: str) -> str:
         )
     if "SEARCH_NOLOG" in message:
         return report
+
+    if "SEARCH_BLOCKED" in message:
+        # 한 건도 열지 못했다. 그래도 후보는 버리지 않고 검색 결과에서 본
+        # 제목을 reported_title 에 남기며, 감사 블록은 반드시 출력한다.
+        payload = {
+            "rounds": [
+                {
+                    "round": 1,
+                    "channel": "web",
+                    "queries": ["열람 실패 재현"],
+                    "note": "1차",
+                }
+            ],
+            "term_expansions": [],
+            "candidates": [
+                {
+                    "group": None,
+                    "provisional": True,
+                    "channel": "web",
+                    "doc_type": "paper",
+                    "doc_number": "",
+                    "doi": "10.1145/1",
+                    "title": "",
+                    "reported_title": "Learning Automatic Rigging for Humanoid Characters",
+                    "applicant": "",
+                    "url": "https://dl.acm.org/doi/10.1145/1",
+                    "provenance": "search_snippet",
+                    "evidence_status": "candidate_only",
+                    "note": "유료벽에 막혀 본문을 보지 못했습니다.",
+                    "mapping": [],
+                },
+                {
+                    "group": None,
+                    "provisional": True,
+                    "channel": "web",
+                    "doc_type": "paper",
+                    "doc_number": "",
+                    "doi": "10.1000/blocked",
+                    "title": "",
+                    "reported_title": "A Survey of Skinning Weight Prediction",
+                    "applicant": "",
+                    "url": "https://www.sciencedirect.com/science/article/pii/S1",
+                    "provenance": "search_snippet",
+                    "evidence_status": "candidate_only",
+                    "note": "허용 목록에 없는 호스트라 열지 않았습니다.",
+                    "mapping": [],
+                },
+            ],
+            "access_failures": [
+                {
+                    "url": "https://ieeexplore.ieee.org/document/1",
+                    "reason": "로그인 요구",
+                },
+                {"url": "https://dl.acm.org/doi/10.1145/1", "reason": "유료벽 403"},
+                {
+                    "url": "https://www.sciencedirect.com/science/article/pii/S1",
+                    "reason": "허용 목록에 없는 호스트라 열지 않음",
+                },
+            ],
+        }
+        return (
+            report
+            + chr(10)
+            + "[ARIA_SEARCH_LOG_V1]"
+            + chr(10)
+            + json.dumps(payload, ensure_ascii=False)
+            + chr(10)
+            + "[/ARIA_SEARCH_LOG_V1]"
+            + chr(10)
+        )
 
     provenance = (
         "raw_original_verified" if "SEARCH_RAW_CLAIM" in message else "webfetch_summary"

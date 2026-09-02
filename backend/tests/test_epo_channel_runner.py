@@ -953,3 +953,58 @@ def test_no_epo_budget_fallback_number_is_hardcoded_at_the_call_site() -> None:
         "epo_channel_timeout_seconds",
     ):
         assert f'_positive(values.get("{key}")' not in source, key
+
+
+# --------- 권한 거부: 원인 하나가 오류 두 개로 보이지 않게 한다
+#
+# agy 는 허용 목록에 없는 주소를 자동 거부하고 **턴 전체를 취소**한다. 그러면
+# 응답이 비고, 응답이 비었으므로 감사 블록도 없다. 둘은 원인과 증상이지 두 개의
+# 원인이 아니다. 나란히 적으면 사용자는 고칠 곳을 두 군데로 읽는다.
+
+
+def test_permission_denial_is_not_reported_as_a_second_cause(
+    client, shortlisted
+) -> None:
+    """권한 거부가 원인이면 '감사 블록 없음'을 별개 원인으로 적지 않는다."""
+    job = start_search(client, claim=f"{CLAIM}\nSEARCH_DENIED")
+
+    errors = job["errors"] or []
+    assert any("권한이 거부되었습니다" in error for error in errors), errors
+    # 예전에는 여기에 "웹 채널의 검색 감사 블록을 읽지 못했습니다: …" 가 원인
+    # 처럼 한 줄 더 붙었다.
+    assert not any("검색 감사 블록을 읽지 못했습니다" in error for error in errors)
+    # 대신 결과만 적는다. 웹이 후보를 못 냈다는 사실은 사라지면 안 된다.
+    assert any("EPO 후보만으로 보고서를 만들었습니다" in error for error in errors)
+
+    # 채널 상태 표도 파서 오류가 아니라 실제 원인을 말한다.
+    manifest = manifest_of(client, job)
+    assert "권한이 거부되어" in manifest["reported"]["web_report_error"]
+    assert "후속 증상" in job["search_manifest_error"]
+    assert "검색 감사 블록" not in manifest["reported"]["web_report_error"]
+
+    # 파서가 무엇을 봤는지는 버리지 않고 정규화 메모로 내려 둔다.
+    assert any(
+        "감사 블록 파싱 결과" in note for note in manifest["normalization_notes"]
+    )
+
+
+def test_the_epo_channel_still_delivers_after_a_permission_denial(
+    client, shortlisted
+) -> None:
+    """웹 권한이 거부돼도 EPO 후보로 보고서는 나온다.
+
+    두 채널은 격리되어 있다. agy 의 승인 파일 문제가, OPS 로 받아 아티팩트로
+    보존한 공식 응답을 무효로 만들 이유는 없다.
+    """
+    job = start_search(client, claim=f"{CLAIM}\nSEARCH_DENIED")
+    manifest = manifest_of(client, job)
+
+    assert (job["result_text"] or "").strip()
+    numbers = {item["doc_number"] for item in manifest["reported"]["candidates"]}
+    assert "EP1000000A1" in numbers
+    # 후보에 웹이 데려온 문헌은 하나도 없다. 그 사실도 보고서에 남는다.
+    assert all(
+        search_manifest.DISCOVERY_EPO in search_manifest.discovery_origins(item)
+        for item in manifest["reported"]["candidates"]
+    )
+    assert "웹 검색" in job["result_text"]

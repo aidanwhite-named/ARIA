@@ -178,7 +178,11 @@ def test_number_that_does_not_appear_in_the_url_loses_bibliographic_fields() -> 
     assert candidate["doc_number"] == "KR1020229999999A"
     assert candidate["title"] == ""
     assert candidate["applicant"] == ""
-    assert any("명칭·출원인·패밀리를 출력에서 제외" in note for note in notes)
+    # 검증된 칸에서는 빠지지만 통째로 사라지지는 않는다. 사용자가 직접 확인할
+    # 단서가 없으면 "다시 확인해 보라"가 실행 불가능한 안내가 된다.
+    assert candidate["reported_title"] == "테스트 특허"
+    assert any("명칭·출원인·패밀리를 검증된 값에서 제외" in note for note in notes)
+    assert any("검색 결과 기반·미검증" in note for note in notes)
 
 
 # --------------------------------------------------------- 행별 근거 강등

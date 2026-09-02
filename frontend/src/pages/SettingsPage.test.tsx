@@ -50,6 +50,16 @@ const settingsResponse = {
     epo_consumer_secret: "",
   },
   warnings: [],
+  agy_permissions: {
+    path: "C:/Users/tester/.gemini/antigravity-cli/settings.json",
+    exists: true,
+    allowed_hosts: ["patents.google.com", "arxiv.org"],
+    recommended: ["arxiv.org", "dl.acm.org"],
+    applied: ["arxiv.org"],
+    missing: ["dl.acm.org"],
+    wildcard: false,
+    error: "",
+  },
   data_dir: "C:/data",
   runs_dir: "C:/data/runs",
   env_filtering: {
@@ -57,6 +67,18 @@ const settingsResponse = {
     blocked_prefixes: [],
     removed_count: 0,
     removed_sample: [],
+  },
+};
+
+//: 「권장 목록 다시 적용」을 누른 뒤의 응답. 자동 적용은 설치당 한 번뿐이므로
+//: 이 버튼이 다시 넣는 유일한 경로다.
+const appliedResponse = {
+  ...settingsResponse,
+  agy_permissions: {
+    ...settingsResponse.agy_permissions,
+    allowed_hosts: ["patents.google.com", "arxiv.org", "dl.acm.org"],
+    applied: ["arxiv.org", "dl.acm.org"],
+    missing: [],
   },
 };
 
@@ -115,6 +137,7 @@ vi.mock("../lib/api", () => ({
     listProviders: vi.fn(async () => providersResponse),
     updateSettings: vi.fn(async () => settingsResponse),
     probeProviders: vi.fn(async () => []),
+    applyAgyPermissions: vi.fn(async () => appliedResponse),
   },
 }));
 
@@ -241,6 +264,65 @@ describe("대용량 인용발명 전달 방식", () => {
     expect(text).not.toContain("실행 제한 시간 (초)");
     expect(text).not.toContain("검색 1회당 최대 도구 호출 수");
     expect(text).not.toContain("raw stdout/stderr 를 파일로 보존");
+  });
+
+  it("agy 권장 호스트가 실제로 적용됐는지 화면에서 확인할 수 있다", async () => {
+    const { container } = await renderPage();
+    const card = container.querySelector(".settings-agy-permissions");
+    expect(card).toBeTruthy();
+    const text = card?.textContent ?? "";
+    // 적용된 것과 아직 없는 것을 구분해서 보여 준다. 목록만 나열하면 "권장한다"
+    // 와 "적용됐다" 를 구별할 수 없다.
+    expect(text).toContain("적용됨 · arxiv.org");
+    expect(text).toContain("미적용 · dl.acm.org");
+    // 어느 파일을 고쳤는지 밝힌다. 남의 도구 설정을 만졌으면 그 위치를 말해야 한다.
+    expect(text).toContain("C:/Users/tester/.gemini/antigravity-cli/settings.json");
+    // 허용이 열람 성공 보장이 아니라는 것도 화면에 남는다.
+    expect(text).toContain("허용은 접근 권한일 뿐");
+  });
+
+  it("허용 목록 자동 적용이 일회성이라고 밝히고 재적용 버튼을 준다", async () => {
+    const { container } = await renderPage();
+    const card = container.querySelector(".settings-agy-permissions");
+    const text = card?.textContent ?? "";
+    // 사용자가 지운 호스트를 프로그램이 되살리지 않는다는 것이 이 화면의 계약이다.
+    expect(text).toContain("자동 적용은 설치당 한 번뿐입니다.");
+    expect(text).toContain("Provider 를 다시 검사해도 목록을 고치지 않습니다");
+    // 버전이 올라가도 전체를 다시 넣지 않는다는 것까지 밝혀야 한다. 그러지
+    // 않으면 사용자는 언젠가 지운 항목이 돌아올 수 있다고 읽는다.
+    expect(text).toContain("그때 새로 추가된 호스트만");
+    expect(text).toContain("전체 목록을 다시 넣는 유일한 방법이 위 버튼입니다");
+    expect(
+      screen.getByRole("button", { name: "권장 목록 다시 적용" }),
+    ).toBeTruthy();
+  });
+
+  it("재적용 버튼이 실제로 병합을 요청하고 새 상태를 반영한다", async () => {
+    const { api } = await import("../lib/api");
+    const { container } = await renderPage();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "권장 목록 다시 적용" }),
+    );
+
+    await waitFor(() =>
+      expect(api.applyAgyPermissions).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector(".settings-agy-permissions")?.textContent ?? "",
+      ).toContain("적용됨 · dl.acm.org"),
+    );
+  });
+
+  it("열람 허용을 강제 동작으로 설명하지 않는다", async () => {
+    const { container } = await renderPage();
+    const text =
+      container.querySelector(".settings-agy-permissions")?.textContent ?? "";
+    // ARIA 는 agy 가 프롬프트를 따르도록 강제하지 못한다. 화면 문구가 그
+    // 한계와 어긋나면 사용자는 보장되지 않는 동작을 보장으로 읽는다.
+    expect(text).toContain("모델에게 지시합니다.");
+    expect(text).toContain("ARIA 가 강제할 수 있는 동작은 아닙니다");
   });
 
   it("특허 연동 카드를 전체 폭 대상으로 표시하고 설명을 간결하게 유지한다", async () => {

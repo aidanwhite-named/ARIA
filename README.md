@@ -355,11 +355,40 @@ ARIA 는 항상 `--disable-slash-commands` 로 실행하므로 plan 모드는 �
 - 구형 `gemini` 명령으로 폴백하지 않음 (계약이 달라 조용히 오작동함)
 
 유사문헌 검색의 `read_url_content` 는 headless 실행에서 승인 창을 열 수 없다.
-필요한 출처만 agy 전역 설정의 `permissions.allow` 에 호스트 단위로 허용한다.
-예를 들어 Google Patents 는 `read_url(patents.google.com)` 이다. `read_url(*)` 나
-`read_url(google.com)` 처럼 범위를 넓히지 않는다. 권한이 없으면 agy 는 종료 코드
-0과 빈 응답을 돌려줄 수 있으며, ARIA 는 이를 `SEARCH_PERMISSION_DENIED` 로
-구분해 표시한다.
+허용 목록에 없는 주소를 부르면 자동 거부되고, **그 거부 하나가 턴 전체를
+취소시킨다.** 이미 끝난 검색 결과도 감사 블록도 함께 사라지므로, ARIA 는 이를
+`SEARCH_PERMISSION_DENIED` 로 구분해 표시하고 "감사 블록 없음"은 별개 원인이
+아니라 그 후속 증상으로 묶어 적는다.
+
+그래서 ARIA 는 논문 출처로 자주 필요한 호스트를 agy 전역 설정의
+`permissions.allow` 에 **병합**한다(`backend/app/providers/agy_permissions.py`).
+
+- arxiv.org · www.mdpi.com · ieeexplore.ieee.org · dl.acm.org ·
+  www.researchgate.net · www.semanticscholar.org
+- **자동 적용은 버전당 한 번뿐이다.** 앱 시작 시의 마이그레이션이고, 끝나면
+  버전이 기록된다(`agy_allowlist_migration`). 그 뒤로 Provider 검사는 이 파일을
+  **읽기만** 한다 — 검사할 때마다 병합하면 사용자가 지운 호스트가 되살아나고,
+  설정 화면을 여는 것만으로 검사가 도는 구조라 지운 사람은 자기가 지웠는지조차
+  확인할 수 없다.
+- **권장 목록이 늘어 버전이 올라가도, 그 버전이 새로 도입한 호스트만 넣는다.**
+  목록은 버전별 delta 로 적혀 있고(`RECOMMENDED_HOST_VERSIONS`), 마이그레이션은
+  저장된 버전 다음 줄부터 이어 붙인다. 전체를 다시 병합하면 사용자가 예전
+  버전에서 지운 호스트가 그 순간 되살아나기 때문이다. 저장된 표시가 코드보다
+  새 버전이거나 알 수 없는 값이면 아무것도 넣지 않는다.
+- 전체 목록을 다시 넣는 유일한 경로는 Settings 의 「논문 페이지 열람 허용 목록
+  (agy)」에서 **권장 목록 다시 적용**을 누르는 것이다. 프로그램이 자동으로
+  되돌리는 경로는 없다.
+- 기존 항목은 덮어쓰지 않고, 중복은 추가하지 않는다. 쓰기 전에 백업을 만들고
+  원자적으로 바꾼다. JSON 이 깨져 있으면 손대지 않고 오류를 표시한다.
+- `read_url(*)` 나 `read_url(google.com)` 처럼 범위를 넓히지 않는다.
+  `--dangerously-skip-permissions` 도 쓰지 않는다.
+- 실제로 적용된 호스트는 같은 화면에서 확인한다. 다른 출처가 필요하면 그 파일에
+  직접 추가하면 되고, 다음 검색 실행이 그 목록을 그대로 읽어 모델에게 알려준다.
+
+허용은 접근 권한일 뿐 열람 성공 보장이 아니다. IEEE·ACM·ResearchGate 는 로그인·
+유료벽·봇 차단이 흔하다. 그때 그 문헌을 미검증 후보로 남기고 나머지 검색을
+계속하도록 **모델에게 지시한다.** ARIA 가 강제하는 동작이 아니다 — 프롬프트는
+안내이고, 모델이 무시하면 그 실행은 실패로 기록될 뿐이다.
 
 **신뢰할 수 없는 출처의 문서 분석에는 사용하지 마십시오.**
 

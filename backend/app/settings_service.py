@@ -393,6 +393,108 @@ def epo_ledger(session: Session):
     return ledger
 
 
+# --- agy 페이지 열람 허용 목록 자동 적용 ------------------------------------
+#
+# **한 번만** 적용한다. 매 검사마다 병합하면 사용자가 지운 호스트가 되살아나고,
+# 설정 화면을 여는 것만으로 검사가 도는 구조라 지운 사람은 자기가 지웠다는
+# 사실조차 확인할 수 없다. 그래서 적용 지점은 여기 하나뿐이고, 그 뒤로 Provider
+# 검사는 읽기 전용이다.
+
+AGY_MIGRATION_KEY = "agy_allowlist_migration"
+
+
+def agy_allowlist_migration_done(session: Session) -> bool:
+    """이 설치에 자동 적용이 이미 끝났는가."""
+    from .providers import agy_permissions
+
+    stored = str(get(session, AGY_MIGRATION_KEY) or "")
+    return stored == agy_permissions.MIGRATION_VERSION
+
+
+def _stamp_agy_migration(session: Session) -> None:
+    from .providers import agy_permissions
+
+    row = session.get(AppSetting, AGY_MIGRATION_KEY)
+    if row is None:
+        session.add(
+            AppSetting(
+                key=AGY_MIGRATION_KEY, value=agy_permissions.MIGRATION_VERSION
+            )
+        )
+    else:
+        row.value = agy_permissions.MIGRATION_VERSION
+    session.flush()
+
+
+def apply_agy_allowlist(session: Session, *, forced: bool) -> tuple[object, list[str]]:
+    """권장 호스트를 병합하고 적용 표시를 남긴다. (상태, 추가한 호스트).
+
+    forced 는 사용자가 설정 화면의 버튼을 눌렀는가다. 세 가지가 다르다.
+
+      자동(forced=False)  **저장된 버전 이후의 delta 만** 넣는다. 이미 최신
+                          버전까지 끝난 설치는 건너뛴다. 파일이 없으면 만들지
+                          않는다 — agy 를 쓰지도 않는 기계에 ``~/.gemini`` 를
+                          만들지 않기 위해서다. 그래서 표시도 남기지 않고,
+                          사용자가 agy 를 처음 실행해 파일이 생긴 뒤에 적용된다.
+      수동(forced=True)   **권장 목록 전체**를 다시 병합한다. 표시와 무관하고,
+                          파일이 없으면 만든다 — 사용자가 알고 누른 버튼이다.
+
+    delta 만 넣는 이유가 핵심이다. 버전을 올릴 때 전체 목록을 다시 병합하면,
+    사용자가 이전 버전에서 지운 호스트가 그 순간 되살아난다. 지운 것은 그러기로
+    한 선택이고, 권장 목록에 새 줄이 생겼다는 것이 그 선택을 뒤집을 이유가 되지
+    않는다. 되돌리는 경로는 사용자가 누르는 버튼 하나뿐이다.
+
+    어느 쪽이든 기존 항목은 덮어쓰지 않는다. AgyPermissionsError 는 그대로
+    올린다. 손상된 파일을 만난 자동 실행은 표시를 남기지 않으므로 다음 기회에
+    다시 시도한다.
+    """
+    from .providers import agy_permissions
+
+    if forced:
+        hosts: tuple[str, ...] = agy_permissions.RECOMMENDED_HOSTS
+    else:
+        stored = str(get(session, AGY_MIGRATION_KEY) or "")
+        if stored == agy_permissions.MIGRATION_VERSION:
+            return agy_permissions.read_state(), []
+        pending = agy_permissions.hosts_since(stored)
+        if pending is None:
+            # 코드가 모르는 버전 표시다(다운그레이드이거나 손으로 고친 값).
+            # 무엇이 이미 적용됐는지 알 수 없으므로 아무것도 넣지 않고 표시도
+            # 건드리지 않는다 — 여기서 전체를 넣으면 그게 바로 "지운 호스트가
+            # 되살아난다"이다.
+            return agy_permissions.read_state(), []
+        if not pending:
+            # 새 버전이 호스트를 추가하지 않은 경우. 넣을 것이 없으니 파일은
+            # 열지 않고 버전만 올린다.
+            _stamp_agy_migration(session)
+            return agy_permissions.read_state(), []
+        hosts = pending
+
+    state, added = agy_permissions.apply_recommended(hosts=hosts, create=forced)
+    if forced or state.exists:
+        _stamp_agy_migration(session)
+    return state, added
+
+
+def run_agy_allowlist_migration() -> None:
+    """앱 시작 시 한 번 부른다. 실패해도 시작을 막지 않는다.
+
+    이건 검색 품질을 돕는 편의이지 ARIA 가 뜨기 위한 조건이 아니다. 여기서
+    터뜨리면 agy 를 쓰지도 않는 사용자의 앱이 시작하지 못한다. 실패 사유는
+    설정 화면이 허용 목록 상태를 읽을 때 그대로 드러난다.
+    """
+    from .db import session_scope
+    from .providers import agy_permissions
+
+    try:
+        with session_scope() as session:
+            apply_agy_allowlist(session, forced=False)
+    except agy_permissions.AgyPermissionsError:
+        return
+    except Exception:
+        return
+
+
 def reset_epo_ledger() -> None:
     """전역 원장을 버린다. 테스트에서만 쓴다."""
     global _EPO_LEDGER, _EPO_PERSIST_ERROR
