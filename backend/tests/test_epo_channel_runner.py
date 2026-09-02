@@ -478,7 +478,7 @@ def test_usage_is_recorded_per_lane(client, epo_on) -> None:
     manifest = manifest_of(client, start_search(client))
     lane = manifest["epo"]["lanes"][0]
     assert lane["usage"]["lane_id"] == "epo:claim_only"
-    assert lane["usage"]["max_rounds"] == 2
+    assert lane["usage"]["model_calls"] == 1
     assert "channel_budget" in lane["usage"]
     assert manifest["epo"]["usage"]["calls_by_kind"]["search"]["count"] >= 1
 
@@ -838,8 +838,10 @@ def test_epo_candidates_keep_a_verification_slot_under_a_tight_limit(
     order = manifest["verification"]["selection_order"]
     assert len(order) == 1
     assert order[0]["doc_number"] == "EP1000000A1"
-    # 이미 받아 둔 응답이 있으므로 재사용 순위로 먼저 뽑혔다.
-    assert order[0]["selection_reason"] == "reusable_official_artifact"
+    # 검색 응답에서 서지는 이미 손에 있다. 청구항·초록만 더 받으면 되므로
+    # 아무것도 없는 후보보다 먼저 뽑힌다. 검색 단계가 상세조회를 하지 않게
+    # 되면서 "완전 재사용"은 이 경로에서 나오지 않는다.
+    assert order[0]["selection_reason"] == "partially_reusable_artifact"
     # 밀려난 웹 후보는 사유와 함께 남는다.
     excluded = manifest["verification"]["excluded_candidates"]
     assert excluded and all(

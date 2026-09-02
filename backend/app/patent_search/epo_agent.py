@@ -43,7 +43,6 @@ TERM_LLM_FINISHED = "llm_finished"
 TERM_ROUND_LIMIT = "round_limit"
 TERM_SEARCH_CALL_LIMIT = "search_call_limit"
 TERM_DETAIL_FETCH_LIMIT = "detail_fetch_limit"
-TERM_NO_NEW_CANDIDATES = "no_new_candidates"
 TERM_TIMEOUT = "timeout"
 TERM_THROTTLED = "throttled"
 TERM_QUOTA_EXCEEDED = "quota_exceeded"
@@ -60,7 +59,6 @@ TERMINATION_REASONS = (
     TERM_ROUND_LIMIT,
     TERM_SEARCH_CALL_LIMIT,
     TERM_DETAIL_FETCH_LIMIT,
-    TERM_NO_NEW_CANDIDATES,
     TERM_TIMEOUT,
     TERM_THROTTLED,
     TERM_QUOTA_EXCEEDED,
@@ -164,7 +162,10 @@ class EpoAgentBudget:
     ChannelBudget 을 공유해야 한다.
     """
 
-    max_rounds: int = 2
+    # 라운드는 없다. 검색계획 턴은 한 번이고, 그 한 번의 응답에 서로 다른
+    # 목적의 CQL 을 max_search_calls_per_round 개까지 담는다. 첫 결과를 보고
+    # 다시 검색어를 짜는 적응형 2라운드는 없앴다 — 결과를 읽는 판단은 검색하지
+    # 않는 최종 선택 턴 하나로 모았다.
     max_search_calls: int = 6
     max_search_calls_per_round: int = 3
     max_detail_fetches: int = 12
@@ -184,7 +185,6 @@ class EpoAgentBudget:
 
     def to_dict(self) -> dict:
         return {
-            "max_rounds": self.max_rounds,
             "max_search_calls": self.max_search_calls,
             "max_search_calls_per_round": self.max_search_calls_per_round,
             "max_detail_fetches": self.max_detail_fetches,
@@ -258,11 +258,6 @@ class CandidateRecord:
     artifact_ids: list = field(default_factory=list)
     evidence: dict = field(default_factory=dict)
     fields: dict = field(default_factory=dict)
-    # 상세 조회(epo_fetch_document)까지 한 후보인가. 검색 결과로만 만난 후보와
-    # 예산을 더 쓴 후보를 구분한다. 결과 payload 를 줄일 때 무엇을 먼저
-    # 지킬지가 여기서 갈린다.
-    detail_fetched: bool = False
-
     def to_dict(self) -> dict:
         return {
             "doc_number": self.doc_number,
@@ -271,7 +266,6 @@ class CandidateRecord:
             "first_seen_round": self.first_seen_round,
             "artifact_ids": list(self.artifact_ids),
             "evidence": dict(self.evidence),
-            "detail_fetched": self.detail_fetched,
         }
 
 
@@ -285,6 +279,8 @@ EXCLUDED_SEARCH_IN_SELECTION = "search_action_in_selection_turn"
 EXCLUDED_RESULT_PAYLOAD_LIMIT = "max_round_result_chars"
 #: 계약 검사에서 거절된 응답이라 채택하지 않은 shortlist.
 EXCLUDED_REJECTED_RESPONSE = "rejected_response"
+#: 검색 단계에서 더 이상 실행하지 않는 action 을 모델이 요청했다.
+EXCLUDED_RETIRED_ACTION = "retired_action"
 
 #: 결과 payload 가 문자 상한을 넘을 때 무엇을 먼저 지키는가.
 #:
@@ -292,18 +288,15 @@ EXCLUDED_REJECTED_RESPONSE = "rejected_response"
 #: 모델이 아직 한 번도 보지 못한 후보이고, 최종 선택 턴은 바로 그것을 보여
 #: 주려고 있는 턴이다. 그래서 배열 순서가 아니라 아래 순위로 남긴다.
 KEEP_LAST_ROUND = "last_round"
-KEEP_DETAIL_FETCHED = "detail_fetched"
 KEEP_NOT_SHORTLISTED = "not_shortlisted"
 KEEP_CANDIDATE_ORDER = "candidate_order"
 KEEP_RANKING = (
     KEEP_LAST_ROUND,
-    KEEP_DETAIL_FETCHED,
     KEEP_NOT_SHORTLISTED,
     KEEP_CANDIDATE_ORDER,
 )
 _KEEP_LABELS = {
     KEEP_LAST_ROUND: "마지막 라운드가 데려온 후보라 모델이 아직 보지 못했음",
-    KEEP_DETAIL_FETCHED: "상세 조회까지 해 예산을 가장 많이 쓴 후보",
     KEEP_NOT_SHORTLISTED: "아직 shortlist 판단을 받지 못한 후보",
     KEEP_CANDIDATE_ORDER: "후보 목록 순서",
 }
@@ -358,7 +351,6 @@ SELECTION_TURN_TERMINATIONS = frozenset(
         TERM_ROUND_LIMIT,
         TERM_SEARCH_CALL_LIMIT,
         TERM_DETAIL_FETCH_LIMIT,
-        TERM_NO_NEW_CANDIDATES,
     }
 )
 
@@ -550,15 +542,23 @@ class EpoSearchAgent:
         return self._finish(run)
 
     async def _search_loop(self, run: EpoSearchRun) -> None:
-        """검색 라운드를 돈다. 종료 사유를 run 에 적고 돌아온다."""
+        """검색계획 턴을 **한 번** 돈다. 종료 사유를 run 에 적고 돌아온다.
+
+        아래 while 은 라운드가 아니라 **형식 오류 재시도**다. 응답을 action 으로
+        읽지 못했거나 계약(claim_analysis)을 지키지 않았을 때만 다시 묻고, 그
+        횟수는 max_invalid_responses 가 센다. 계약을 통과한 응답을 실행하고
+        나면 곧바로 빠져나온다.
+
+        첫 결과를 모델에게 다시 주고 두 번째 검색계획을 받는 적응형 라운드는
+        없다. 검색 결과를 읽는 판단은 OPS 를 부르지 않는 최종 선택 턴 하나로
+        모았다 — 같은 판단을 두 군데서 하면 어느 쪽이 정본인지 알 수 없다.
+        """
         pending_error = ""
         results_payload: list[dict] = []
 
-        # for 루프를 쓰지 않는다. continue 가 라운드를 소모해 버리기 때문이다 —
-        # 형식 오류 두 번이면 검색을 한 번도 못 해 보고 끝난다.
-        rounds_used = 0
+        executed = False
         attempt = 0
-        while rounds_used < self.budget.max_rounds:
+        while not executed:
             if self._stop_for_cancel(run):
                 return
 
@@ -576,7 +576,6 @@ class EpoSearchAgent:
                 {
                     "phase": "round",
                     "round": round_no,
-                    "max_rounds": self.budget.max_rounds,
                     "search_calls": run.search_calls,
                     "max_search_calls": self.budget.max_search_calls,
                 },
@@ -641,6 +640,7 @@ class EpoSearchAgent:
                 continue
 
             pending_error = ""
+            self._record_retired(response, run)
             record.actions = len(response.actions)
             if response.strategy:
                 run.notes.append(f"round {round_no}: {response.strategy}")
@@ -707,11 +707,35 @@ class EpoSearchAgent:
             # 계약을 모두 통과했다. 이 응답은 채택됐고, shortlist 도 여기서
             # 처음 받는다. 위의 거절 경로들은 이 줄에 오지 못한다.
             self._absorb_shortlist(response, round_no)
-            rounds_used += 1
-            record.counts_as_round = True
             before = set(run.candidates)
+            invalid_before = run.invalid_responses
             outcome_reason = await self._execute(response.actions, run, record)
             record.new_candidates = len(set(run.candidates) - before)
+            query_errors = run.invalid_responses - invalid_before
+
+            # 검색이 한 줄도 나가지 않았고 그 이유가 잘못된 질의라면 이 턴은
+            # **실행된 것이 아니다.** 계획 턴이 하나뿐이라 여기서 되묻지 않으면
+            # 레인은 OPS 를 한 번도 부르지 못한 채 정상 종료로 읽힌다. 되묻는
+            # 횟수는 형식 오류와 같은 상한(max_invalid_responses)이 센다.
+            if record.search_calls == 0 and query_errors:
+                record.status = "invalid_query"
+                run.rounds.append(record)
+                if run.invalid_responses >= self.budget.max_invalid_responses:
+                    run.termination_reason = TERM_INVALID_RESPONSE_LIMIT
+                    run.termination_detail = (
+                        "검색식을 만들지 못한 응답이 반복되어 끝냅니다. "
+                        "OPS 호출은 한 번도 나가지 않았습니다."
+                    )
+                    return
+                pending_error = (
+                    "보내 주신 검색식을 하나도 만들지 못했습니다. 아래 오류를 "
+                    "보고 질의를 고쳐 다시 보내십시오."
+                )
+                results_payload = []
+                continue
+
+            executed = True
+            record.counts_as_round = True
             record.status = record.status if record.status != "running" else "ok"
             run.rounds.append(record)
 
@@ -738,20 +762,9 @@ class EpoSearchAgent:
                 )
                 return
 
-            # 새 후보가 없으면 더 돌 이유가 없다. 남은 예산을 태우지 않는다.
-            if rounds_used > 1 and record.new_candidates == 0 and record.search_calls:
-                run.termination_reason = TERM_NO_NEW_CANDIDATES
-                run.termination_detail = (
-                    f"{round_no}라운드에서 새 공개번호가 나오지 않아 조기 "
-                    "종료했습니다."
-                )
-                return
-
-            results_payload = self._results_payload(run, record)
-
         run.termination_reason = TERM_ROUND_LIMIT
         run.termination_detail = (
-            f"검색 라운드 상한({self.budget.max_rounds})에 도달했습니다."
+            "검색계획 턴을 마쳤습니다. 결과 판단은 최종 선택 턴에서 합니다."
         )
         return
 
@@ -881,15 +894,32 @@ class EpoSearchAgent:
     def _needs_claim_analysis(self, response, run: EpoSearchRun) -> bool:
         """이 응답을 실행하기 전에 청구항 분석을 먼저 받아야 하는가.
 
-        검색·조회 action 이 하나라도 들어 있는 응답에만 요구한다. finish 만 있는
+        검색 action 이 하나라도 들어 있는 응답에만 요구한다. finish 만 있는
         응답은 실행할 검색이 없으므로 막을 이유도 없다.
         """
         if run.claim_analysis:
             return False
         return any(
-            isinstance(action, (epo_actions.EpoSearch, epo_actions.EpoFetchDocument))
+            isinstance(action, epo_actions.EpoSearch)
             for action in (response.actions or ())
         )
+
+    def _record_retired(self, response, run: EpoSearchRun) -> None:
+        """모델이 요청했지만 더 이상 실행하지 않는 action 을 기록한다.
+
+        조용히 버리지 않는다. 모델이 상세조회를 계속 요청한다면 그것은 프롬프트가
+        아직 옛 계약을 말하고 있다는 신호이고, 기록에 남아야 다음에 고칠 수 있다.
+        """
+        for name in getattr(response, "retired_actions", None) or ():
+            run.exclude(
+                kind="action",
+                value=str(name),
+                reason_code=EXCLUDED_RETIRED_ACTION,
+                detail=(
+                    "검색 단계에서는 문헌 상세조회를 하지 않습니다. 문헌 본문은 "
+                    "후보를 합친 뒤 공식 검증 단계에서만 받습니다."
+                ),
+            )
 
     def _absorb_analysis(self, response, run: EpoSearchRun, round_no: int) -> None:
         """첫 응답의 claim_analysis 를 모은다. **shortlist 는 여기서 받지 않는다.**
@@ -1126,8 +1156,9 @@ class EpoSearchAgent:
             record["reason"] = str(exc)
             return
 
+        self._record_retired(response, run)
         for action in response.actions or ():
-            if isinstance(action, (epo_actions.EpoSearch, epo_actions.EpoFetchDocument)):
+            if isinstance(action, epo_actions.EpoSearch):
                 record["rejected_actions"] += 1
                 run.exclude(
                     kind=TURN_SELECTION,
@@ -1176,12 +1207,6 @@ class EpoSearchAgent:
 
             if isinstance(action, epo_actions.EpoSearch):
                 stop = await self._do_search(action, run, record)
-                if stop is not None:
-                    return stop
-                continue
-
-            if isinstance(action, epo_actions.EpoFetchDocument):
-                stop = await self._do_fetch(action, run, record)
                 if stop is not None:
                     return stop
                 continue
@@ -1276,32 +1301,6 @@ class EpoSearchAgent:
         self._absorb(response, run, record.round)
         return None
 
-    async def _do_fetch(self, action, run: EpoSearchRun, record: RoundRecord):
-        if self.channel.expired():
-            return TERM_TIMEOUT, (
-                f"EPO 채널 제한시간({self.channel.deadline_seconds:.0f}초)을 "
-                "넘겼습니다."
-            )
-        if not self.channel.take_detail():
-            return TERM_DETAIL_FETCH_LIMIT, (
-                f"상세 조회 상한({self.channel.max_detail_fetches}건, 작업 "
-                "전체)에 도달했습니다."
-            )
-        try:
-            response = await asyncio.to_thread(
-                self.backend.fetch_document, action.doc_number, action.constituent
-            )
-        except BaseException as exc:  # noqa: BLE001
-            return self._call_failure(exc, record)
-
-        run.detail_fetches += 1
-        record.detail_fetches += 1
-        if self.is_cancelled():
-            record.status = "cancelled"
-            return TERM_CANCELLED, "사용자가 실행을 취소했습니다."
-        self._absorb(response, run, record.round, detail=True)
-        return None
-
     def _call_failure(self, exc: BaseException, record: RoundRecord):
         """OPS 호출 실패를 종료 사유로 옮긴다. 0건과 섞지 않는다."""
         record.errors.append(str(exc))
@@ -1328,14 +1327,8 @@ class EpoSearchAgent:
             return TERM_PROVIDER_ERROR, str(exc)
         raise exc
 
-    def _absorb(
-        self, response, run: EpoSearchRun, round_no: int, *, detail: bool = False
-    ) -> None:
-        """응답의 후보를 누적한다. 같은 문헌은 아티팩트만 늘린다.
-
-        ``detail`` 은 이 응답이 상세 조회에서 왔다는 뜻이다. 검색 결과로만 만난
-        후보와 예산을 더 써서 본문까지 받은 후보를 구분해 둔다.
-        """
+    def _absorb(self, response, run: EpoSearchRun, round_no: int) -> None:
+        """응답의 후보를 누적한다. 같은 문헌은 아티팩트만 늘린다."""
         for record in response.records:
             key = record.doc_number
             if not key:
@@ -1359,8 +1352,6 @@ class EpoSearchAgent:
                         "field_path": value.evidence.field_path,
                         "profile_id": value.evidence.profile_id,
                     }
-            if detail:
-                existing.detail_fetched = True
             if not existing.title and record.title:
                 existing.title = record.title
         for note in getattr(response, "notes", ()) or ():
@@ -1373,7 +1364,6 @@ class EpoSearchAgent:
     ) -> str:
         payload = {
             "round": round_no,
-            "max_rounds": self.budget.max_rounds,
             # 남은 예산을 숫자로 보여 준다. 모델이 몇 번 더 부를 수 있는지
             # 모르면 마지막 라운드에 넓은 질의를 던지고 잘린다.
             "search_calls_used": run.search_calls,
@@ -1401,11 +1391,9 @@ class EpoSearchAgent:
         """상한에 걸렸을 때 이 후보를 얼마나 먼저 지킬 것인가. 작을수록 먼저."""
         if latest_round and candidate.first_seen_round >= latest_round:
             return 0, KEEP_LAST_ROUND
-        if candidate.detail_fetched:
-            return 1, KEEP_DETAIL_FETCHED
         if _compact_number(candidate.doc_number) not in shortlisted:
-            return 2, KEEP_NOT_SHORTLISTED
-        return 3, KEEP_CANDIDATE_ORDER
+            return 1, KEEP_NOT_SHORTLISTED
+        return 2, KEEP_CANDIDATE_ORDER
 
     def _results_payload(
         self, run: EpoSearchRun, record: RoundRecord | None
@@ -1507,7 +1495,6 @@ class EpoSearchAgent:
             1 for record in run.rounds if record.counts_as_round
         )
         run.usage["model_calls"] = len(run.rounds)
-        run.usage["max_rounds"] = self.budget.max_rounds
         run.usage["search_calls"] = run.search_calls
         run.usage["max_search_calls"] = self.budget.max_search_calls
         run.usage["invalid_responses"] = run.invalid_responses

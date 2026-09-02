@@ -27,21 +27,31 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from . import epo_client, epo_cql
 
 ACTION_SEARCH = "epo_search"
-ACTION_FETCH = "epo_fetch_document"
 ACTION_FINISH = "finish"
-ACTION_NAMES = (ACTION_SEARCH, ACTION_FETCH, ACTION_FINISH)
+ACTION_NAMES = (ACTION_SEARCH, ACTION_FINISH)
 
-# 한 라운드에서 받아들이는 action 수.
+#: 더 이상 실행하지 않는 action 이름.
+#:
+#: 문헌 상세조회는 검색 단계에서 사라졌다. 검색과 공식 검증을 나누기 위해서다 —
+#: 검색 에이전트가 상세를 받아 버리면 같은 예산(epo_max_detail_fetches)을 먼저
+#: 써 버리고, 정작 공식 검증이 조회할 몫이 남지 않는다.
+#:
+#: 이름을 지우지 않고 남기는 이유: 모델이 옛 습관으로 이 action 을 보내도
+#: 응답 **전체**를 거절하지 않기 위해서다. 검색 계획 턴은 이제 한 번뿐이라,
+#: 그 한 번을 형식 오류로 날리면 레인이 통째로 빈손이 된다. 걷어내고 사유를
+#: 남긴 뒤 나머지 action 은 실행한다.
+RETIRED_ACTIONS = frozenset({"epo_fetch_document"})
+
+# 한 응답에서 받아들이는 action 수.
 #
-#     검색 3(라운드 상한) + 상세 12(실행 상한) + finish 1 = 16
+#     검색 3(턴 상한) + finish 1 = 4. 여유를 두어 6.
 #
-# 예전에는 4였다. 그러면 상세 조회 12건은 **한 라운드 안에서 도달할 수 없고**,
-# 모델이 12건과 finish 를 함께 보내면 finish 가 조용히 잘려 나갔다. 상한이
-# 서로 모순되면 큰 쪽은 장식이 된다.
+# 상세조회가 빠지면서 12가 필요 없어졌다. 상한이 실행 상한보다 크게 남아
+# 있으면 "왜 이 숫자인가"를 아무도 설명할 수 없게 된다.
 #
 # 예산 숫자는 EpoAgentBudget 에 있고 여기서 import 하면 순환이 된다. 대신
 # test_epo_agent 가 두 값이 어긋나지 않는지 대조한다.
-MAX_ACTIONS_PER_ROUND = 16
+MAX_ACTIONS_PER_ROUND = 6
 # 모델 출력에서 읽을 최대 길이. 넘으면 파싱 전에 끊는다 — 거대한 입력을
 # json.loads 에 그대로 넣지 않는다.
 MAX_PAYLOAD_CHARS = 200_000
@@ -149,25 +159,6 @@ class EpoSearch(_Base):
     @classmethod
     def _trim(cls, value: str) -> str:
         return str(value).strip()[:1000]
-
-
-class EpoFetchDocument(_Base):
-    """후보 하나의 상세(청구항·초록·설명)를 받는다.
-
-    검색 결과 목록만으로 판단하지 않게 하려고 둔 통로다. 검색 응답과 상세
-    응답은 서로 다른 아티팩트를 가리키므로, "초록까지만 본 후보"와 "청구항까지
-    본 후보"가 기록에서 구분된다.
-    """
-
-    action: Literal["epo_fetch_document"]
-    doc_number: str
-    constituent: Literal["biblio", "abstract", "claims", "description"] = "claims"
-    reason: str = ""
-
-    @field_validator("doc_number", "reason")
-    @classmethod
-    def _trim(cls, value: str) -> str:
-        return str(value).strip()[:MAX_TEXT]
 
 
 class Finish(_Base):
@@ -411,7 +402,7 @@ class ShortlistItem(_Base):
 
 
 AnyAction = Annotated[
-    Union[EpoSearch, EpoFetchDocument, Finish],
+    Union[EpoSearch, Finish],
     Field(discriminator="action"),
 ]
 
@@ -433,6 +424,8 @@ class AgentResponse(_Base):
     claim_analysis: ClaimAnalysis | None = None
     # 유망 후보. 어느 라운드에서든 올 수 있고 누적된다.
     shortlist: list[ShortlistItem] = Field(default_factory=list)
+    # 파싱 단계에서 걷어낸 은퇴 action 의 이름. 조용히 사라지지 않는다.
+    retired_actions: list[str] = Field(default_factory=list)
 
     @field_validator("strategy")
     @classmethod
@@ -602,8 +595,33 @@ def parse_response(text: str) -> AgentResponse:
         if _depth(data) > DEPTH_LIMIT:
             last_error = too_deep
             continue
+        # 상한은 **모델이 보낸 수**로 잰다. 은퇴 action 을 걷어낸 뒤에 세면
+        # 실행되지 않는 action 을 수백 개 보내도 상한을 통과한다.
+        raw_actions = data.get("actions")
+        if (
+            isinstance(raw_actions, list)
+            and len(raw_actions) > MAX_ACTIONS_PER_ROUND
+        ):
+            last_error = (
+                f"action 이 한 응답 상한({MAX_ACTIONS_PER_ROUND}개)을 "
+                f"넘습니다({len(raw_actions)}개)."
+            )
+            continue
+        retired: list[str] = []
+        if isinstance(raw_actions, list):
+            kept = []
+            for item in raw_actions:
+                name = item.get("action") if isinstance(item, dict) else None
+                if name in RETIRED_ACTIONS:
+                    retired.append(str(name))
+                else:
+                    kept.append(item)
+            if retired:
+                data = {**data, "actions": kept}
         try:
-            return AgentResponse.model_validate(data)
+            parsed = AgentResponse.model_validate(data)
+            parsed.retired_actions = retired
+            return parsed
         except ValidationError as exc:
             last_error = _format_validation_error(exc)
             continue
@@ -635,8 +653,6 @@ def schema_summary() -> str:
             '"query":{"kind":"group","op":"and","items":['
             '{"kind":"term","field":"ta","value":"robot arm","match":"all"},'
             '{"kind":"term","field":"ipc","value":"B25J 9/16","match":"exact"}]}}',
-            f'- {{"action":"{ACTION_FETCH}","doc_number":"EP1000000A1",'
-            '"constituent":"claims","reason":"초록만으로는 대응을 볼 수 없어서"}',
             f'- {{"action":"{ACTION_FINISH}","notes":"더 넓힐 축이 없습니다."}}',
             "",
             f"query 의 field 로 쓸 수 있는 값: {fields}",

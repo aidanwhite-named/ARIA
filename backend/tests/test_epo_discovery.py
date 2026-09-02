@@ -112,17 +112,22 @@ def test_claim_analysis_arrives_with_the_first_response(store, tmp_path) -> None
 
 
 def test_the_first_analysis_wins_over_a_later_one(store, tmp_path) -> None:
-    """검색 결과를 본 뒤 고쳐 쓴 분석은 검색 전략이 아니다."""
+    """나중에 고쳐 쓴 분석은 검색 전략이 아니다.
+
+    계획 턴은 한 번이지만, 검색식을 하나도 만들지 못하면 ARIA 가 오류를 돌려주고
+    다시 묻는다. 그 재시도에서 분석을 바꿔 적어도 먼저 받은 것이 정본이다.
+    """
     second = json.dumps(
         {
             "claim_analysis": {"elements": [{"id": "X1", "text": "나중에 고친 것"}]},
-            "actions": [FINISH],
+            "actions": [search_action(), FINISH],
         },
         ensure_ascii=False,
     )
     provider = FakeProvider(
         json.dumps(
-            {"claim_analysis": ANALYSIS, "actions": [search_action()]},
+            # 인용부호가 들어간 값은 epo_cql 이 거절한다 — OPS 호출은 나가지 않는다.
+            {"claim_analysis": ANALYSIS, "actions": [search_action('a" or b')]},
             ensure_ascii=False,
         ),
         second,
@@ -760,8 +765,15 @@ def test_the_selection_turn_cannot_search(store, tmp_path) -> None:
         for row in result.excluded
         if row["reason_code"] == epo_agent.EXCLUDED_SEARCH_IN_SELECTION
     ]
-    assert len(rejected) == 2
-    assert result.selection["rejected_actions"] == 2
+    assert len(rejected) == 1
+    assert result.selection["rejected_actions"] == 1
+    # 상세조회는 파싱 단계에서 걷어낸다. 조용히 사라지지 않고 사유가 남는다.
+    retired = [
+        row
+        for row in result.excluded
+        if row["reason_code"] == epo_agent.EXCLUDED_RETIRED_ACTION
+    ]
+    assert [row["value"] for row in retired] == ["epo_fetch_document"]
 
 
 def test_the_selection_turn_is_recorded_as_separate_usage(store, tmp_path) -> None:
@@ -840,16 +852,15 @@ def test_a_tool_call_in_the_selection_turn_is_caught(store, tmp_path) -> None:
 def test_the_last_search_candidate_survives_a_tight_payload_budget(
     store, tmp_path
 ) -> None:
-    """작은 문자 상한에서도 마지막 라운드가 데려온 후보가 남는다."""
+    """문자 상한에 걸려 빠진 후보는 조용히 사라지지 않고 사유가 남는다."""
     provider = FakeProvider(
-        # 1라운드는 끝내지 않는다. 2라운드가 새 문헌을 데려와야 한다.
-        say(search_action(), analysis=ANALYSIS),
-        say(search_action("compliant joint"), FINISH, analysis=None),
+        say(search_action(), search_action("compliant joint"), FINISH,
+            analysis=ANALYSIS),
     )
     transport = FakeTransport(
         token_response(),
         ok(fx.SEARCH_BIBLIO),
-        # 같은 모양에 EP 번호만 다른 응답. 2라운드가 데려오는 새 문헌이다.
+        # 같은 모양에 EP 번호만 다른 응답. 두 번째 검색식이 데려오는 문헌이다.
         ok(fx.SEARCH_BIBLIO.replace(b"1000000", b"2000000")),
     )
     agent = make_agent(
@@ -864,11 +875,6 @@ def test_the_last_search_candidate_survives_a_tight_payload_budget(
 
     assert set(result.candidates) == {"EP1000000A1", "US9876543B2", "EP2000000A1"}
     message = provider.selection_requests[0].user_message
-    # 마지막 검색이 데려온 후보가 최종 선택 턴에 실려 갔다.
-    assert "EP2000000A1" in message
-    # 자리를 내준 것은 앞 라운드의 후보다.
-    assert "EP1000000A1" not in message
-    assert "US9876543B2" not in message
 
     dropped = [
         row
@@ -876,7 +882,12 @@ def test_the_last_search_candidate_survives_a_tight_payload_budget(
         if row["reason_code"] == epo_agent.EXCLUDED_RESULT_PAYLOAD_LIMIT
         and "최종 선택 턴" in row["detail"]
     ]
-    assert {row["value"] for row in dropped} == {"EP1000000A1", "US9876543B2"}
+    # 세 건 중 실린 것과 빠진 것을 합치면 전부다. 어느 쪽도 기록에서 사라지지 않는다.
+    carried = [
+        number for number in result.candidates if number in message
+    ]
+    assert len(carried) == 1
+    assert {row["value"] for row in dropped} == set(result.candidates) - set(carried)
     assert all("400자" in row["detail"] for row in dropped)
 
 
@@ -895,14 +906,13 @@ def test_the_payload_drops_the_lowest_ranked_candidate_first(store, tmp_path) ->
         budget=epo_agent.EpoAgentBudget(max_round_result_chars=1),
     )
     result = epo_agent.EpoSearchRun()
-    for number, round_no, detail in (
-        ("EP1000000A1", 1, False),   # 아직 shortlist 에 없다
-        ("US9876543B2", 1, True),    # 상세 조회까지 했다
-        ("EP3000000A1", 1, False),   # 이미 shortlist 에 올라 있다
-        ("EP2000000A1", 2, False),   # 마지막 라운드가 데려왔다
+    for number, round_no in (
+        ("EP1000000A1", 1),   # 아직 shortlist 에 없다
+        ("EP3000000A1", 1),   # 이미 shortlist 에 올라 있다
+        ("EP2000000A1", 2),   # 가장 나중에 만난 후보
     ):
         result.candidates[number] = epo_agent.CandidateRecord(
-            doc_number=number, first_seen_round=round_no, detail_fetched=detail
+            doc_number=number, first_seen_round=round_no
         )
     agent._pending_shortlist.append(
         (1, epo_agent.TURN_SEARCH, epo_actions.ShortlistItem(doc_number="EP3000000A1"))
@@ -912,7 +922,6 @@ def test_the_payload_drops_the_lowest_ranked_candidate_first(store, tmp_path) ->
     assert [row["value"] for row in result.excluded] == [
         "EP3000000A1",
         "EP1000000A1",
-        "US9876543B2",
         "EP2000000A1",
     ]
 

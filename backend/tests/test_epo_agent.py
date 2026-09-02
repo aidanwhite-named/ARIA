@@ -184,74 +184,66 @@ def test_candidates_carry_evidence_references(store, tmp_path) -> None:
         assert ref["profile_id"] == "epo_ops_exchange_xml_v1"
 
 
-def test_second_round_sees_the_first_round_results(store, tmp_path) -> None:
-    provider = FakeProvider(
-        say(search_action("robot arm")),
-        say(search_action("gripper"), FINISH),
-    )
-    transport = FakeTransport(
-        token_response(), ok(fx.SEARCH_BIBLIO), ok(fx.SEARCH_EMPTY)
-    )
-    result = run(make_agent(provider, transport, store, tmp_path))
-
-    assert len(provider.requests) == 2
-    second = provider.requests[1].user_message
-    assert "EP1000000A1" in second, "2라운드 입력에 1라운드 후보가 없습니다."
-    assert "search_calls_left" in second
-
-
 # ------------------------------------------------------------------ 상한
 
 
-def test_round_limit_stops_the_loop(store, tmp_path) -> None:
-    """모델이 계속 검색하려 해도 2라운드에서 끊긴다."""
+def test_the_planning_turn_runs_once(store, tmp_path) -> None:
+    """검색계획 턴은 한 번뿐이다. 적응형 2라운드는 없다.
+
+    모델이 계속 검색하려 해도 두 번째 계획 턴은 열리지 않는다. 검색 결과를
+    읽는 판단은 검색하지 않는 최종 선택 턴 하나로 모았다.
+    """
     provider = FakeProvider(
         say(search_action("a")),
-        say(search_action("b")),
-        say(search_action("c")),   # 불려서는 안 된다
+        say(search_action("b")),   # 계획 턴으로는 불려서는 안 된다
     )
-    transport = FakeTransport(
-        token_response(), ok(fx.SEARCH_BIBLIO), ok(fx.CLAIMS)
-    )
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
     result = run(make_agent(provider, transport, store, tmp_path))
 
-    assert len(provider.requests) == 2
-    assert len(result.rounds) == 2
-    assert result.termination_reason in (
-        epo_agent.TERM_ROUND_LIMIT,
-        epo_agent.TERM_NO_NEW_CANDIDATES,
-    )
+    planning = [
+        request
+        for request in provider.requests
+        if epo_prompts.SELECTION_MARKER not in (request.system_prompt or "")
+    ]
+    assert len(planning) == 1
+    assert len(result.rounds) == 1
+    assert result.termination_reason == epo_agent.TERM_ROUND_LIMIT
 
 
-def test_total_search_call_limit(store, tmp_path) -> None:
-    """전체 6회를 넘기려 하면 그 지점에서 멈춘다."""
-    budget = epo_agent.EpoAgentBudget(max_rounds=4, max_search_calls_per_round=3)
+def test_channel_search_call_limit_stops_the_turn(store, tmp_path) -> None:
+    """채널 전체 상한에 닿으면 그 지점에서 멈춘다.
+
+    채널 예산은 **작업당**이라 레인이 나눠 쓴다. 레인 예산만 보고 검색을
+    내보내면 두 번째 레인이 쓸 몫까지 첫 레인이 먹는다.
+    """
+    channel = epo_agent.ChannelBudget(max_search_calls=2)
+    channel.start()
     provider = FakeProvider(
         say(search_action("a"), search_action("b"), search_action("c")),
-        say(search_action("d"), search_action("e"), search_action("f")),
-        say(search_action("g")),
     )
     transport = FakeTransport(
-        token_response(), *[ok(fx.SEARCH_BIBLIO) for _ in range(8)]
+        token_response(), *[ok(fx.SEARCH_BIBLIO) for _ in range(3)]
     )
-    result = run(make_agent(provider, transport, store, tmp_path, budget=budget))
+    result = run(
+        make_agent(provider, transport, store, tmp_path, channel=channel)
+    )
 
-    assert result.search_calls == 6
+    assert result.search_calls == 2
     assert result.termination_reason == epo_agent.TERM_SEARCH_CALL_LIMIT
 
 
 def test_per_round_search_limit_rejects_extras_without_ending_the_loop(
     store, tmp_path
 ) -> None:
-    """라운드 상한은 그 라운드의 나머지만 거절한다. 루프를 끝내지 않는다."""
+    """턴 상한은 그 턴의 나머지 검색만 거절한다. 루프를 끝내지 않는다."""
     provider = FakeProvider(
         say(
             search_action("a"),
             search_action("b"),
             search_action("c"),
             search_action("d"),   # 4번째 — 거절되어야 한다
+            FINISH,
         ),
-        say(FINISH),
     )
     transport = FakeTransport(
         token_response(), *[ok(fx.SEARCH_BIBLIO) for _ in range(3)]
@@ -259,46 +251,51 @@ def test_per_round_search_limit_rejects_extras_without_ending_the_loop(
     result = run(make_agent(provider, transport, store, tmp_path))
 
     assert result.rounds[0].search_calls == 3
-    assert any("라운드의 검색 호출 상한" in e for e in result.rounds[0].errors)
+    assert any("검색 호출 상한" in e for e in result.rounds[0].errors)
     assert result.termination_reason == epo_agent.TERM_LLM_FINISHED
 
 
-def test_detail_fetch_limit(store, tmp_path) -> None:
-    budget = epo_agent.EpoAgentBudget(max_detail_fetches=1)
+def test_the_search_stage_never_fetches_a_document(store, tmp_path) -> None:
+    """검색 단계는 OPS 상세조회를 하지 않는다. 요청해도 실행되지 않는다.
+
+    상세조회는 후보를 합친 뒤 공식 검증 단계에서만 한다. 검색 에이전트가 먼저
+    써 버리면 같은 예산(epo_max_detail_fetches)이 검증에 남지 않는다.
+    """
     fetch = {
-        "action": epo_actions.ACTION_FETCH,
+        "action": "epo_fetch_document",
         "doc_number": "EP1000000A1",
         "constituent": "claims",
     }
-    provider = FakeProvider(say(fetch, fetch))
-    transport = FakeTransport(token_response(), ok(fx.CLAIMS), ok(fx.CLAIMS))
-    result = run(
-        make_agent(
-            provider, transport, store, tmp_path, budget=budget,
-            settings={epo_backend.SETTING_MAX_DETAIL: 5},
-        )
-    )
+    provider = FakeProvider(say(search_action("robot arm"), fetch, FINISH))
+    # 검색 응답 하나만 준비한다. 상세조회가 나가면 FakeTransport 가 실패한다.
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
+    result = run(make_agent(provider, transport, store, tmp_path))
 
-    assert result.detail_fetches == 1
-    assert result.termination_reason == epo_agent.TERM_DETAIL_FETCH_LIMIT
+    assert result.detail_fetches == 0
+    assert result.search_calls == 1
+    assert result.termination_reason == epo_agent.TERM_LLM_FINISHED
+    # 조용히 버리지 않는다. 요청했다는 사실이 기록에 남는다.
+    retired = [
+        item
+        for item in result.excluded
+        if item["reason_code"] == epo_agent.EXCLUDED_RETIRED_ACTION
+    ]
+    assert [item["value"] for item in retired] == ["epo_fetch_document"]
 
 
-def test_early_stop_when_no_new_candidates(store, tmp_path) -> None:
-    """같은 후보만 다시 나오면 남은 예산을 태우지 않는다."""
-    budget = epo_agent.EpoAgentBudget(max_rounds=4)
-    provider = FakeProvider(
-        say(search_action("a")),
-        say(search_action("b")),
-        say(search_action("c")),
-    )
-    transport = FakeTransport(
-        token_response(), ok(fx.SEARCH_BIBLIO), ok(fx.SEARCH_BIBLIO)
-    )
-    result = run(make_agent(provider, transport, store, tmp_path, budget=budget))
+def test_a_retired_action_does_not_reject_the_whole_response(store, tmp_path) -> None:
+    """옛 습관으로 상세조회를 보내도 그 응답의 검색은 실행된다.
 
-    assert result.termination_reason == epo_agent.TERM_NO_NEW_CANDIDATES
-    assert len(result.rounds) == 2
-    assert result.search_calls == 2
+    계획 턴이 한 번뿐이라, 그 한 번을 형식 오류로 날리면 레인이 빈손이 된다.
+    """
+    fetch = {"action": "epo_fetch_document", "doc_number": "EP1000000A1"}
+    provider = FakeProvider(say(fetch, search_action("robot arm"), FINISH))
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
+    result = run(make_agent(provider, transport, store, tmp_path))
+
+    assert result.invalid_responses == 0
+    assert result.search_calls == 1
+    assert result.candidates
 
 
 # --------------------------------------------------- 모델은 CQL 을 쓸 수 없다
@@ -372,7 +369,7 @@ def test_repeated_parse_errors_stop_the_loop(store, tmp_path) -> None:
     assert result.termination_reason == epo_agent.TERM_INVALID_RESPONSE_LIMIT
     assert result.invalid_responses == 3
     assert result.search_calls == 0
-    # 형식 오류는 라운드를 소모하지 않으므로 max_rounds(2)보다 많이 물어봤다.
+    # 형식 오류는 계획 턴을 소모하지 않으므로 세 번 물어봤다.
     assert len(provider.requests) == 3
 
 
@@ -388,7 +385,7 @@ def test_parse_error_is_reported_back_to_the_model(store, tmp_path) -> None:
 
 def test_repeated_invalid_queries_stop_the_loop(store, tmp_path) -> None:
     """잘못된 질의만 반복하면 호출 없이 끝난다."""
-    budget = epo_agent.EpoAgentBudget(max_rounds=5, max_invalid_responses=2)
+    budget = epo_agent.EpoAgentBudget(max_invalid_responses=2)
     bad = search_action('a" or b')
     provider = FakeProvider(say(bad), say(bad), say(bad))
     transport = FakeTransport(token_response())
@@ -399,7 +396,7 @@ def test_repeated_invalid_queries_stop_the_loop(store, tmp_path) -> None:
 
 
 def test_empty_actions_do_not_loop_forever(store, tmp_path) -> None:
-    budget = epo_agent.EpoAgentBudget(max_rounds=5, max_invalid_responses=2)
+    budget = epo_agent.EpoAgentBudget(max_invalid_responses=2)
     provider = FakeProvider(say(), say(), say())
     transport = FakeTransport(token_response())
     result = run(make_agent(provider, transport, store, tmp_path, budget=budget))
@@ -564,8 +561,8 @@ def test_auth_failure_ends_the_channel(store, tmp_path) -> None:
 
 
 def test_zero_results_is_not_a_failure(store, tmp_path) -> None:
-    """0건은 실패가 아니다. 루프는 정상으로 이어진다."""
-    provider = FakeProvider(say(search_action()), say(FINISH))
+    """0건은 실패가 아니다. 검색은 정상으로 끝난다."""
+    provider = FakeProvider(say(search_action(), FINISH))
     transport = FakeTransport(token_response(), ok(fx.SEARCH_EMPTY))
     result = run(make_agent(provider, transport, store, tmp_path))
 
@@ -599,7 +596,7 @@ def test_usage_is_recorded(store, tmp_path) -> None:
 
     usage = result.usage
     assert usage["rounds_used"] == 1
-    assert usage["max_rounds"] == 2
+    assert "max_rounds" not in usage, "라운드 개념은 사라졌다."
     assert usage["search_calls"] == 1
     assert usage["max_search_calls"] == 6
     assert usage["termination_reason"] == epo_agent.TERM_LLM_FINISHED
@@ -633,7 +630,7 @@ def test_run_serializes_without_secrets(store, tmp_path) -> None:
 
 def test_default_budget_matches_the_agreed_numbers() -> None:
     budget = epo_agent.EpoAgentBudget()
-    assert budget.max_rounds == 2
+    assert not hasattr(budget, "max_rounds"), "라운드 상한은 더 이상 없다."
     assert budget.max_search_calls == 6
     assert budget.max_search_calls_per_round == 3
     assert budget.max_detail_fetches == 12
@@ -644,23 +641,22 @@ def test_default_budget_matches_the_agreed_numbers() -> None:
 # =====================================================================
 
 
-def test_action_cap_allows_the_full_detail_budget_plus_finish() -> None:
+def test_action_cap_allows_every_search_plus_finish() -> None:
     """상한이 서로 모순되면 큰 쪽은 장식이 된다.
 
-    상세 12건은 실행 상한인데, 한 라운드 action 상한이 4면 그 12건에 **도달할
-    수 없다.** 게다가 12건과 finish 를 함께 보내면 finish 가 조용히 잘려 나가
-    모델은 자기가 끝냈다고 믿는다.
+    한 턴에 검색 3회가 실행 상한인데 action 상한이 그보다 작으면 그 3회에
+    도달할 수 없고, finish 가 조용히 잘려 나가 모델은 자기가 끝냈다고 믿는다.
     """
     budget = epo_agent.EpoAgentBudget()
-    needed = budget.max_search_calls_per_round + budget.max_detail_fetches + 1
+    needed = budget.max_search_calls_per_round + 1
     assert epo_actions.MAX_ACTIONS_PER_ROUND >= needed, (
         f"action 상한({epo_actions.MAX_ACTIONS_PER_ROUND})이 실행 상한 "
         f"({needed})보다 작습니다."
     )
 
     actions = [
-        {"action": epo_actions.ACTION_FETCH, "doc_number": f"EP100000{i}A1"}
-        for i in range(budget.max_detail_fetches)
+        search_action(f"term {i}")
+        for i in range(budget.max_search_calls_per_round)
     ] + [FINISH]
     parsed = epo_actions.parse_response(json.dumps({"actions": actions}))
     assert len(parsed.actions) == len(actions)
@@ -670,7 +666,7 @@ def test_action_cap_allows_the_full_detail_budget_plus_finish() -> None:
 def test_too_many_actions_are_rejected_not_truncated() -> None:
     """조용히 자르면 모델은 전부 실행됐다고 믿는다."""
     actions = [
-        {"action": epo_actions.ACTION_FETCH, "doc_number": "EP1000000A1"}
+        search_action("robot arm")
         for _ in range(epo_actions.MAX_ACTIONS_PER_ROUND + 1)
     ]
     with pytest.raises(epo_actions.ActionError, match="상한"):
@@ -680,7 +676,7 @@ def test_too_many_actions_are_rejected_not_truncated() -> None:
 def test_over_cap_response_counts_as_invalid_not_silent(store, tmp_path) -> None:
     """루프에서도 거절로 다뤄져야 한다. 잘라서 실행하면 안 된다."""
     actions = [
-        {"action": epo_actions.ACTION_FETCH, "doc_number": "EP1000000A1"}
+        search_action("robot arm")
         for _ in range(epo_actions.MAX_ACTIONS_PER_ROUND + 1)
     ]
     provider = FakeProvider(json.dumps({"actions": actions}), say(FINISH))
@@ -776,12 +772,11 @@ def test_single_action_without_wrapper_executes_in_agent_loop(store, tmp_path) -
             {**search_action("radar surveillance", "ta"), "claim_analysis": MINIMAL_ANALYSIS},
             ensure_ascii=False,
         ),
-        json.dumps(FINISH),
     )
     transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
     result = run(make_agent(provider, transport, store, tmp_path))
 
-    assert result.termination_reason == epo_agent.TERM_LLM_FINISHED
+    assert result.termination_reason == epo_agent.TERM_ROUND_LIMIT
     assert result.search_calls == 1
     assert result.invalid_responses == 0
     assert len(result.candidates) > 0
