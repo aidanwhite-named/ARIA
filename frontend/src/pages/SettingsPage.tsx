@@ -787,27 +787,27 @@ export default function SettingsPage() {
                 onSave={(n) => saveValue("epo_http_budget_seconds", n)}
               />
               <NumberField
-                label="상세 조회 후보 수 상한"
+                label="공식 문헌조회 호출 상한"
                 value={v.epo_max_detail_fetches}
-                hint="청구항·설명을 받아 오는 후보 수입니다. 기본 12건."
+                hint="공식 검증 단계가 OPS 를 부르는 총 횟수입니다. 후보 하나에 청구항·초록·서지 세 번까지 부릅니다. 기본 12회 = 후보 4건."
                 onSave={(n) => saveValue("epo_max_detail_fetches", n)}
               />
               <NumberField
                 label="검색 결과 상한 (질의 1건당)"
                 value={v.epo_max_results_per_query}
-                hint="1–20. OPS 가 한 질의로 돌려주는 최대 건수입니다."
+                hint="1–20. OPS 가 한 질의로 돌려주는 최대 건수입니다. 기본 8건 — 크게 잡으면 선택 턴 입력이 커져 뒤쪽 후보가 잘립니다."
                 onSave={(n) => saveValue("epo_max_results_per_query", n)}
               />
               <NumberField
                 label="EPO 유망 후보(shortlist) 상한"
                 value={v.epo_shortlist_limit}
-                hint="EPO 독립 검색에서 최종 A/B/C 대응표까지 올릴 후보 수입니다. 넘긴 후보는 사유와 함께 기록에 남습니다."
+                hint="EPO 독립 검색이 공식 검증으로 넘길 후보 수입니다. 검증 대상보다 하나 크게 두면 남는 후보가 미검증 참고 후보로 남습니다."
                 onSave={(n) => saveValue("epo_shortlist_limit", n)}
               />
               <NumberField
                 label="공식 검증 후보 수 상한"
                 value={v.epo_verification_targets}
-                hint="공식 문헌을 받아 대조할 후보 수입니다. 상세 조회 예산과 다른 축입니다."
+                hint="공식 문헌을 받아 대조할 후보 수입니다. 기본 4건 — 후보당 세 번을 부르므로 조회 상한(12회)과 맞춰 두십시오."
                 onSave={(n) => saveValue("epo_verification_targets", n)}
               />
               <NumberField

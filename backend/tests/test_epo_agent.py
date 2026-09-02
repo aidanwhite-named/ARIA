@@ -617,6 +617,44 @@ def test_queries_are_recorded_as_built_cql(store, tmp_path) -> None:
     ]
 
 
+def test_a_classification_query_records_both_the_input_and_what_ops_got(
+    store, tmp_path
+) -> None:
+    """모델이 적은 분류코드와 OPS 로 나간 표기가 **둘 다** 기록에 남는다.
+
+    바꾼 사실을 남기지 않으면, 모델이 적은 검색어와 실제로 나간 검색어가 다른
+    채로 실행되고 아무도 모른다.
+    """
+    action = {
+        "action": epo_actions.ACTION_SEARCH,
+        "query": {
+            "kind": "term",
+            "field": "ipc",
+            "value": "G08B 13/196",
+            "match": "exact",
+        },
+    }
+    provider = FakeProvider(say(action, FINISH))
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
+    result = run(make_agent(provider, transport, store, tmp_path))
+
+    assert result.queries == [
+        {
+            "round": 1,
+            "cql": 'ipc = "G08B13/196"',
+            "normalized_classifications": [
+                {"field": "ipc", "original": "G08B 13/196", "sent": "G08B13/196"}
+            ],
+        }
+    ]
+    # OPS 로 실제로 나간 질의에도 공백이 없다.
+    search_url = [
+        request["url"] for request in transport.requests if "search" in request["url"]
+    ][0]
+    assert "G08B13%2F196" in search_url or "G08B13/196" in search_url
+    assert "G08B+13" not in search_url and "G08B%2013" not in search_url
+
+
 def test_run_serializes_without_secrets(store, tmp_path) -> None:
     provider = FakeProvider(say(search_action(), FINISH))
     transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
