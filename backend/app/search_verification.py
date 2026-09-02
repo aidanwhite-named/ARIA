@@ -13,7 +13,7 @@ Codex 의 ``web_search`` 는 검색과 URL 조회를 겸하지만, **조회의 �
 
     1차 턴   모델이 검색해서 후보 문헌번호를 찾는다 (미검증)
     확보     ARIA 가 그 번호로 EPO OPS 를 직접 호출해 공식 응답을 보존한다
-    2차 턴   보존된 본문을 같은 모델에게 주고 A/B/C 와 대응표를 쓰게 한다
+    2차 턴   보존된 본문을 같은 모델에게 주고 A/B 와 대응표를 쓰게 한다
     대조     각 행의 support_text 가 보존 아티팩트에 실제로 있는지 확인한다
     승격     대조된 행이 하나라도 있는 후보만 group 과 group_eligible 을 받는다
 
@@ -120,7 +120,7 @@ _FIELD_LABELS = {
 _NON_EVIDENCE_FIELDS = frozenset(
     {"publication_date", "publication_number", "application_number", "family_id"}
 )
-# A/B/C와 구성 대응을 뒷받침할 수 있는 기술 본문. 제목·출원인·IPC 같은
+# A/B와 구성 대응을 뒷받침할 수 있는 기술 본문. 제목·출원인·IPC 같은
 # 서지 필드는 후보의 정체를 확인하는 데는 쓰지만, 기술 구성이 개시됐다는
 # 근거로는 쓰지 않는다. 제목 한 줄만 그대로 옮겨 그룹 자격을 얻는 우회로를
 # 막는다.
@@ -996,6 +996,15 @@ def fetch_official(
     spent = 0
     budget = max(0, int(max_fetches or 0))
     reused = dict(prefetched or {})
+    # OPS 는 관청마다 전문(청구항) 보유 범위가 다르다. 어떤 국가에서 청구항
+    # 조회가 한 번 실패하면 이 실행에서는 같은 국가에 다시 시도하지 않는다.
+    # 후보 4건이 같은 관청이면 실패가 4번 반복되고, 그 4번은 예산에서 그대로
+    # 빠져나가 정작 받을 수 있는 초록·서지를 못 받게 만든다.
+    #
+    # 국가 목록을 코드에 박지 않는다. 어느 관청에 전문이 있는지는 우리가
+    # 추측할 것이 아니라 관측할 것이다 — 잘못 박으면 받을 수 있는 청구항을
+    # 조용히 안 받게 되고, 그 실패는 "OPS 가 원래 그렇다"로 읽힌다.
+    claims_unavailable: set[str] = set()
     for target in found:
         # EPO 검색 레인이 이미 받아 둔 자료가 있으면 그것으로 시작한다. 없는
         # 구성요소만 아래에서 더 받는다 — 이미 손에 있는 바이트를 다시 받는
@@ -1035,7 +1044,14 @@ def fetch_official(
             bundle.reason = f"공식 문헌 조회 상한({budget}건)에 도달했습니다."
             continue
         skipped: list[str] = []
+        country = _country_of(target.doc_key)
         for constituent in wanted:
+            if constituent == "claims" and country in claims_unavailable:
+                errors.append(
+                    f"claims: {country} 문헌은 앞선 조회에서 OPS 가 청구항을 "
+                    "주지 않아 다시 시도하지 않았습니다."
+                )
+                continue
             if spent >= budget:
                 skipped.append(constituent)
                 continue
@@ -1058,6 +1074,8 @@ def fetch_official(
                     }
                 )
                 errors.append(f"{constituent}: {_compact_fetch_error(exc)}")
+                if constituent == "claims" and country:
+                    claims_unavailable.add(country)
                 continue
             bundle.calls.append(
                 {
@@ -1103,6 +1121,12 @@ def fetch_official(
             bundle.reason = " / ".join(errors) or "공식 응답에서 본문을 얻지 못했습니다."
         bundle.fetched_at = bundle.fetched_at or _utcnow_iso()
     return bundles
+
+
+def _country_of(doc_key: str) -> str:
+    """문헌 키에서 국가코드를 뽑는다. ``EP.1000000.A1`` -> ``EP``."""
+    head = str(doc_key or "").split(".")[0].strip().upper()
+    return head[:2] if len(head) >= 2 and head[:2].isalpha() else ""
 
 
 def _pick_record(response, doc_key: str):
@@ -1190,7 +1214,7 @@ def classification_message(
     lines.append("</OFFICIAL_RECORDS>")
     lines.append("")
     lines.append(
-        "위 자료만 근거로 각 문헌의 A/B/C 분류와 청구항 구성 대응표를 "
+        "위 자료만 근거로 각 문헌의 A/B 분류와 청구항 구성 대응표를 "
         "작성하십시오."
     )
     return "\n".join(lines).rstrip() + "\n"

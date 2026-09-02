@@ -916,3 +916,173 @@ def test_the_selection_order_is_recorded_in_the_audit_section() -> None:
         search_verification.SELECT_REUSABLE
     )
     assert audit["excluded_candidates"][0]["doc_number"] == "EP2222222A1"
+
+
+# ----------------------------------------------- 예산과 조회 범위가 서로 맞는가
+
+
+def test_the_verification_target_cap_matches_the_detail_fetch_budget() -> None:
+    """상한 둘이 어긋나면 뒤쪽 후보는 언제나 예산이 말라 검증되지 않는다.
+
+    후보 하나에 claims/abstract/biblio 세 번을 부른다. 예전에는 대상 8건
+    (= 24회 필요)에 예산이 12회였고, 그래서 절반은 늘 조회조차 못 했다.
+    """
+    from app import config
+
+    targets = int(config.DEFAULTS["epo_verification_targets"])
+    budget = int(config.DEFAULTS["epo_max_detail_fetches"])
+    per_target = len(search_verification.DEFAULT_CONSTITUENTS)
+
+    assert targets * per_target == budget, (
+        f"검증 대상 {targets}건 × 구성요소 {per_target}개 = "
+        f"{targets * per_target}회인데 조회 예산은 {budget}회입니다."
+    )
+
+
+class _ClaimsUnavailableBackend:
+    """청구항만 실패하는 대역. 어느 구성요소를 몇 번 불렀는지 센다."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def fetch_document(self, doc_key, constituent, *, agent_budget=True):
+        self.calls.append((doc_key, constituent))
+        if constituent == "claims":
+            raise PatentSearchError("OPS 가 이 관청의 전문을 제공하지 않습니다.")
+        return SimpleNamespace(
+            http_status=200,
+            raw_artifact_id="b" * 64,
+            request_url="https://ops.example.test/doc",
+            fetched_at="2026-09-02T00:00:00+00:00",
+            records=[
+                SimpleNamespace(
+                    doc_number=doc_key.replace(".", ""),
+                    title="Official title",
+                    source_url="https://example.test/patent",
+                    fields={
+                        "abstract:en": SimpleNamespace(
+                            value="an official abstract sentence",
+                            evidence=SimpleNamespace(
+                                artifact_id="b" * 64,
+                                field_path="documents/x/abstract",
+                                profile_id="epo_ops_exchange_xml_v1",
+                            ),
+                        )
+                    },
+                )
+            ],
+        )
+
+
+def test_claims_are_not_retried_for_a_country_that_already_refused() -> None:
+    """같은 관청에서 청구항이 한 번 실패하면 이 실행에서는 다시 부르지 않는다.
+
+    후보 넷이 같은 관청이면 실패가 넷으로 늘고, 그 넷은 예산에서 그대로
+    빠져나가 정작 받을 수 있는 초록·서지를 못 받게 만든다.
+    """
+    backend = _ClaimsUnavailableBackend()
+    bundles = search_verification.fetch_official(
+        [_target("US1111111B2"), _target("US2222222B2")],
+        backend,
+        max_fetches=12,
+    )
+
+    claims_calls = [row for row in backend.calls if row[1] == "claims"]
+    assert len(claims_calls) == 1, backend.calls
+    # 두 번째 후보의 초록·서지는 그대로 받았다. 청구항만 건너뛴다.
+    assert ("US.2222222.B2", "abstract") in backend.calls
+    assert ("US.2222222.B2", "biblio") in backend.calls
+    # 건너뛴 사실은 기록에 남는다. 조용히 넘기지 않는다.
+    second = bundles["US.2222222.B2"]
+    assert "다시 시도하지 않았습니다" in second.reason
+
+
+def test_a_different_country_still_gets_its_claims_call() -> None:
+    """한 관청의 실패를 다른 관청으로 옮기지 않는다."""
+    backend = _ClaimsUnavailableBackend()
+    search_verification.fetch_official(
+        [_target("US1111111B2"), _target("EP1000000A1")],
+        backend,
+        max_fetches=12,
+    )
+
+    countries = {doc_key.split(".")[0] for doc_key, name in backend.calls if name == "claims"}
+    assert countries == {"US", "EP"}
+
+
+def test_only_ab_candidates_get_a_detailed_mapping(monkeypatch) -> None:
+    """상세 구성 대응표는 A/B 로 승격된 문헌에만 만든다."""
+    monkeypatch.setattr(
+        search_verification,
+        "_verify_row",
+        lambda *_args, **_kwargs: {
+            "official_supported": True,
+            "support_source": search_manifest.SUPPORT_OFFICIAL,
+            "feature": "x",
+        },
+    )
+    reported = {
+        "candidates": [
+            _candidate(1, "EP1111111A1", "A"),
+            _candidate(2, "EP2222222A1", "A"),
+        ]
+    }
+    key_a, bundle_a = _bundle("EP1111111A1", verified=True)
+    key_b, bundle_b = _bundle("EP2222222A1", verified=True)
+    payload = {
+        "candidates": [
+            {
+                "doc_number": "EP1111111A1",
+                "group": "B",
+                "mapping": [{"feature": "x", "support_text": "y"}],
+            },
+            {
+                "doc_number": "EP2222222A1",
+                "note": "핵심 관계가 다릅니다.",
+                "mapping": [{"feature": "x", "support_text": "y"}],
+            },
+        ]
+    }
+
+    updated, _notes = search_verification.apply_classification(
+        reported, payload, {key_a: bundle_a, key_b: bundle_b}, store=object()
+    )
+
+    promoted, below = updated["candidates"]
+    assert promoted["group"] == "B"
+    assert promoted["mapping"]
+    assert below["group"] is None
+    assert below["mapping"] == []
+
+
+def test_the_mapping_row_cap_is_ten(monkeypatch) -> None:
+    """후보당 60행은 과도했다. 핵심 구성·관계만 남긴다."""
+    assert search_verification.MAX_MAPPING_ROWS == 10
+
+    monkeypatch.setattr(
+        search_verification,
+        "_verify_row",
+        lambda *_args, **_kwargs: {
+            "official_supported": True,
+            "support_source": search_manifest.SUPPORT_OFFICIAL,
+            "feature": "x",
+        },
+    )
+    reported = {"candidates": [_candidate(1, "EP1111111A1", "A")]}
+    key, bundle = _bundle("EP1111111A1", verified=True)
+    payload = {
+        "candidates": [
+            {
+                "doc_number": "EP1111111A1",
+                "group": "A",
+                "mapping": [
+                    {"feature": f"f{i}", "support_text": "y"} for i in range(25)
+                ],
+            }
+        ]
+    }
+
+    updated, _notes = search_verification.apply_classification(
+        reported, payload, {key: bundle}, store=object()
+    )
+    assert len(updated["candidates"][0]["mapping"]) == 10

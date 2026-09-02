@@ -250,9 +250,11 @@ def test_pipes_and_newlines_cannot_break_the_evidence_table() -> None:
         )
     )
     report = search_report.render(_manifest(reported["candidates"], notes))
+    # 맨 위 채널 상태 표는 칸 수가 다른 별개의 표다. 후보 본문만 본다.
+    body = report.split("## 요약", 1)[-1]
     table_rows = [
         line
-        for line in report.splitlines()
+        for line in body.splitlines()
         if line.startswith("| ") and "---" not in line
     ]
     # 헤더 1줄 + 데이터 1줄. 모든 줄의 칸 수가 같아야 한다.
@@ -407,3 +409,198 @@ def test_report_marks_an_agreeing_replaced_classification() -> None:
 
     assert "- 대체된 1차 분류: B" in report
     assert "공식 대조 결과와 같음" in report
+
+
+# --------------------------------------------------- 채널별 상태 (보고서 상단)
+
+
+def _epo_section(*, status: str, cql: str = 'ta all "robot arm"', error: str = ""):
+    """EPO 채널 기록 하나. 검색 레인의 상태만 바꿔 끼운다."""
+    return {
+        "enabled": True,
+        "backend_id": search_manifest.EPO_BACKEND_ID,
+        "reason": "",
+        "channel_budget": {},
+        "lanes": [
+            {
+                "id": "epo:claim_only",
+                "channel": "epo",
+                "origin": "claim_only",
+                "status": status,
+                "error": error,
+                "termination_reason": (
+                    "provider_error" if status == "failed" else "llm_finished"
+                ),
+                "termination_detail": error,
+                "queries": [
+                    {
+                        "round": 1,
+                        "cql": cql,
+                        "normalized_classifications": [
+                            {
+                                "field": "ipc",
+                                "original": "G08B 13/196",
+                                "sent": "G08B13/196",
+                            }
+                        ],
+                    }
+                ],
+                "candidates": [],
+                "shortlist": [],
+                "excluded": [],
+            }
+        ],
+        "usage": {},
+        "error": error,
+    }
+
+
+def _verification_section(*, verified: int):
+    """공식 문헌조회 기록. 조회에 성공한 건수만 바꿔 끼운다."""
+    return {
+        "attempted": True,
+        "reason": "",
+        "counts": {
+            "targets": 1,
+            "verified": verified,
+            "fetch_failed": 1 - verified,
+            "not_attempted": 0,
+        },
+        "documents": [
+            {
+                "doc_number": "EP1000000A1",
+                "calls": [
+                    {"constituent": "biblio", "error": ""},
+                    {"constituent": "abstract", "error": ""},
+                    {"constituent": "claims", "error": "OPS 404"},
+                ],
+            }
+        ]
+        if verified
+        else [],
+    }
+
+
+def test_a_failed_epo_search_is_not_read_as_success(monkeypatch) -> None:
+    """EPO 검색 실패와 EPO 문헌조회 성공은 서로 다른 줄에 적힌다.
+
+    두 가지를 한 줄에 뭉치면, 검색이 통째로 실패한 실행이 "EPO 를 봤다"로
+    읽힌다. 후보 목록은 두 경우에 똑같이 보인다.
+    """
+    manifest = _manifest([])
+    manifest["epo"] = _epo_section(
+        status="failed", error="EPO OPS 오류(HTTP 500). SERVER.DomainAccess"
+    )
+    manifest["verification"] = _verification_section(verified=1)
+    report = search_report.render(manifest)
+
+    head = report.split("## 요약", 1)[0]
+    assert "| EPO 독립 검색 | 실패 |" in head
+    assert "SERVER.DomainAccess" in head
+    # 문헌조회는 별개의 줄이고, 그 줄은 성공이다.
+    assert "| EPO 공식 문헌조회 | 성공 |" in head
+    # 실제로 받은 구성요소 범위를 밝힌다. claims 는 실패했으므로 빠진다.
+    assert "biblio, abstract" in head
+    assert "claims" not in head.split("EPO 공식 문헌조회")[1].split("|")[2]
+    # 웹이 살아 있으므로 전체는 부분 성공이다.
+    assert "**전체: 부분 성공**" in report
+
+
+def test_a_successful_epo_search_says_so() -> None:
+    manifest = _manifest([])
+    manifest["epo"] = _epo_section(status="ok")
+    manifest["verification"] = _verification_section(verified=1)
+    report = search_report.render(manifest)
+
+    head = report.split("## 요약", 1)[0]
+    assert "| EPO 독립 검색 | 성공 |" in head
+    assert "**전체: 성공**" in report
+
+
+def test_the_actual_cql_and_the_format_conversion_are_shown() -> None:
+    """실제 검색식과, 모델이 적은 값과 다르게 나간 분류코드는 반드시 보인다."""
+    manifest = _manifest([])
+    manifest["epo"] = _epo_section(status="ok", cql='ipc = "G08B13/196"')
+    report = search_report.render(manifest)
+
+    assert "실제로 실행된 EPO 검색식" in report
+    assert 'ipc = \"G08B13/196\"'.replace("\\", "") in report or (
+        "G08B13/196" in report
+    )
+    assert "분류코드 형식 변환" in report
+    assert "G08B 13/196" in report
+
+
+def test_a_past_manifest_with_group_c_still_renders() -> None:
+    """과거 C 가 들어 있는 기록을 열어도 오류 없이 '과거 분류'로 표시된다."""
+    manifest = _manifest([])
+    manifest["version"] = 10
+    manifest["group_definitions"] = {
+        "A": "전체 구조와 핵심 특징이 모두 강하게 유사",
+        "B": "전체 구조는 다르지만 핵심 특징 또는 핵심 관계가 강하게 유사",
+        "C": "전체 구조는 유사하지만 핵심 대응은 부분적",
+    }
+    manifest["reported"]["candidates"] = [
+        {
+            "index": 1,
+            "group": "C",
+            "provisional_group": None,
+            "group_eligible": True,
+            "page_supported_rows": 1,
+            "identifier_url_matched": True,
+            "page_fetch_succeeded": True,
+            "classification_basis": "page_observed",
+            "doc_number": "EP1000000A1",
+            "doi": "",
+            "title": "과거 실행의 후보",
+            "applicant": "",
+            "url": FETCHED_URL,
+            "canonical_url": FETCHED_URL,
+            "family": "",
+            "provenance": "page_text",
+            "evidence_status": "page_reviewed",
+            "original_verified": False,
+            "verbatim_excerpt": "원문에서 확인되지 않음",
+            "source_location": "확인 필요",
+            "mapping": [],
+            "note": "",
+            "search_origins": ["claim_only"],
+        }
+    ]
+    report = search_report.render(manifest)
+
+    assert "C. 전체 구조는 유사하지만 핵심 대응은 부분적" in report
+    assert "과거 분류 (새 실행은 만들지 않습니다)" in report
+    assert "EP1000000A1" in report
+
+
+def test_a_past_manifest_without_group_definitions_still_renders() -> None:
+    """정의를 싣지 않던 더 오래된 기록도 C 제목을 잃지 않는다."""
+    manifest = _manifest([])
+    manifest["version"] = 6
+    manifest.pop("group_definitions", None)
+    manifest["reported"]["candidates"] = [
+        {
+            "index": 1,
+            "group": "C",
+            "group_eligible": False,
+            "doc_number": "EP2000000A1",
+            "doi": "",
+            "title": "",
+            "applicant": "",
+            "url": "",
+            "canonical_url": "",
+            "family": "",
+            "provenance": "search_snippet",
+            "evidence_status": "candidate_only",
+            "original_verified": False,
+            "verbatim_excerpt": "원문에서 확인되지 않음",
+            "source_location": "확인 필요",
+            "mapping": [],
+            "note": "",
+            "search_origins": ["claim_only"],
+        }
+    ]
+
+    report = search_report.render(manifest)
+    assert "EP2000000A1" in report

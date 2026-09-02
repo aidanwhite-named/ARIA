@@ -1144,7 +1144,7 @@ class JobRunner:
                 "message": (
                     f"확보한 공식 문헌 {len(verified)}건을 "
                     f"{getattr(provider, 'display_name', '') or '모델'}이 "
-                    "A/B/C로 분류하는 중"
+                    "A/B로 분류하는 중"
                 ),
             },
         )
@@ -2112,7 +2112,7 @@ class JobRunner:
                 # 않고 검색 감사용으로 남는다. 같은 공개번호를 두 채널이 찾았으면
                 # 후보를 하나로 두고 발견 경로를 둘 다 남긴다.
                 #
-                # 이 시점에는 어떤 EPO 후보도 A/B/C 를 받지 않는다. 등급은 바로
+                # 이 시점에는 어떤 EPO 후보도 A/B 를 받지 않는다. 등급은 바로
                 # 아래 공식 검증이 보존 응답에 구성 대응을 대조한 뒤에만 붙는다.
                 #
                 # 웹 보고를 읽지 못했어도(reported is None) 완료된 EPO 검색이

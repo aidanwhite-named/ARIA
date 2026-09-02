@@ -222,15 +222,13 @@ def test_report_surfaces_epo_only_as_discovery_not_classification() -> None:
     )
     report = search_report.render(manifest)
 
-    assert "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>" in report
-    assert "EPO에서만 발견: 1건" in report
-    assert "EP2222222B1" in report
-    assert "EPO \\| 단독 후보" in report
-    assert "특허 패밀리 판정이나 A/B/C 유사도 분류가 아니" in report
-    assert "이번 웹 검색 기록에 같은 공개번호가 없었다는 뜻" in report
-    assert "번호로 직접 조회한 EPO 기록은 이 발견 경로 비교에 포함하지" in report
-    assert report.index("## 미확인 검색 단서") < report.index(
-        "<summary><b>웹/EPO 채널 교차 발견"
-    )
-    assert report.count("<details>") == 1
-    assert report.count("</details>") == 1
+    # 교차 발견 비교표는 사용자 보고서에서 뺐다. 데이터는 매니페스트에 남고
+    # 화면의 감사 패널에서 볼 수 있다 — 이 보고서는 "무엇을 찾았나"를 읽는
+    # 자리이지 ARIA 의 내부 상태를 읽는 자리가 아니다.
+    assert "웹/EPO 채널 교차 발견" not in report
+    # shortlist 에 오르지 않은 EPO 레인 후보는 보고서 본문에 실리지 않는다.
+    # 매니페스트의 channel_comparison 에는 그대로 남아 화면에서 볼 수 있다.
+    assert "EP2222222B1" not in report
+    assert manifest["channel_comparison"]["counts"]["epo_only"] == 1
+    # 채널별 성공·실패는 결과보다 먼저 나온다.
+    assert report.index("## 채널별 실행 결과") < report.index("## 요약")

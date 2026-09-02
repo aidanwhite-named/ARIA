@@ -142,7 +142,7 @@ OUTCOME_LABELS = {
     OUTCOME_LEGACY_C: "과거 C 분류 (A/B 기준 미달에 해당)",
 }
 
-# A/B/C 값과 그 값을 뒷받침하는 근거는 별개의 축이다. ``group`` 하나만
+# A/B 값과 그 값을 뒷받침하는 근거는 별개의 축이다. ``group`` 하나만
 # 저장하면 페이지 본문을 본 분류와 공식 문헌을 대조한 분류가 화면에서 같은
 # 것으로 보인다. 또한 과거 매니페스트의 group 을 새 기준의 정식 분류로
 # 오인하기 쉽다. 아래 값은 ARIA 가 저장된 관측 필드로 계산하며 모델이 고르지
@@ -403,7 +403,7 @@ def classification_view(candidate: dict, manifest_version: int | None = None) ->
     """저장된 후보를 정식/잠정 분류로 안전하게 해석한다.
 
     과거 스키마에는 ``group_eligible`` 자체가 없었다. 그 값을 ``True`` 로
-    간주하면 검색 결과만 보고 붙인 옛 A/B/C가 새 기준의 정식 분류로 승격된다.
+    간주하면 검색 결과만 보고 붙인 옛 등급이 새 기준의 정식 분류로 승격된다.
     따라서 명시적인 게이트 또는 저장된 검증 흔적이 없으면 항상 잠정으로 본다.
     이 함수는 입력 dict를 수정하지 않으므로 과거 아티팩트도 그대로 보존된다.
     """
@@ -952,7 +952,7 @@ def _normalize_candidate(
         mapping = []
         note = ""
 
-    # A/B/C 진입 하한. 원문 대조(raw_verified)는 요구하지 않는다 — web 채널에서는
+    # A/B 진입 하한. 원문 대조(raw_verified)는 요구하지 않는다 — web 채널에서는
     # 그 값이 나올 수 없어서 모든 후보가 빠져 버린다. 대신 두 가지를 요구한다.
     #
     #   identifier_url_matched  주장한 번호가 실제로 연 주소 안에 있다
@@ -1327,7 +1327,7 @@ def merge_reported(*reports: dict | None) -> dict | None:
     """독립 검색 결과를 합집합으로 병합한다.
 
     claim_only 를 먼저 넘기는 것이 계약이다. 같은 문헌이 두 경로에 있으면 청구항
-    단독 실행의 A/B/C 분류를 유지하고, 더 강하게 확인된 증거 필드만 보강한다.
+    단독 실행의 A/B 분류를 유지하고, 더 강하게 확인된 증거 필드만 보강한다.
     따라서 명세서 보조 실행이 기본 후보를 지우거나 재분류할 수 없다.
     """
     available = [report for report in reports if report is not None]
@@ -1930,7 +1930,7 @@ def merge_epo_discoveries(
             by_variant.setdefault(variant, candidate)
         notes.append(
             f"후보 {next_index}: EPO 독립 검색이 찾은 {row['doc_number']} 를 "
-            "대응표 후보로 올렸습니다. 정식 A/B/C 는 공식 응답에 구성 대응이 "
+            "대응표 후보로 올렸습니다. 정식 A/B 는 공식 응답에 구성 대응이 "
             "대조된 뒤에만 붙습니다."
         )
 
@@ -2123,7 +2123,7 @@ def merge_literature_discoveries(
         by_doi.setdefault(key, candidate)
         notes.append(
             f"후보 {next_index}: ARIA 서지 검색이 찾은 {key} 를 대응표 후보로 "
-            "올렸습니다. 정식 A/B/C 는 공식 응답에 구성 대응이 대조된 뒤에만 "
+            "올렸습니다. 정식 A/B 는 공식 응답에 구성 대응이 대조된 뒤에만 "
             "붙습니다."
         )
 

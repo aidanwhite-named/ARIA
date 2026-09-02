@@ -384,7 +384,7 @@ function CandidateRow({
       {epoOnly ? (
         <div className="faint">
           EPO 독립 검색이 데려온 후보입니다. 웹 페이지 관측이 없으므로 페이지
-          근거 분류는 만들지 않으며, 정식 A/B/C는 공식 응답에 구성 대응이
+          근거 분류는 만들지 않으며, 정식 A/B는 공식 응답에 구성 대응이
           대조된 경우에만 붙습니다.
         </div>
       ) : (
@@ -743,7 +743,7 @@ export default function SearchManifestView({ job }: { job: Job }) {
         <div className="notice info">
           <strong>과거 분류 안전 해석</strong>
           <div style={{ marginTop: 4 }}>
-            정식 분류 근거가 저장되지 않은 과거 A/B/C는 잠정 등급으로 표시합니다.
+            정식 분류 근거가 저장되지 않은 과거 등급은 잠정 등급으로 표시합니다.
             원본 매니페스트 값은 수정하지 않았습니다.
           </div>
         </div>
@@ -881,7 +881,7 @@ export default function SearchManifestView({ job }: { job: Job }) {
             </div>
           )}
           <div className="faint" style={{ marginTop: 4 }}>
-            A/B/C는 AI 분류입니다. ARIA는 공식 응답에서 실제로 대조된 구성 행
+            A/B는 AI 분류입니다. ARIA는 공식 응답에서 실제로 대조된 구성 행
             수를 표시하며, 안정적인 특징 분모가 없어 임의의 커버리지 백분율은
             계산하지 않습니다.
           </div>

@@ -53,7 +53,7 @@ from .search_manifest import (
 )
 
 DISCLAIMER = (
-    "현재 검색 결과는 문헌 검토 후보 탐색 자료이며 A/B/C는 AI 분류입니다. "
+    "현재 검색 결과는 문헌 검토 후보 탐색 자료이며 A/B는 AI 분류입니다. "
     "원문 직접 인용과 법적 판단을 보장하지 않습니다."
 )
 
@@ -352,7 +352,7 @@ def _candidate_section(item: dict) -> list[str]:
         # 지어내지 않는 것이 규칙이다.
         lines.append(
             f"- 이 후보는 {_no_web_channel_label(discovered)}이 데려왔습니다. 웹 "
-            "페이지 관측이 없으므로 페이지 근거 분류는 만들지 않으며, 정식 A/B/C "
+            "페이지 관측이 없으므로 페이지 근거 분류는 만들지 않으며, 정식 A/B "
             "는 공식 응답에 구성 대응이 대조된 경우에만 붙습니다."
         )
     elif not item.get("identifier_url_matched", True):
@@ -409,7 +409,7 @@ def _candidate_section(item: dict) -> list[str]:
 
 
 def _provisional_candidates(items: list[tuple[dict, dict]]) -> list[str]:
-    """한 A/B/C 그룹 안에서 검증되지 않은 후보를 잠정 하위 절로 표시한다."""
+    """한 A/B 그룹 안에서 검증되지 않은 후보를 잠정 하위 절로 표시한다."""
     if not items:
         return []
     lines = [
@@ -635,349 +635,174 @@ def _focus_section(focus: dict | None) -> list[str]:
     return lines
 
 
-def _epo_strategy_section(manifest: dict) -> list[str]:
-    """EPO 레인이 검색 전에 청구항을 어떻게 나눠 읽었는가.
+#: 채널 상태 표에 쓰는 표시. 값이 늘어나면 프런트도 같은 말을 써야 한다.
+_STATUS_OK = "성공"
+_STATUS_PARTIAL = "부분 성공"
+_STATUS_FAILED = "실패"
+_STATUS_SKIPPED = "미실행"
 
-    검색어의 근거다. 이것이 없으면 "왜 이 검색식이었나"에 답하려면 CQL 문자열을
-    거꾸로 읽는 수밖에 없고, 거기에는 동의어를 왜 그렇게 골랐는지가 없다.
 
-    이 절은 **모델의 판단**이지 ARIA 의 관측이 아니다. 그렇게 읽히도록 제목과
-    문구를 붙인다.
+def _channel_status_section(manifest: dict) -> list[str]:
+    """보고서 맨 위의 채널별 성공·실패.
+
+    왜 맨 위인가
+    ------------
+    "EPO 검색이 됐나"를 알아내려면 예전에는 접힌 감사 블록을 펼쳐 종료 사유를
+    읽어야 했다. 그런데 그것은 결과를 읽기 **전에** 알아야 하는 사실이다 —
+    EPO 가 한 건도 못 찾은 실행과 EPO 검색이 실패한 실행은 후보 목록이 똑같이
+    보이지만 전혀 다른 실행이다.
+
+    검색 채널과 문헌조회 채널을 나눠 적는다. EPO 검색이 실패했는데 문헌번호
+    조회가 성공한 실행을 "EPO 검색 성공"으로 읽으면 안 된다.
     """
+    reported = manifest.get("reported") or {}
+    observed = manifest.get("observed") or {}
+    candidates = reported.get("candidates") or []
+    rows: list[tuple[str, str, str]] = []
+    states: list[str] = []
+
+    # --- 웹 검색 ---------------------------------------------------------
+    web_error = str(reported.get("web_report_error") or "")
+    queries = list(observed.get("search_queries") or [])
+    if not queries:
+        for origin_queries in (observed.get("search_queries_by_origin") or {}).values():
+            queries += list(origin_queries or [])
+    web_candidates = sum(
+        1
+        for item in candidates
+        if search_manifest.DISCOVERY_WEB in search_manifest.discovery_origins(item)
+    )
+    web_state = _STATUS_FAILED if web_error else _STATUS_OK
+    states.append(web_state)
+    rows.append((
+        "웹 검색",
+        web_state,
+        web_error or f"검색어 {len(queries)}개 · 후보 {web_candidates}건",
+    ))
+
+    # --- EPO 독립 검색 ----------------------------------------------------
     epo = manifest.get("epo") or {}
     lanes = [lane for lane in (epo.get("lanes") or []) if isinstance(lane, dict)]
-    analyzed = [lane for lane in lanes if (lane.get("claim_analysis") or {}).get("elements")]
-    excluded = [
-        (lane, row)
+    epo_queries = [
+        str(query.get("cql") or "")
         for lane in lanes
-        for row in (lane.get("excluded") or [])
+        for query in (lane.get("queries") or [])
+        if isinstance(query, dict) and query.get("cql")
+    ]
+    if not epo.get("enabled"):
+        epo_state = _STATUS_SKIPPED
+        epo_detail = str(epo.get("reason") or "EPO 연동이 꺼져 있습니다.")
+    elif not lanes:
+        epo_state = _STATUS_SKIPPED
+        epo_detail = str(epo.get("reason") or "실행된 레인이 없습니다.")
+    else:
+        ok_lanes = [lane for lane in lanes if lane.get("status") == "ok"]
+        failed = [lane for lane in lanes if lane.get("status") not in ("ok",)]
+        epo_candidates = sum(len(lane.get("candidates") or []) for lane in lanes)
+        if not ok_lanes:
+            epo_state = _STATUS_FAILED
+        elif failed:
+            epo_state = _STATUS_PARTIAL
+        else:
+            epo_state = _STATUS_OK
+        reasons = [
+            f"{lane.get('id') or '레인'}: "
+            + str(
+                lane.get("error")
+                or lane.get("termination_detail")
+                or lane.get("termination_reason")
+                or "사유 미기록"
+            )
+            for lane in failed
+        ]
+        epo_detail = (
+            f"검색식 {len(epo_queries)}개 · 결과 {epo_candidates}건"
+            + ("" if not reasons else " · " + " / ".join(reasons))
+        )
+    states.append(epo_state)
+    rows.append(("EPO 독립 검색", epo_state, epo_detail))
+
+    # --- EPO 공식 문헌조회 -------------------------------------------------
+    verification = manifest.get("verification") or {}
+    counts = verification.get("counts") or {}
+    documents = [
+        item for item in (verification.get("documents") or []) if isinstance(item, dict)
+    ]
+    scopes: list[str] = []
+    for name in ("biblio", "abstract", "claims"):
+        if any(
+            call.get("constituent") == name and not call.get("error")
+            for document in documents
+            for call in (document.get("calls") or [])
+            if isinstance(call, dict)
+        ):
+            scopes.append(name)
+    targets = int(counts.get("targets") or 0)
+    verified_docs = int(counts.get("verified") or 0)
+    if not verification.get("attempted"):
+        fetch_state = _STATUS_SKIPPED
+        fetch_detail = str(verification.get("reason") or "실행하지 않았습니다.")
+    elif verified_docs == 0:
+        fetch_state = _STATUS_FAILED
+        fetch_detail = f"대상 {targets}건 · 확보 0건"
+    else:
+        fetch_state = _STATUS_OK if verified_docs >= targets else _STATUS_PARTIAL
+        fetch_detail = (
+            f"대상 {targets}건 · 확보 {verified_docs}건 · 조회 범위 "
+            + (", ".join(scopes) or "기록 없음")
+        )
+    states.append(fetch_state)
+    rows.append(("EPO 공식 문헌조회", fetch_state, fetch_detail))
+
+    # --- 논문 전용 API ----------------------------------------------------
+    literature = manifest.get("literature") or {}
+    if literature.get("enabled"):
+        paper_state = _STATUS_OK
+        paper_detail = f"후보 {len(literature.get('candidates') or [])}건"
+    else:
+        paper_state = _STATUS_SKIPPED
+        paper_detail = str(literature.get("reason") or "꺼져 있습니다.")
+    rows.append(("논문 전용 API 검색", paper_state, paper_detail))
+
+    # --- 전체 -------------------------------------------------------------
+    graded = [state for state in states if state != _STATUS_SKIPPED]
+    if not graded or all(state == _STATUS_FAILED for state in graded):
+        overall = _STATUS_FAILED
+    elif all(state == _STATUS_OK for state in graded):
+        overall = _STATUS_OK
+    else:
+        overall = _STATUS_PARTIAL
+
+    lines = [
+        "## 채널별 실행 결과",
+        "",
+        "| 채널 | 상태 | 내용 |",
+        "| --- | --- | --- |",
+    ]
+    for name, state, detail in rows:
+        lines.append(f"| {name} | {state} | {_cell(detail)} |")
+    lines += ["", f"**전체: {overall}**", ""]
+
+    if epo_queries:
+        lines += ["실제로 실행된 EPO 검색식", ""]
+        lines += [f"- `{_cell(query)}`" for query in epo_queries]
+        lines.append("")
+    # 모델이 적은 분류코드와 OPS 로 실제 나간 표기가 다르면 그 사실을 밝힌다.
+    normalized = [
+        row
+        for lane in lanes
+        for query in (lane.get("queries") or [])
+        if isinstance(query, dict)
+        for row in (query.get("normalized_classifications") or [])
         if isinstance(row, dict)
     ]
-    selections = [
-        lane
-        for lane in lanes
-        if isinstance(lane.get("selection"), dict) and lane.get("selection")
-    ]
-    if not analyzed and not excluded and not selections:
-        return []
-
-    lines = [
-        "<details>",
-        "<summary><b>EPO 검색 전략(청구항 분석) 펼치기/접기</b></summary>",
-        "",
-        "아래는 EPO 검색 레인이 **검색어를 만들기 전에** 적은 청구항 분해입니다. "
-        "모델의 판단이며 ARIA 가 대조한 사실이 아닙니다. 여기 있는 값이 실제로 "
-        "어떤 검색식이 되었는지는 아래 레인별 질의 기록과 대조하십시오.",
-        "",
-    ]
-    for lane in analyzed:
-        analysis = lane.get("claim_analysis") or {}
-        lines.append(f"#### {lane.get('id') or '(이름 없는 EPO 레인)'}")
-        elements = analysis.get("elements") or []
-        if elements:
-            lines += [
-                "",
-                "| 구성요소 | 청구항 문언 | 필수 여부 | 동의어·유사 표현 |",
-                "| --- | --- | --- | --- |",
-            ]
-            for element in elements:
-                essential = element.get("essential")
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        _cell(value)
-                        for value in (
-                            element.get("id") or "-",
-                            element.get("text") or "-",
-                            # 불리언이 아니라 세 상태다. 모델이 적지 않은 것을
-                            # '아니다'로 인쇄하면 없는 판단을 만들어 낸다.
-                            "필수"
-                            if essential is True
-                            else "필수 아님"
-                            if essential is False
-                            else "판단 없음",
-                            ", ".join(element.get("synonyms") or []) or "-",
-                        )
-                    )
-                    + " |"
-                )
-        relations = analysis.get("relations") or []
-        if relations:
-            lines += ["", "구성요소 사이의 관계", ""]
-            for relation in relations:
-                source = relation.get("source") or "?"
-                target = relation.get("target") or "?"
-                kind = relation.get("kind") or "관계"
-                lines.append(
-                    f"- {_cell(source)} → {_cell(target)} ({_cell(kind)}): "
-                    + _cell(relation.get("description") or "-")
-                )
-        combinations = analysis.get("concept_combinations") or []
-        if combinations:
-            lines += ["", "EPO 검색에 사용한 개념 조합", ""]
-            for combo in combinations:
-                lines.append(
-                    "- "
-                    + (", ".join(combo.get("elements") or []) or "구성요소 미기록")
-                    + " → "
-                    + (_cell(", ".join(combo.get("terms") or [])) or "-")
-                    + (
-                        f" — {_cell(combo.get('reason'))}"
-                        if combo.get("reason")
-                        else ""
-                    )
-                )
-        conditions = analysis.get("search_conditions") or []
-        if conditions:
-            lines += ["", "사용한 분류·검색 조건", ""]
-            for condition in conditions:
-                lines.append(
-                    f"- {_cell(condition.get('kind') or '조건')}: "
-                    + _cell(condition.get("value") or "-")
-                    + (
-                        f" — {_cell(condition.get('reason'))}"
-                        if condition.get("reason")
-                        else ""
-                    )
-                )
-        if analysis.get("notes"):
-            lines += ["", f"- 비고: {_cell(analysis['notes'])}"]
-        lines.append("")
-
-    # 검색하지 않는 최종 선택 턴. 마지막 검색 결과가 shortlist 평가를 받았는지는
-    # "왜 이 문헌이 후보에 없나"에 답할 때 필요한 사실이다.
-    selection_rows = [
-        (lane, lane.get("selection") or {})
-        for lane in lanes
-        if isinstance(lane.get("selection"), dict) and lane.get("selection")
-    ]
-    if selection_rows:
+    if normalized:
+        lines += ["분류코드 형식 변환 (모델 입력 → OPS 전송)", ""]
         lines += [
-            "최종 선택 턴 (검색 없음)",
-            "",
-            "이 턴은 OPS 를 부르지 않습니다. 마지막 검색이 데려온 문헌까지 포함해 "
-            "shortlist 를 한 번 더 고르는 자리이며, 검색 라운드와 사용량을 따로 "
-            "기록합니다.",
-            "",
-            "| 레인 | 시도 | 상태 | 검토한 후보 | 추가된 shortlist | 거절된 검색 action |",
-            "| --- | --- | --- | --- | --- | --- |",
+            f"- `{_cell(row.get('original'))}` → `{_cell(row.get('sent'))}`"
+            for row in normalized
         ]
-        for lane, selection in selection_rows:
-            lines.append(
-                "| "
-                + " | ".join(
-                    _cell(value)
-                    for value in (
-                        lane.get("id") or "-",
-                        "예" if selection.get("attempted") else "아니오",
-                        selection.get("status") or selection.get("reason") or "-",
-                        str(int(selection.get("candidates_reviewed") or 0)),
-                        str(int(selection.get("shortlist_added") or 0)),
-                        str(int(selection.get("rejected_actions") or 0)),
-                    )
-                )
-                + " |"
-            )
         lines.append("")
-
-    if excluded:
-        lines += [
-            "상한 때문에 처리하지 않은 것",
-            "",
-            "| 레인 | 종류 | 값 | 사유 |",
-            "| --- | --- | --- | --- |",
-        ]
-        for lane, row in excluded:
-            lines.append(
-                "| "
-                + " | ".join(
-                    _cell(value)
-                    for value in (
-                        lane.get("id") or "-",
-                        row.get("kind") or "-",
-                        row.get("value") or "-",
-                        row.get("detail") or row.get("reason_code") or "-",
-                    )
-                )
-                + " |"
-            )
-        lines.append("")
-
-    lines += ["</details>", ""]
-    return lines
-
-
-def _tool_isolation_section(manifest: dict) -> list[str]:
-    """EPO 계획 턴에서 도구 호출이 감지됐는가.
-
-    감지된 실행에서는 그 응답의 action 을 하나도 실행하지 않았다. 사용자가 제일
-    먼저 알아야 하는 사실이라 접지 않고 본문에 둔다.
-    """
-    epo = manifest.get("epo") or {}
-    rows = [
-        (lane, violation)
-        for lane in (epo.get("lanes") or [])
-        if isinstance(lane, dict)
-        for violation in (lane.get("tool_violations") or [])
-        if isinstance(violation, dict)
-    ]
-    if not rows:
-        return []
-    post_hoc = any(
-        violation.get("isolation") == "post_hoc_detection"
-        for _lane, violation in rows
-    )
-    lines = [
-        "## EPO 계획 턴의 도구 호출 감지",
-        "",
-        "EPO 검색 계획 턴은 도구 없는 실행입니다. 아래 레인에서는 모델이 외부 "
-        "도구를 호출한 것이 관측되어, **그 응답의 검색·조회 지시를 하나도 "
-        "실행하지 않고 폐기**했습니다.",
-        "",
-    ]
-    if post_hoc:
-        lines += [
-            "> **사후 탐지는 차단이 아닙니다.** 격리 수준이 "
-            "`post_hoc_detection` 인 레인에서는 ARIA 가 도구 호출을 막을 수단이 "
-            "없습니다. 그 외부 호출은 **이미 나갔고 되돌릴 수 없으며**, ARIA 가 "
-            "한 일은 그 응답을 검색 계획으로 쓰지 않기로 한 것뿐입니다. 모델이 "
-            "무엇을 읽었는지는 ARIA 가 알지 못합니다.",
-            "",
-        ]
-    lines += [
-        "| 레인 | Provider | 감지된 도구 | 격리 수준 |",
-        "| --- | --- | --- | --- |",
-    ]
-    for lane, violation in rows:
-        isolation = violation.get("isolation")
-        lines.append(
-            "| "
-            + " | ".join(
-                _cell(value)
-                for value in (
-                    lane.get("id") or "-",
-                    violation.get("provider") or "-",
-                    ", ".join(violation.get("tools") or []) or "-",
-                    _ISOLATION_LABEL.get(isolation, isolation or "-"),
-                )
-            )
-            + " |"
-        )
-    lines.append("")
-    return lines
-
-
-def _channel_comparison_section(manifest: dict) -> list[str]:
-    """웹과 EPO의 공개번호 교집합·차집합을 사용자에게 보여 준다.
-
-    이것은 후보 발견 경로의 대조이지 A/B/C 분류나 패밀리 판정이 아니다. 그
-    경계를 문구와 표에 함께 남겨, EPO 단독 후보가 곧 신규성 근거인 것처럼
-    읽히지 않게 한다.
-    """
-    comparison = manifest.get("channel_comparison")
-    if not isinstance(comparison, dict):
-        return []
-
-    epo = manifest.get("epo") or {}
-    if not comparison.get("compared"):
-        if not epo.get("enabled"):
-            return []
-        return [
-            "<details>",
-            "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>",
-            "",
-            "두 채널을 대조하지 못했습니다: "
-            + str(comparison.get("reason") or "비교할 기록이 없습니다."),
-            "",
-            "</details>",
-            "",
-        ]
-
-    counts = comparison.get("counts") or {}
-    web = comparison.get("web") or {}
-    epo_stats = comparison.get("epo") or {}
-    lines = [
-        "<details>",
-        "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>",
-        "",
-        "이 표는 **국가코드를 보존한 공개번호 표기**만 맞춘 발견 경로 비교입니다. "
-        "특허 패밀리 판정이나 A/B/C 유사도 분류가 아니며, `EPO에서만`은 이번 "
-        "웹 검색 기록에 같은 공개번호가 없었다는 뜻일 뿐입니다.",
-        "후보를 검증하기 위해 번호로 직접 조회한 EPO 기록은 이 발견 경로 비교에 "
-        "포함하지 않습니다. 따라서 공식 검증을 마친 후보도 독립 EPO 검색에서 "
-        "발견되지 않았다면 `웹에서만`으로 표시될 수 있습니다.",
-        "",
-        f"- 양쪽 채널에서 발견: {int(counts.get('both') or 0)}건",
-        f"- EPO에서만 발견: {int(counts.get('epo_only') or 0)}건",
-        f"- 웹에서만 발견: {int(counts.get('web_only') or 0)}건",
-        "- 식별 가능한 고유 공개번호: "
-        f"웹 {int(web.get('unique_identified') or 0)}건 · "
-        f"EPO {int(epo_stats.get('unique_identified') or 0)}건",
-    ]
-    if web.get("unidentified") or epo_stats.get("unidentified"):
-        lines.append(
-            "- 문헌번호가 없어 대조에서 제외: "
-            f"웹 {int(web.get('unidentified') or 0)}건 · "
-            f"EPO {int(epo_stats.get('unidentified') or 0)}건"
-        )
-    if web.get("quarantined"):
-        lines.append(
-            f"- 웹 후보 중 식별·근거 격리 상태: {int(web['quarantined'])}건 "
-            "(교차 발견 여부가 격리를 자동 해제하지 않습니다.)"
-        )
-    excluded_lanes = epo_stats.get("excluded_lanes") or []
-    if excluded_lanes:
-        lines.append(
-            "- 완료되지 않아 비교에서 제외한 EPO 레인: "
-            + ", ".join(str(value) for value in excluded_lanes)
-        )
-
-    rows: list[tuple[str, dict]] = []
-    for key, label in (
-        ("both", "양쪽"),
-        ("epo_only", "EPO에서만"),
-        ("web_only", "웹에서만"),
-    ):
-        rows.extend((label, item) for item in comparison.get(key) or [])
-
-    if not rows:
-        lines += ["", "식별 가능한 공개번호 후보가 없습니다.", "", "</details>", ""]
-        return lines
-
-    lines += [
-        "",
-        f"교차 발견 문헌 목록: 총 {len(rows)}건",
-        "",
-        "| 구분 | 대표 문헌번호 | 명칭 | 웹 기록 | EPO 기록 |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    for label, item in rows:
-        web_records = []
-        for record in item.get("web") or []:
-            origins = ", ".join(record.get("origins") or []) or "경로 미기록"
-            suffix = " · 격리" if record.get("quarantined") else ""
-            web_records.append(
-                f"{record.get('doc_number') or '-'} ({origins}{suffix})"
-            )
-        epo_records = []
-        for record in item.get("epo") or []:
-            lanes = ", ".join(record.get("lanes") or []) or "레인 미기록"
-            epo_records.append(f"{record.get('doc_number') or '-'} ({lanes})")
-        lines.append(
-            "| "
-            + " | ".join(
-                _cell(value)
-                for value in (
-                    label,
-                    item.get("doc_number") or "-",
-                    item.get("title") or "-",
-                    "; ".join(web_records) or "-",
-                    "; ".join(epo_records) or "-",
-                )
-            )
-            + " |"
-        )
-    lines += ["", "</details>", ""]
     return lines
 
 
@@ -992,8 +817,11 @@ def render(manifest: dict) -> str:
     observed = manifest.get("observed") or {}
     focus = (manifest.get("input") or {}).get("search_focus")
 
-    verified = sum(1 for item in candidates if item["original_verified"])
-    reviewed = sum(1 for item in candidates if item["page_fetch_succeeded"])
+    # 과거 매니페스트에는 없던 키가 있다. 보고서를 여는 것이 실패하면 그
+    # 실행의 기록 전체를 못 읽게 되므로, 읽기 경로에서는 없는 키를 거짓으로
+    # 읽는다. 저장된 값은 고치지 않는다.
+    verified = sum(1 for item in candidates if item.get("original_verified"))
+    reviewed = sum(1 for item in candidates if item.get("page_fetch_succeeded"))
     classified = [
         (item, classification_view(item, manifest.get("version")))
         for item in candidates
@@ -1075,6 +903,9 @@ def render(manifest: dict) -> str:
         "산문은 보고서 본문으로 사용하지 않으며, 실행 기록에 원문 그대로 "
         "보관합니다.",
         "",
+        # 채널별 성공·실패는 결과를 읽기 **전에** 알아야 한다. EPO 검색이 실패한
+        # 실행과 EPO 가 한 건도 못 찾은 실행은 후보 목록이 똑같이 보인다.
+        *_channel_status_section(manifest),
         "## 요약",
         "",
         f"- 후보 {len(candidates)}건",
@@ -1143,7 +974,7 @@ def render(manifest: dict) -> str:
     if int(manifest.get("version") or 0) < CLASSIFICATION_SCHEMA_VERSION:
         lines += [
             "> **과거 분류 안전 해석:** 이 기록에 정식 분류 근거가 저장되어 있지 "
-            "않은 A/B/C는 잠정 등급으로 표시합니다. 원본 매니페스트 값은 수정하지 "
+            "않은 A/B는 잠정 등급으로 표시합니다. 원본 매니페스트 값은 수정하지 "
             "않았습니다.",
             "",
         ]
@@ -1173,7 +1004,7 @@ def render(manifest: dict) -> str:
                 f"{int(usage.get('reused_with_fresh_fetch_documents') or 0)}건"
             )
         lines += [
-            "- A/B/C는 AI 분류이며, ARIA는 보존된 공식 응답에서 그대로 대조된 "
+            "- A/B는 AI 분류이며, ARIA는 보존된 공식 응답에서 그대로 대조된 "
             "구성 행 수를 공개합니다. 안정적인 특징 분모가 없어 임의의 커버리지 "
             "백분율은 계산하지 않습니다.",
             "",
@@ -1198,7 +1029,6 @@ def render(manifest: dict) -> str:
             "",
         ]
 
-    lines += _tool_isolation_section(manifest)
     lines += _focus_section(focus)
     lines += _expansion_section(manifest, reported)
 
@@ -1238,10 +1068,10 @@ def render(manifest: dict) -> str:
 
     lines += _below_threshold_section(below_threshold)
     lines += _isolated_section(isolated)
-    # 후보 분류를 모두 읽은 뒤에만 채널 감사 표가 나온다. 표 전체는 기본으로
-    # 접혀 있어 20~30건의 EPO 차집합이 핵심 A/B/C 결과를 밀어내지 않는다.
-    lines += _channel_comparison_section(manifest)
-    lines += _epo_strategy_section(manifest)
+    # 웹/EPO 교차 발견표, EPO 청구항 분해, 도구 격리 내부 상태, 최종 선택 턴의
+    # 진행 과정은 사용자 보고서에서 뺐다. 전부 매니페스트에 그대로 남아 있고
+    # 화면의 감사 패널에서 볼 수 있다 — 이 보고서는 "무엇을 찾았나"를 읽는
+    # 자리이지 ARIA 의 내부 상태를 읽는 자리가 아니다.
 
     failures = (reported.get("access_failures") or [])
     if failures:

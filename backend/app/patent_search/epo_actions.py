@@ -366,7 +366,7 @@ class ClaimAnalysis(_Base):
 class ShortlistItem(_Base):
     """모델이 고른 유망 EPO 후보 하나.
 
-    ARIA 는 이 목록을 **후보 선정**으로만 쓴다. 여기 적힌 이유는 A/B/C 근거가
+    ARIA 는 이 목록을 **후보 선정**으로만 쓴다. 여기 적힌 이유는 A/B 근거가
     아니다 — 그 판정은 공식 응답 대조를 통과한 뒤에야 나온다.
     """
 

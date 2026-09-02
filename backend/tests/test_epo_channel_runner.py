@@ -328,7 +328,11 @@ def test_attached_spec_runs_all_four_lanes(client, epo_on) -> None:
         comparison["epo"]["unique_identified"]
     )
     detail = client.get(f"/api/jobs/{job['id']}").json()
-    assert "웹/EPO 채널 교차 발견 펼치기/접기" in detail["result_text"]
+    # 교차 발견 비교표는 내부 기록으로만 남는다. 사용자 보고서에는 채널별
+    # 성공·실패와 실제 검색식이 대신 들어간다.
+    assert "웹/EPO 채널 교차 발견" not in detail["result_text"]
+    assert "## 채널별 실행 결과" in detail["result_text"]
+    assert "실제로 실행된 EPO 검색식" in detail["result_text"]
 
 
 def test_only_the_spec_assisted_epo_lane_gets_the_spec_body(client, epo_on) -> None:
