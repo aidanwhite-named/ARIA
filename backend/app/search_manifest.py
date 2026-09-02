@@ -1672,6 +1672,9 @@ def epo_candidate(
     return {
         "index": index,
         "group": None,
+        # 이 채널의 후보는 웹 페이지 관측을 거치지 않는다. 공식 검증 단계가
+        # 이 값을 갱신하기 전까지는 언제나 '미검증'이다.
+        "classification_outcome": OUTCOME_UNVERIFIED,
         "provisional_group": None,
         "classification_basis": CLASSIFICATION_NONE,
         "provisional": True,
@@ -1986,6 +1989,9 @@ def literature_candidate(
     return {
         "index": index,
         "group": None,
+        # 이 채널의 후보는 웹 페이지 관측을 거치지 않는다. 공식 검증 단계가
+        # 이 값을 갱신하기 전까지는 언제나 '미검증'이다.
+        "classification_outcome": OUTCOME_UNVERIFIED,
         "provisional_group": None,
         "classification_basis": CLASSIFICATION_NONE,
         "provisional": True,

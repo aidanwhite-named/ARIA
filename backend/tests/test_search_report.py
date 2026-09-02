@@ -455,6 +455,37 @@ def _epo_section(*, status: str, cql: str = 'ta all "robot arm"', error: str = "
     }
 
 
+def test_the_scope_counts_what_we_hold_not_what_we_called() -> None:
+    """검색 레인이 받아 둔 응답을 재사용하면 호출 이름이 구성요소가 아니다.
+
+    호출 이름으로 세면 초록과 서지를 손에 들고 있는데도 "조회 범위 없음"으로
+    인쇄된다. 2026-09-02 실행에서 실제로 그렇게 나왔다.
+    """
+    manifest = _manifest([])
+    manifest["verification"] = {
+        "attempted": True,
+        "reason": "",
+        "counts": {
+            "targets": 1, "verified": 1, "fetch_failed": 0, "not_attempted": 0
+        },
+        "documents": [
+            {
+                "doc_number": "CN121509624A",
+                "calls": [
+                    # EPO 검색 레인에서 옮겨 온 응답. 이름이 구성요소가 아니다.
+                    {"constituent": "(epo_search_lane)", "error": "", "reused": True},
+                    {"constituent": "claims", "error": "HTTP 404"},
+                ],
+                "fields": ["abstract:en", "title", "applicants", "ipc"],
+            }
+        ],
+    }
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "조회 범위 biblio, abstract" in head
+    assert "조회 범위 기록 없음" not in head
+
+
 def _verification_section(*, verified: int):
     """공식 문헌조회 기록. 조회에 성공한 건수만 바꿔 끼운다."""
     return {
@@ -474,6 +505,9 @@ def _verification_section(*, verified: int):
                     {"constituent": "abstract", "error": ""},
                     {"constituent": "claims", "error": "OPS 404"},
                 ],
+                # 조회 범위는 실제로 손에 든 필드로 판정한다. claims 는 404 라
+                # 여기 없다.
+                "fields": ["abstract:en", "title", "applicants", "ipc"],
             }
         ]
         if verified
@@ -503,7 +537,7 @@ def test_a_failed_epo_search_is_not_read_as_success(monkeypatch) -> None:
     assert "biblio, abstract" in head
     assert "claims" not in head.split("EPO 공식 문헌조회")[1].split("|")[2]
     # 웹이 살아 있으므로 전체는 부분 성공이다.
-    assert "**전체: 부분 성공**" in report
+    assert "**전체 실행 상태: 부분 성공**" in report
 
 
 def test_a_successful_epo_search_says_so() -> None:
@@ -514,7 +548,7 @@ def test_a_successful_epo_search_says_so() -> None:
 
     head = report.split("## 요약", 1)[0]
     assert "| EPO 독립 검색 | 성공 |" in head
-    assert "**전체: 성공**" in report
+    assert "**전체 실행 상태: 성공**" in report
 
 
 def test_the_actual_cql_and_the_format_conversion_are_shown() -> None:

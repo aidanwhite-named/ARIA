@@ -1006,3 +1006,20 @@ def test_a_stored_ok_status_does_not_hide_a_failed_termination() -> None:
         "termination_reason": epo_agent.TERM_ROUND_LIMIT,
     }
     assert search_manifest.epo_lane_failed(healthy) is False
+
+
+def test_channel_candidates_carry_the_classification_outcome() -> None:
+    """EPO·논문 채널이 만든 후보에도 같은 칸이 채워진다.
+
+    비어 있으면 저장된 기록에서 '아직 검증하지 않았다'와 '값이 없다'가
+    구분되지 않는다. 2026-09-02 실행에서 EPO 후보 하나가 그랬다.
+    """
+    epo = search_manifest.epo_candidate(
+        index=1, doc_number="CN120416441A", title="테스트"
+    )
+    assert epo["classification_outcome"] == search_manifest.OUTCOME_UNVERIFIED
+    assert epo["group"] is None
+    # 읽기 경로도 같은 값을 돌려준다.
+    assert search_manifest.classification_view(epo)["outcome"] == (
+        search_manifest.OUTCOME_UNVERIFIED
+    )

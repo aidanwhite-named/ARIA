@@ -824,6 +824,22 @@ _CONSTITUENT_FIELD_BASES = {
 }
 
 
+def constituents_present(field_names) -> list[str]:
+    """이 문헌에서 실제로 확보한 구성요소. 보고서가 조회 범위로 인쇄한다.
+
+    호출 이름으로 세지 않는다. EPO 검색 레인이 받아 둔 응답을 재사용하면 그
+    호출의 이름은 "(epo_search_lane)" 이라 claims/abstract/biblio 어디에도
+    걸리지 않는다 — 실제로는 초록과 서지를 손에 들고 있는데 기록에는 "조회 범위
+    없음"으로 남는다. 무엇을 불렀는가가 아니라 무엇을 가졌는가로 센다.
+    """
+    texts = {str(name): "" for name in (field_names or ())}
+    return [
+        name
+        for name in ("biblio", "abstract", "claims")
+        if _has_constituent(texts, name)
+    ]
+
+
 def _has_constituent(texts: dict, constituent: str) -> bool:
     bases = _CONSTITUENT_FIELD_BASES.get(constituent, (constituent,))
     return any(str(name).partition(":")[0] in bases for name in texts)

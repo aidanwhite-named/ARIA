@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from html import unescape
 
-from . import search_manifest
+from . import search_manifest, search_verification
 from .search_manifest import (
     CLASSIFICATION_LEGACY,
     CLASSIFICATION_NONE,
@@ -753,15 +753,14 @@ def _channel_status_section(manifest: dict) -> list[str]:
     documents = [
         item for item in (verification.get("documents") or []) if isinstance(item, dict)
     ]
-    scopes: list[str] = []
-    for name in ("biblio", "abstract", "claims"):
-        if any(
-            call.get("constituent") == name and not call.get("error")
-            for document in documents
-            for call in (document.get("calls") or [])
-            if isinstance(call, dict)
-        ):
-            scopes.append(name)
+    # 무엇을 불렀는가가 아니라 무엇을 **가졌는가**로 센다. 검색 레인이 받아 둔
+    # 응답을 재사용하면 그 호출의 이름은 구성요소가 아니다.
+    held: set[str] = set()
+    for document in documents:
+        held.update(
+            search_verification.constituents_present(document.get("fields") or [])
+        )
+    scopes = [name for name in ("biblio", "abstract", "claims") if name in held]
     targets = int(counts.get("targets") or 0)
     verified_docs = int(counts.get("verified") or 0)
     if not verification.get("attempted"):
@@ -837,7 +836,7 @@ def _channel_status_section(manifest: dict) -> list[str]:
     ]
     for name, state, detail in rows:
         lines.append(f"| {name} | {state} | {_cell(detail)} |")
-    lines += ["", f"**전체: {overall}**", ""]
+    lines += ["", f"**전체 실행 상태: {overall}**", ""]
 
     if epo_queries:
         lines += ["실제로 실행된 EPO 검색식", ""]
