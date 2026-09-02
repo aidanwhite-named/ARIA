@@ -554,9 +554,9 @@ def _isolated_section(items: list[dict]) -> list[str]:
     그것이 애초에 막으려던 실패다.
     """
     lines = [
-        "## 미확인 검색 단서",
+        "## 미검증 참고 후보",
         "",
-        "아래 후보는 아직 그룹 분류와 구성 대응표에 들어가지 못했습니다. 웹 후보는 "
+        "아래 후보는 아직 공식 검증을 받지 못했습니다. 웹 후보는 "
         "문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어서이고, "
         "EPO 독립 검색과 ARIA 서지 검색 후보는 공식 응답에 구성 대응이 아직 "
         "대조되지 않아서입니다. "
@@ -721,8 +721,8 @@ def _channel_status_section(manifest: dict) -> list[str]:
         epo_state = _STATUS_SKIPPED
         epo_detail = str(epo.get("reason") or "실행된 레인이 없습니다.")
     else:
-        ok_lanes = [lane for lane in lanes if lane.get("status") == "ok"]
-        failed = [lane for lane in lanes if lane.get("status") not in ("ok",)]
+        failed = [lane for lane in lanes if search_manifest.epo_lane_failed(lane)]
+        ok_lanes = [lane for lane in lanes if lane not in failed]
         epo_candidates = sum(len(lane.get("candidates") or []) for lane in lanes)
         if not ok_lanes:
             epo_state = _STATUS_FAILED

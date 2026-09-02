@@ -2150,6 +2150,37 @@ def web_lane_record(record: dict) -> dict:
 # 선택적으로 제거한다.
 CHANNEL_MATCH_BASIS = "country_scoped_publication_number_variants"
 
+#: 이 사유로 끝난 EPO 레인은 성공이 아니다. **읽기 쪽 어휘**다.
+#:
+#: 저장된 status 를 그대로 믿지 않는다. 2026-09-01 실행이 그랬듯이 레인이
+#: provider_error 로 끝났는데 status 에 "ok" 가 적힌 기록이 이미 디스크에 있다.
+#: 그 기록을 열 때도 실패는 실패로 보여야 하므로, 읽는 쪽은 종료 사유를 함께
+#: 본다. 저장된 값은 고치지 않는다.
+#:
+#: epo_agent.FAILED_TERMINATIONS 와 같은 집합이어야 한다(순환 import 를 피해
+#: 문자열로 적는다). 두 곳이 어긋나면 test_epo_discovery 가 잡는다.
+FAILED_EPO_TERMINATIONS = frozenset(
+    {
+        "timeout",
+        "throttled",
+        "quota_exceeded",
+        "authentication_failed",
+        "provider_error",
+        "invalid_response_limit",
+        "unauthorized_tool_use",
+    }
+)
+
+
+def epo_lane_failed(lane: dict) -> bool:
+    """이 레인은 실패했는가. 저장된 status 와 종료 사유를 함께 본다."""
+    if not isinstance(lane, dict):
+        return True
+    if lane.get("status") not in ("ok",):
+        return True
+    return lane.get("termination_reason") in FAILED_EPO_TERMINATIONS
+
+
 _COMPARABLE_EPO_TERMINATIONS = frozenset(
     {
         "llm_finished",

@@ -976,3 +976,33 @@ def test_a_rejected_selection_turn_still_records_what_it_spent(
 
     assert result.selection["status"] == "parse_error"
     assert result.usage["selection_turn"]["provider_usage"] == {"input_tokens": 99}
+
+
+def test_the_read_side_failure_vocabulary_matches_the_write_side() -> None:
+    """레인 실패 판정을 두 곳에서 하면 화면과 보고서가 같은 실행을 다르게 읽는다.
+
+    search_manifest 는 순환 import 를 피해 문자열로 적고, epo_agent 는 상수로
+    적는다. 두 집합이 어긋나면 실패한 레인이 한쪽에서만 성공으로 보인다.
+    """
+    assert search_manifest.FAILED_EPO_TERMINATIONS == epo_agent.FAILED_TERMINATIONS
+
+
+def test_a_stored_ok_status_does_not_hide_a_failed_termination() -> None:
+    """이미 디스크에 있는 잘못된 status 를 그대로 믿지 않는다.
+
+    2026-09-01 실행이 그랬다 — 레인이 provider_error 로 끝났는데 status 에
+    "ok" 가 적혔다. 그 기록을 열 때도 실패는 실패로 보여야 한다.
+    """
+    legacy = {
+        "id": "epo:claim_only",
+        "status": "ok",
+        "termination_reason": epo_agent.TERM_PROVIDER_ERROR,
+    }
+    assert search_manifest.epo_lane_failed(legacy) is True
+
+    healthy = {
+        "id": "epo:claim_only",
+        "status": "ok",
+        "termination_reason": epo_agent.TERM_ROUND_LIMIT,
+    }
+    assert search_manifest.epo_lane_failed(healthy) is False
