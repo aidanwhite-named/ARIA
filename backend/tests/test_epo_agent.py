@@ -732,14 +732,20 @@ def test_search_default_result_count_matches_the_ops_ceiling() -> None:
     assert parsed.actions[0].max_results == epo_client.MAX_RESULTS_PER_QUERY
 
 
-def test_default_search_requests_the_full_range(store, tmp_path) -> None:
-    """실제 요청 URL 에도 그 값이 나가야 한다."""
+def test_the_configured_result_cap_reaches_the_request_url(store, tmp_path) -> None:
+    """ARIA 가 정한 상한이 실제 요청 URL 의 Range 로 나가야 한다.
+
+    모델이 OPS 상한(20건)을 적어도 ARIA 의 상한까지만 받는다. 이 줄이 없으면
+    설정을 줄여도 요청은 그대로 나가고, 줄인 것은 기록뿐이 된다.
+    """
+    budget = epo_agent.EpoAgentBudget()
     provider = FakeProvider(say(search_action(), FINISH))
     transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
     run(make_agent(provider, transport, store, tmp_path))
 
     search = [row for row in transport.requests if "search" in row["url"]][0]
-    assert f"Range=1-{epo_client.MAX_RESULTS_PER_QUERY}" in search["url"]
+    assert f"Range=1-{budget.max_results_per_query}" in search["url"]
+    assert budget.max_results_per_query <= epo_client.MAX_RESULTS_PER_QUERY
 
 
 @pytest.mark.parametrize("depth", [5_000, 20_000])
@@ -818,3 +824,24 @@ def test_single_action_without_wrapper_executes_in_agent_loop(store, tmp_path) -
     assert result.search_calls == 1
     assert result.invalid_responses == 0
     assert len(result.candidates) > 0
+
+
+def test_budget_defaults_match_the_settings_defaults() -> None:
+    """설정이 누락된 경로에서도 옛 상한(20)으로 돌아가지 않는다.
+
+    러너는 설정에서 읽지만 EpoAgentBudget 의 기본값은 설정을 주지 않은
+    경로(단일 레인 실행·테스트)에서 쓰인다. 두 수가 어긋나면 그 경로만 조용히
+    옛 상한으로 돌고, 화면에서 값을 줄여도 거기서는 줄지 않는다.
+    """
+    from app import config
+
+    budget = epo_agent.EpoAgentBudget()
+    assert budget.max_results_per_query == int(
+        config.DEFAULTS["epo_max_results_per_query"]
+    )
+    assert budget.max_results_per_query != 20, "옛 기본값이 남아 있습니다."
+    assert budget.max_search_calls == int(config.DEFAULTS["epo_max_search_calls"])
+    assert budget.max_detail_fetches == int(
+        config.DEFAULTS["epo_max_detail_fetches"]
+    )
+    assert budget.shortlist_limit == int(config.DEFAULTS["epo_shortlist_limit"])

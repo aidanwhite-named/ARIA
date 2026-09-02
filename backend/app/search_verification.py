@@ -387,7 +387,10 @@ def _expected_detail(reason: str, expected, missing: list) -> str:
 def targets(
     reported: dict | None,
     *,
-    limit: int = 8,
+    # 설정 기본값(config.DEFAULTS["epo_verification_targets"])과 같은 수여야
+    # 한다. 러너는 설정에서 읽지만 이 값은 설정을 주지 않은 경로에서 쓰인다.
+    # test_search_verification 이 두 값을 대조한다.
+    limit: int = 4,
     dropped: list | None = None,
     reuse: dict | None = None,
     order: list | None = None,
@@ -996,15 +999,6 @@ def fetch_official(
     spent = 0
     budget = max(0, int(max_fetches or 0))
     reused = dict(prefetched or {})
-    # OPS 는 관청마다 전문(청구항) 보유 범위가 다르다. 어떤 국가에서 청구항
-    # 조회가 한 번 실패하면 이 실행에서는 같은 국가에 다시 시도하지 않는다.
-    # 후보 4건이 같은 관청이면 실패가 4번 반복되고, 그 4번은 예산에서 그대로
-    # 빠져나가 정작 받을 수 있는 초록·서지를 못 받게 만든다.
-    #
-    # 국가 목록을 코드에 박지 않는다. 어느 관청에 전문이 있는지는 우리가
-    # 추측할 것이 아니라 관측할 것이다 — 잘못 박으면 받을 수 있는 청구항을
-    # 조용히 안 받게 되고, 그 실패는 "OPS 가 원래 그렇다"로 읽힌다.
-    claims_unavailable: set[str] = set()
     for target in found:
         # EPO 검색 레인이 이미 받아 둔 자료가 있으면 그것으로 시작한다. 없는
         # 구성요소만 아래에서 더 받는다 — 이미 손에 있는 바이트를 다시 받는
@@ -1043,15 +1037,12 @@ def fetch_official(
             bundle.status = STATUS_NOT_ATTEMPTED
             bundle.reason = f"공식 문헌 조회 상한({budget}건)에 도달했습니다."
             continue
+        # 문헌마다 한 번씩 시도한다. 한 문헌의 claims 실패를 그 관청 전체의
+        # 미지원으로 넓히지 않는다 — 일시적 오류와 문헌별 결측을 국가 단위
+        # 결론으로 바꾸면, 실제로는 받을 수 있는 청구항을 조용히 안 받게 된다.
+        # 대상 4건 × 구성요소 3개 = 12회로 예산은 이미 맞는다.
         skipped: list[str] = []
-        country = _country_of(target.doc_key)
         for constituent in wanted:
-            if constituent == "claims" and country in claims_unavailable:
-                errors.append(
-                    f"claims: {country} 문헌은 앞선 조회에서 OPS 가 청구항을 "
-                    "주지 않아 다시 시도하지 않았습니다."
-                )
-                continue
             if spent >= budget:
                 skipped.append(constituent)
                 continue
@@ -1074,8 +1065,6 @@ def fetch_official(
                     }
                 )
                 errors.append(f"{constituent}: {_compact_fetch_error(exc)}")
-                if constituent == "claims" and country:
-                    claims_unavailable.add(country)
                 continue
             bundle.calls.append(
                 {
@@ -1121,12 +1110,6 @@ def fetch_official(
             bundle.reason = " / ".join(errors) or "공식 응답에서 본문을 얻지 못했습니다."
         bundle.fetched_at = bundle.fetched_at or _utcnow_iso()
     return bundles
-
-
-def _country_of(doc_key: str) -> str:
-    """문헌 키에서 국가코드를 뽑는다. ``EP.1000000.A1`` -> ``EP``."""
-    head = str(doc_key or "").split(".")[0].strip().upper()
-    return head[:2] if len(head) >= 2 and head[:2].isalpha() else ""
 
 
 def _pick_record(response, doc_key: str):

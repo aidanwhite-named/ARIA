@@ -680,6 +680,31 @@ def _channel_status_section(manifest: dict) -> list[str]:
         web_error or f"검색어 {len(queries)}개 · 후보 {web_candidates}건",
     ))
 
+    # --- 웹페이지 확인 ----------------------------------------------------
+    #
+    # 검색과 열람은 다른 일이다. 검색어가 나갔다고 문헌 본문을 본 것이 아니고,
+    # 403·유료 장벽으로 한 건도 못 열어도 "웹 검색 성공"으로 보이면 후보의
+    # 근거 등급이 왜 낮은지 설명되지 않는다.
+    attempted_pages = list(observed.get("attempted_fetch_urls") or [])
+    opened_pages = list(observed.get("succeeded_fetch_urls") or [])
+    if not attempted_pages:
+        page_state = _STATUS_SKIPPED
+        page_detail = "페이지를 연 기록이 없습니다."
+    elif not opened_pages:
+        page_state = _STATUS_FAILED
+        page_detail = f"시도 {len(attempted_pages)}건 · 본문 확인 0건"
+    else:
+        page_state = (
+            _STATUS_OK
+            if len(opened_pages) >= len(attempted_pages)
+            else _STATUS_PARTIAL
+        )
+        page_detail = (
+            f"시도 {len(attempted_pages)}건 · 본문 확인 {len(opened_pages)}건"
+        )
+    states.append(page_state)
+    rows.append(("웹페이지 확인", page_state, page_detail))
+
     # --- EPO 독립 검색 ----------------------------------------------------
     epo = manifest.get("epo") or {}
     lanes = [lane for lane in (epo.get("lanes") or []) if isinstance(lane, dict)]
@@ -755,13 +780,44 @@ def _channel_status_section(manifest: dict) -> list[str]:
     rows.append(("EPO 공식 문헌조회", fetch_state, fetch_detail))
 
     # --- 논문 전용 API ----------------------------------------------------
+    #
+    # 켜져 있다는 것과 질의가 나갔다는 것, 질의가 성공했다는 것은 서로 다른
+    # 사실이다. enabled 만 보고 '정상'으로 적으면 서지 DB 가 전부 오류를
+    # 돌려준 실행도 성공으로 보인다.
     literature = manifest.get("literature") or {}
-    if literature.get("enabled"):
-        paper_state = _STATUS_OK
-        paper_detail = f"후보 {len(literature.get('candidates') or [])}건"
-    else:
+    paper_queries = [
+        row for row in (literature.get("queries") or []) if isinstance(row, dict)
+    ]
+    failed_queries = [row for row in paper_queries if row.get("error")]
+    if not literature.get("enabled"):
         paper_state = _STATUS_SKIPPED
         paper_detail = str(literature.get("reason") or "꺼져 있습니다.")
+    elif not paper_queries:
+        paper_state = _STATUS_SKIPPED
+        paper_detail = str(literature.get("reason") or "질의가 나가지 않았습니다.")
+    else:
+        found = sum(int(row.get("found") or 0) for row in paper_queries)
+        errors = " / ".join(
+            f"{_cell(str(row.get('query') or '질의'))}: {_cell(str(row.get('error')))}"
+            for row in failed_queries[:3]
+        )
+        if len(failed_queries) == len(paper_queries):
+            paper_state = _STATUS_FAILED
+            paper_detail = f"질의 {len(paper_queries)}개 전부 실패 · {errors}"
+        elif failed_queries:
+            paper_state = _STATUS_PARTIAL
+            paper_detail = (
+                f"질의 {len(paper_queries)}개 중 {len(failed_queries)}개 실패 · "
+                f"결과 {found}건 · 후보 "
+                f"{len(literature.get('candidates') or [])}건 · {errors}"
+            )
+        else:
+            paper_state = _STATUS_OK
+            paper_detail = (
+                f"질의 {len(paper_queries)}개 · 결과 {found}건 · 후보 "
+                f"{len(literature.get('candidates') or [])}건"
+            )
+    states.append(paper_state)
     rows.append(("논문 전용 API 검색", paper_state, paper_detail))
 
     # --- 전체 -------------------------------------------------------------

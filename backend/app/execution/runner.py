@@ -31,7 +31,7 @@ from .. import (
     search_verification,
     settings_service,
 )
-from ..config import PATHS
+from ..config import DEFAULTS as SETTING_DEFAULTS, PATHS
 from ..db import session_scope
 from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus, RetrievalMode
 from ..evaluation.evaluator import Verdict, evaluate
@@ -132,6 +132,16 @@ def _positive(value, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return number if number > 0 else fallback
+
+
+def _setting(values: dict, key: str) -> int:
+    """설정값 하나. 비어 있으면 **설정 기본값**으로 돌아간다.
+
+    fallback 숫자를 호출부에 적지 않는 이유는 하나다. 코드에 박은 숫자와
+    config.DEFAULTS 가 어긋나면, 설정이 누락된 경로에서만 옛 숫자가 살아난다.
+    그 경로는 화면에서 값을 줄여도 줄지 않고, 아무도 그 사실을 모른다.
+    """
+    return _positive(values.get(key), int(SETTING_DEFAULTS[key]))
 
 
 def _utcnow() -> datetime:
@@ -511,12 +521,12 @@ class JobRunner:
         # 채널 예산은 **작업당**이다(명세: "작업당 OPS 검색 요청 최대 6회",
         # "EPO 채널 전체 제한시간 180초"). 레인마다 만들면 레인 수만큼 예산이
         # 늘어난다.
+        # fallback 숫자를 여기 적지 않는다. 설정이 누락된 경로에서 코드에 박힌
+        # 옛 숫자로 돌아가면, 화면에서 줄인 값이 그 경로에서만 조용히 무시된다.
         channel = epo_agent.ChannelBudget(
-            max_search_calls=_positive(values.get("epo_max_search_calls"), 6),
-            max_detail_fetches=_positive(values.get("epo_max_detail_fetches"), 12),
-            deadline_seconds=float(
-                _positive(values.get("epo_channel_timeout_seconds"), 180)
-            ),
+            max_search_calls=_setting(values, "epo_max_search_calls"),
+            max_detail_fetches=_setting(values, "epo_max_detail_fetches"),
+            deadline_seconds=float(_setting(values, "epo_channel_timeout_seconds")),
         )
         channel.start()
 
@@ -525,10 +535,8 @@ class JobRunner:
         lane_budget = epo_agent.EpoAgentBudget(
             max_search_calls=channel.max_search_calls,
             max_detail_fetches=channel.max_detail_fetches,
-            max_results_per_query=_positive(
-                values.get("epo_max_results_per_query"), 20
-            ),
-            shortlist_limit=_positive(values.get("epo_shortlist_limit"), 5),
+            max_results_per_query=_setting(values, "epo_max_results_per_query"),
+            shortlist_limit=_setting(values, "epo_shortlist_limit"),
         )
 
         origins = [search_manifest.ORIGIN_CLAIM_ONLY]
@@ -877,18 +885,16 @@ class JobRunner:
             ))
 
         if fetch_budget is None:
-            fetch_budget = _positive(values.get("epo_max_detail_fetches"), 12)
+            fetch_budget = _setting(values, "epo_max_detail_fetches")
         fetch_budget = max(0, int(fetch_budget))
         # 검증 대상 수와 조회 예산은 다른 축이다. 후보 하나에 청구항·초록·서지
         # 세 번을 부를 수 있으므로, 조회 예산만으로 "몇 명을 검증할 것인가"를
         # 정하면 상한이 실행마다 달라진다.
-        target_limit = _positive(values.get("epo_verification_targets"), 8)
+        target_limit = _setting(values, "epo_verification_targets")
         limits = {
             "verification_targets": target_limit,
             "detail_fetches": fetch_budget,
-            "configured_detail_fetches": _positive(
-                values.get("epo_max_detail_fetches"), 12
-            ),
+            "configured_detail_fetches": _setting(values, "epo_max_detail_fetches"),
         }
         # EPO 검색 레인이 이미 받아 둔 자료. 있으면 그것으로 시작하고 모자란
         # 구성요소만 더 받는다. 무엇이 모자란지는 여기서 세어 둔다 — 묶음이
@@ -2215,7 +2221,8 @@ class JobRunner:
                 # 열었다는 관측을 문장 대조로 한 단계 올리는 경로다. 앞선 EPO 검색
                 # 레인이 사용한 상세 조회량을 빼서 작업 전체 상한을 공유한다.
                 configured_fetches = _positive(
-                    values.get("epo_max_detail_fetches"), 12
+                    values.get("epo_max_detail_fetches"),
+                    int(SETTING_DEFAULTS["epo_max_detail_fetches"]),
                 )
                 epo_fetches = int(
                     ((epo_section or {}).get("usage") or {}).get(

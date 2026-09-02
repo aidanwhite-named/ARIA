@@ -901,3 +901,55 @@ def test_the_selection_turn_can_add_a_candidate_the_search_rounds_missed(
     assert lane["shortlist"][0]["turn"] == "selection"
     numbers = {item["doc_number"] for item in manifest["reported"]["candidates"]}
     assert "EP1000000A1" in numbers
+
+
+# ------------------------------------------- 설정이 누락된 경로의 기본값
+
+
+def test_missing_settings_fall_back_to_the_settings_defaults() -> None:
+    """설정이 비어 있어도 코드에 박힌 옛 숫자로 돌아가지 않는다.
+
+    fallback 을 호출부마다 적어 두면 config.DEFAULTS 를 고쳐도 그 경로만
+    옛 값으로 돈다. 화면에서 줄인 값이 거기서는 줄지 않고, 아무도 모른다.
+    """
+    from app import config
+    from app.execution import runner
+
+    for key in (
+        "epo_max_results_per_query",
+        "epo_verification_targets",
+        "epo_max_detail_fetches",
+        "epo_max_search_calls",
+        "epo_shortlist_limit",
+        "epo_channel_timeout_seconds",
+    ):
+        expected = int(config.DEFAULTS[key])
+        # 값이 없을 때, 0 일 때, 읽을 수 없을 때 모두 같은 기본값이어야 한다.
+        assert runner._setting({}, key) == expected, key
+        assert runner._setting({key: 0}, key) == expected, key
+        assert runner._setting({key: "이상한 값"}, key) == expected, key
+        # 설정이 있으면 그 값을 쓴다.
+        assert runner._setting({key: 3}, key) == 3, key
+
+    assert runner._setting({}, "epo_max_results_per_query") == 8
+    assert runner._setting({}, "epo_verification_targets") == 4
+
+
+def test_no_epo_budget_fallback_number_is_hardcoded_at_the_call_site() -> None:
+    """예산 fallback 숫자를 호출부에 다시 적지 않는다.
+
+    숫자가 두 곳에 있으면 언젠가 어긋나고, 어긋난 쪽이 조용히 이긴다.
+    """
+    import inspect
+
+    from app.execution import runner
+
+    source = inspect.getsource(runner)
+    for key in (
+        "epo_max_results_per_query",
+        "epo_verification_targets",
+        "epo_max_search_calls",
+        "epo_shortlist_limit",
+        "epo_channel_timeout_seconds",
+    ):
+        assert f'_positive(values.get("{key}")' not in source, key

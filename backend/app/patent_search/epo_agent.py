@@ -170,9 +170,14 @@ class EpoAgentBudget:
     max_search_calls_per_round: int = 3
     max_detail_fetches: int = 12
     # 질의 하나가 받아 오는 결과 건수의 상한. OPS 자체 상한
-    # (epo_client.MAX_RESULTS_PER_QUERY) 보다 크게 잡아도 그쪽이 먼저 막는다.
+    # (epo_client.MAX_RESULTS_PER_QUERY = 20) 보다 크게 잡아도 그쪽이 먼저 막는다.
     # 여기 값을 낮추면 모델이 더 큰 수를 적어도 ARIA 가 깎고 그 사실을 남긴다.
-    max_results_per_query: int = epo_client.MAX_RESULTS_PER_QUERY
+    #
+    # **설정 기본값(config.DEFAULTS["epo_max_results_per_query"])과 같은 수여야
+    # 한다.** 러너는 설정에서 읽지만 이 값은 설정을 주지 않은 경로(단일 레인
+    # 실행·테스트)에서 쓰인다. 두 수가 어긋나면 그 경로만 조용히 옛 상한으로
+    # 돈다. test_epo_agent 가 두 값을 대조한다.
+    max_results_per_query: int = 8
     # 최종 대응표로 넘길 유망 후보 수의 상한. 검색 결과 상한과 다른 축이다 —
     # 20건을 받아 보는 것과 20건을 공식 검증까지 끌고 가는 것은 비용이 다르다.
     shortlist_limit: int = 5

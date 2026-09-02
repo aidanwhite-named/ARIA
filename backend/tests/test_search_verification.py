@@ -939,75 +939,19 @@ def test_the_verification_target_cap_matches_the_detail_fetch_budget() -> None:
     )
 
 
-class _ClaimsUnavailableBackend:
-    """청구항만 실패하는 대역. 어느 구성요소를 몇 번 불렀는지 센다."""
+def test_the_verification_target_default_matches_the_setting_default() -> None:
+    """설정이 누락된 경로에서도 옛 상한(8)으로 돌아가지 않는다.
 
-    def __init__(self) -> None:
-        self.calls: list = []
-
-    def fetch_document(self, doc_key, constituent, *, agent_budget=True):
-        self.calls.append((doc_key, constituent))
-        if constituent == "claims":
-            raise PatentSearchError("OPS 가 이 관청의 전문을 제공하지 않습니다.")
-        return SimpleNamespace(
-            http_status=200,
-            raw_artifact_id="b" * 64,
-            request_url="https://ops.example.test/doc",
-            fetched_at="2026-09-02T00:00:00+00:00",
-            records=[
-                SimpleNamespace(
-                    doc_number=doc_key.replace(".", ""),
-                    title="Official title",
-                    source_url="https://example.test/patent",
-                    fields={
-                        "abstract:en": SimpleNamespace(
-                            value="an official abstract sentence",
-                            evidence=SimpleNamespace(
-                                artifact_id="b" * 64,
-                                field_path="documents/x/abstract",
-                                profile_id="epo_ops_exchange_xml_v1",
-                            ),
-                        )
-                    },
-                )
-            ],
-        )
-
-
-def test_claims_are_not_retried_for_a_country_that_already_refused() -> None:
-    """같은 관청에서 청구항이 한 번 실패하면 이 실행에서는 다시 부르지 않는다.
-
-    후보 넷이 같은 관청이면 실패가 넷으로 늘고, 그 넷은 예산에서 그대로
-    빠져나가 정작 받을 수 있는 초록·서지를 못 받게 만든다.
+    러너는 설정에서 읽지만 targets() 의 기본값은 설정을 주지 않은 경로에서
+    쓰인다. 두 수가 어긋나면 그 경로만 조용히 옛 상한으로 돈다.
     """
-    backend = _ClaimsUnavailableBackend()
-    bundles = search_verification.fetch_official(
-        [_target("US1111111B2"), _target("US2222222B2")],
-        backend,
-        max_fetches=12,
-    )
+    import inspect
 
-    claims_calls = [row for row in backend.calls if row[1] == "claims"]
-    assert len(claims_calls) == 1, backend.calls
-    # 두 번째 후보의 초록·서지는 그대로 받았다. 청구항만 건너뛴다.
-    assert ("US.2222222.B2", "abstract") in backend.calls
-    assert ("US.2222222.B2", "biblio") in backend.calls
-    # 건너뛴 사실은 기록에 남는다. 조용히 넘기지 않는다.
-    second = bundles["US.2222222.B2"]
-    assert "다시 시도하지 않았습니다" in second.reason
+    from app import config
 
-
-def test_a_different_country_still_gets_its_claims_call() -> None:
-    """한 관청의 실패를 다른 관청으로 옮기지 않는다."""
-    backend = _ClaimsUnavailableBackend()
-    search_verification.fetch_official(
-        [_target("US1111111B2"), _target("EP1000000A1")],
-        backend,
-        max_fetches=12,
-    )
-
-    countries = {doc_key.split(".")[0] for doc_key, name in backend.calls if name == "claims"}
-    assert countries == {"US", "EP"}
+    default = inspect.signature(search_verification.targets).parameters["limit"].default
+    assert default == int(config.DEFAULTS["epo_verification_targets"])
+    assert default != 8, "옛 기본값이 남아 있습니다."
 
 
 def test_only_ab_candidates_get_a_detailed_mapping(monkeypatch) -> None:

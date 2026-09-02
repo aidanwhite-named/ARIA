@@ -604,3 +604,116 @@ def test_a_past_manifest_without_group_definitions_still_renders() -> None:
 
     report = search_report.render(manifest)
     assert "EP2000000A1" in report
+
+
+def test_page_checks_are_a_separate_row_from_the_web_search() -> None:
+    """검색어가 나간 것과 문헌 본문을 연 것은 다른 사실이다.
+
+    403·유료 장벽으로 한 건도 못 열어도 "웹 검색 성공"으로만 보이면, 후보의
+    근거 등급이 왜 낮은지 설명되지 않는다.
+    """
+    manifest = _manifest([])
+    manifest["observed"]["attempted_fetch_urls"] = [
+        "https://a.example/1",
+        "https://a.example/2",
+        "https://a.example/3",
+    ]
+    manifest["observed"]["succeeded_fetch_urls"] = ["https://a.example/1"]
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 웹페이지 확인 | 부분 성공 | 시도 3건 · 본문 확인 1건 |" in head
+
+
+def test_no_page_opened_is_a_failure_not_a_success() -> None:
+    manifest = _manifest([])
+    manifest["observed"]["attempted_fetch_urls"] = ["https://a.example/1"]
+    manifest["observed"]["succeeded_fetch_urls"] = []
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 웹페이지 확인 | 실패 | 시도 1건 · 본문 확인 0건 |" in head
+
+
+def test_no_page_attempt_is_recorded_as_not_run() -> None:
+    manifest = _manifest([])
+    manifest["observed"]["attempted_fetch_urls"] = []
+    manifest["observed"]["succeeded_fetch_urls"] = []
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 웹페이지 확인 | 미실행 |" in head
+
+
+def test_every_page_opened_is_a_success() -> None:
+    manifest = _manifest([])
+    manifest["observed"]["attempted_fetch_urls"] = ["https://a.example/1"]
+    manifest["observed"]["succeeded_fetch_urls"] = ["https://a.example/1"]
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 웹페이지 확인 | 성공 | 시도 1건 · 본문 확인 1건 |" in head
+
+
+def _literature(*, enabled: bool, queries: list, candidates: int = 0, reason=""):
+    return {
+        "enabled": enabled,
+        "backend_id": search_manifest.LITERATURE_BACKEND_ID,
+        "reason": reason,
+        "queries": queries,
+        "candidates": [{"doi": f"10.1/{i}"} for i in range(candidates)],
+        "discovered": [],
+        "usage": {},
+        "limits": {},
+    }
+
+
+def test_literature_errors_are_not_read_as_success() -> None:
+    """켜져 있다는 것과 질의가 성공했다는 것은 다른 사실이다."""
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=True,
+        queries=[
+            {"query": "robot arm", "found": 0, "error": "HTTPError: 500"},
+            {"query": "force sensor", "found": 0, "error": "TimeoutError: "},
+        ],
+    )
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 전용 API 검색 | 실패 |" in head
+    assert "질의 2개 전부 실패" in head
+    assert "HTTPError: 500" in head
+
+
+def test_a_partly_failing_literature_channel_says_so() -> None:
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=True,
+        queries=[
+            {"query": "robot arm", "found": 4, "error": ""},
+            {"query": "force sensor", "found": 0, "error": "HTTPError: 500"},
+        ],
+        candidates=2,
+    )
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 전용 API 검색 | 부분 성공 |" in head
+    assert "질의 2개 중 1개 실패" in head
+
+
+def test_a_clean_literature_run_reports_counts() -> None:
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=True,
+        queries=[{"query": "robot arm", "found": 4, "error": ""}],
+        candidates=2,
+    )
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 전용 API 검색 | 성공 | 질의 1개 · 결과 4건 · 후보 2건 |" in head
+
+
+def test_a_disabled_literature_channel_is_not_run_not_failed() -> None:
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=False, queries=[], reason="설정에서 꺼져 있습니다."
+    )
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 전용 API 검색 | 미실행 | 설정에서 꺼져 있습니다. |" in head
