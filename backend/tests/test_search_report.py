@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from app import search_manifest, search_report
+from app import search_manifest, search_report, search_verification
 
 FABRICATED = "상기 제1 센서는 제2 센서와 직렬로 연결되며"
 # 후보 전용 페이지이고 주소 안에 후보의 문헌번호가 들어 있다. 둘 중 하나라도
@@ -21,7 +21,6 @@ def _manifest(candidates, notes=None, observed=None, spec=None, expansions=None)
     return search_manifest.build(
         claim_text="청구항 1. 테스트",
         prompt_id="search_prompt.md",
-        prompt_version=1,
         prompt_sha256="a" * 64,
         claim_boundary_neutralized=False,
         spec_document=spec,
@@ -144,10 +143,10 @@ def test_report_keeps_the_analysis_while_dropping_the_quote() -> None:
     assert "강한 대응" in report
 
 
-def test_report_marks_unverified_candidates_as_provisional() -> None:
+def test_report_marks_unverified_original_excerpt_separately() -> None:
     reported, notes = _parsed(_hostile_candidate())
     report = search_report.render(_manifest(reported["candidates"], notes))
-    assert "잠정 분류" in report
+    assert "원문 직접 발췌 상태: 검증되지 않았습니다" in report
     assert "원문 대조 안 됨" in report
 
 
@@ -176,20 +175,60 @@ def test_report_distinguishes_attempted_from_succeeded_fetches() -> None:
     assert "성공" in report
 
 
-def test_report_isolates_a_candidate_that_was_never_fetched() -> None:
-    """열람 기록이 없는 후보는 그룹과 대응표에서 빠지고 단서로만 남는다."""
+def test_report_shows_unfetched_candidate_as_provisional_group() -> None:
+    """열람 기록이 없어도 모델의 A/B/C 제안은 잠정 영역에서 보인다."""
     reported, notes = _parsed(
         _hostile_candidate(url="https://never-fetched.example.com/AB1234")
     )
     report = search_report.render(_manifest(reported["candidates"], notes))
-    assert "## 미확인 검색 단서" in report
-    assert "성공한 페이지 열람 기록이 없습니다" in report
-    # 그룹 제목 아래에는 아무것도 없다.
-    assert "전체 구조와 핵심 특징이 모두 강하게 유사" not in report
+    assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
+    assert "### 잠정 분류" in report
+    assert "### 정식 분류" not in report
     # 검증되지 않은 서지정보와 대응 서술은 인쇄하지 않는다.
     assert "테스트 특허" not in report
     assert "테스트 주식회사" not in report
     assert "센서 모듈 110" not in report
+
+
+def test_past_manifest_group_without_gate_is_not_rendered_as_formal() -> None:
+    """과거 JSON을 수정하지 않아도 읽기 시점에 안전하게 잠정으로 내린다."""
+    legacy_candidate = {
+        **_parsed(_hostile_candidate())[0]["candidates"][0],
+        "group": "A",
+    }
+    legacy_candidate.pop("group_eligible", None)
+    legacy_candidate.pop("provisional_group", None)
+    legacy_candidate.pop("classification_basis", None)
+    legacy_candidate["page_fetch_succeeded"] = False
+    legacy_candidate["identifier_url_matched"] = False
+    legacy_candidate["page_supported_rows"] = 0
+    manifest = _manifest([legacy_candidate])
+    manifest["version"] = 3
+
+    report = search_report.render(manifest)
+
+    assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
+    assert "### 잠정 분류" in report
+    assert "### 정식 분류" not in report
+    assert "과거 분류(검증 근거 미기록)" in report
+
+
+def test_group_title_appears_once_when_formal_and_provisional_coexist() -> None:
+    formal, _ = _parsed(_hostile_candidate(group="B"))
+    provisional, _ = _parsed(
+        _hostile_candidate(
+            group="B",
+            doc_number="CD5678",
+            url="https://never-fetched.example.com/patent/CD5678",
+        )
+    )
+    report = search_report.render(
+        _manifest([formal["candidates"][0], provisional["candidates"][0]])
+    )
+    title = "## B. 전체 구조는 다르지만 핵심 특징 또는 핵심 관계가 강하게 유사"
+    assert report.count(title) == 1
+    assert "### 정식 분류" in report
+    assert "### 잠정 분류" in report
 
 
 def test_pipes_and_newlines_cannot_break_the_evidence_table() -> None:
@@ -300,3 +339,71 @@ def test_expansion_table_cannot_be_broken_by_pipes() -> None:
     # 이스케이프된 파이프는 칸을 나누지 않는다.
     assert row.replace(chr(92) + "|", "").count("|") == 6
     assert "줄바꿈 포함" in row
+
+
+# ----------------------------------- 공식 대조로 대체된 1차 분류 (규칙 3·5·6)
+
+
+def test_report_separates_the_replaced_page_classification() -> None:
+    """공식 분류와 대체된 페이지 분류를 같은 위계로 인쇄하지 않는다."""
+    reported, _notes = _parsed(_hostile_candidate(group="A"))
+    candidate = reported["candidates"][0]
+    # apply_classification 이 승격 때 남기는 모양 그대로 둔다.
+    candidate.update(
+        {
+            "group": "C",
+            "provisional_group": None,
+            "group_eligible": True,
+            "classification_basis": search_manifest.CLASSIFICATION_OFFICIAL,
+            "evidence_status": search_manifest.EVIDENCE_OFFICIAL,
+            "official_supported_rows": 1,
+            "matched_feature_rows": 1,
+            "official_evidence": {"artifact_ids": ["b" * 64]},
+            search_verification.PAGE_CLASSIFICATION_FIELD: {
+                "group": "A",
+                "classification_basis": search_manifest.CLASSIFICATION_PAGE,
+                "mapping": candidate["mapping"],
+                "page_supported_rows": 1,
+                "evidence_status": search_manifest.EVIDENCE_REVIEWED,
+                "url": FETCHED_URL,
+            },
+        }
+    )
+
+    report = search_report.render(_manifest([candidate]))
+
+    # 이 후보의 분류는 공식 분류다.
+    assert "- 분류 근거: 공식 기록 대조가 있는 AI 분류" in report
+    # 대체된 1차 분류는 별도 줄에, 대체됐다는 사실과 함께 나온다.
+    assert "- 대체된 1차 분류: A" in report
+    assert "공식 대조 결과와 달라" in report
+
+
+def test_report_marks_an_agreeing_replaced_classification() -> None:
+    reported, _notes = _parsed(_hostile_candidate(group="B"))
+    candidate = reported["candidates"][0]
+    candidate.update(
+        {
+            "group": "B",
+            "provisional_group": None,
+            "group_eligible": True,
+            "classification_basis": search_manifest.CLASSIFICATION_OFFICIAL,
+            "evidence_status": search_manifest.EVIDENCE_OFFICIAL,
+            "official_supported_rows": 2,
+            "matched_feature_rows": 2,
+            "official_evidence": {"artifact_ids": ["c" * 64]},
+            search_verification.PAGE_CLASSIFICATION_FIELD: {
+                "group": "B",
+                "classification_basis": search_manifest.CLASSIFICATION_PAGE,
+                "mapping": [],
+                "page_supported_rows": 1,
+                "evidence_status": search_manifest.EVIDENCE_REVIEWED,
+                "url": FETCHED_URL,
+            },
+        }
+    )
+
+    report = search_report.render(_manifest([candidate]))
+
+    assert "- 대체된 1차 분류: B" in report
+    assert "공식 대조 결과와 같음" in report

@@ -156,6 +156,12 @@ class PatentSearchResponse:
     total_found: int
     raw_artifact_id: str = ""
     fetched_at: str = ""
+    # 이 응답을 만든 HTTP 호출의 관측값. 0 은 "관측하지 못했다"이며 성공이
+    # 아니다. 후보 검증 기록이 "무엇을 근거로 공식 문헌이라고 하는가"에
+    # 답하려면 아티팩트만으로는 부족하다 — 어느 주소에서 어떤 상태로 받았는지가
+    # 함께 있어야 나중에 같은 조회를 재현할 수 있다.
+    http_status: int = 0
+    request_url: str = ""
     # 이 검색에서 ARIA 가 사용자에게 알려야 하는 사실. 지금은 "검색어가 길어
     # 뒤쪽 단어를 뺐다" 같은 것이다. 조용히 바뀐 검색을 기록 없이 넘기지
     # 않으려고 둔 자리다.

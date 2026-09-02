@@ -21,8 +21,9 @@ OPS 는 요청 수가 아니라 **데이터량**으로 과금된다. 그래서 "
                   확정되어 있지 않다. 그래서 기본은 **관측·표시만** 하고,
                   사용자가 상한을 넣으면 그때부터 차단한다. 모르는 숫자를
                   기본값으로 박아 두면 "왜 멈췄지"에 답할 수 없다.
-    스로틀링 상태  OPS 자신이 지금 부하로 판단한 값이다. 추측이 아니라 관측
-                  이므로 항상 켜 두고, 위험 상태면 즉시 EPO 채널만 멈춘다.
+    스로틀링 상태  OPS 응답 시점의 60초 요청 창을 설명하는 관측값이다. 주간
+                  사용량과 달리 저장된 과거 값으로 다음 실행을 막지 않는다.
+                  실제 단기 차단은 요청 클라이언트가 ``black`` 만 보고 맡는다.
 
 이 모듈은 네트워크를 모른다. 헤더 문자열과 바이트 수만 받는다.
 """
@@ -50,11 +51,13 @@ HEADER_THROTTLE = "x-throttling-control"
 HEADER_HOURLY_USED = "x-individualquotaperhour-used"
 HEADER_WEEKLY_USED = "x-registeredquotaperweek-used"
 
-# 스로틀링 상태 중 EPO 채널을 멈춰야 하는 값.
-DANGEROUS_SYSTEM_STATES = frozenset({"overloaded"})
-DANGEROUS_SERVICE_COLORS = frozenset({"red", "black"})
-# 이 서비스들이 위험 상태면 멈춘다. 우리가 실제로 쓰는 것만 본다 — images 가
-# 빨간 것을 이유로 검색을 멈추면 멈출 이유가 없을 때 멈추게 된다.
+# OPS 의 60초 요청 창. ``overloaded`` 는 이 창의 허용 요청 수가 줄었다는
+# 시스템 상태이고, 그 자체로 중단 신호가 아니다. 서비스별 ``red`` 도 허용량의
+# 75%를 넘었다는 경고일 뿐이며, 실제 일시정지는 ``black`` 이다.
+THROTTLE_WINDOW_SECONDS = 60.0
+SUSPENDED_SERVICE_COLOR = "black"
+# 이 서비스들이 일시정지됐는지만 본다. 우리가 실제로 쓰는 것만 본다 — images
+# 가 black 인 것을 이유로 검색을 멈추면 무관한 서비스 때문에 채널이 끊긴다.
 WATCHED_SERVICES = ("search", "retrieval")
 
 _COLORS = ("green", "yellow", "red", "black")
@@ -63,7 +66,7 @@ _DIGITS = re.compile(r"\d+")
 
 
 class QuotaError(Exception):
-    """사용량 때문에 EPO 채널을 계속할 수 없다."""
+    """쿼터 또는 일시정지 때문에 EPO 채널을 계속할 수 없다."""
 
 
 class QuotaExceeded(QuotaError):
@@ -71,7 +74,7 @@ class QuotaExceeded(QuotaError):
 
 
 class Throttled(QuotaError):
-    """OPS 가 지금 위험한 부하 상태라고 보고했다."""
+    """OPS 가 사용하는 서비스를 일시정지(``black``)했다고 보고했다."""
 
 
 @dataclass(frozen=True)
@@ -102,12 +105,11 @@ class ThrottleReading:
 
     @property
     def dangerous(self) -> bool:
-        if self.system_state.lower() in DANGEROUS_SYSTEM_STATES:
-            return True
-        for name in WATCHED_SERVICES:
-            if self.services.get(name, "").lower() in DANGEROUS_SERVICE_COLORS:
-                return True
-        return False
+        """현재 응답에서 우리가 쓰는 서비스가 실제 정지(``black``)됐는가."""
+        return any(
+            self.services.get(name, "").lower() == SUSPENDED_SERVICE_COLOR
+            for name in WATCHED_SERVICES
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -290,12 +292,6 @@ class QuotaLedger:
         보지 않으면 "한도 1바이트 전"에서도 응답 상한만큼 더 받아 한도를
         넘긴다. 하드 상한이라고 부르려면 넘길 수 있는 경로가 없어야 한다.
         """
-        if self.state.throttle.dangerous:
-            raise Throttled(
-                "EPO OPS 가 과부하 상태를 보고했습니다"
-                f"({self.state.throttle.raw or self.state.throttle.system_state}). "
-                "EPO 채널을 중단합니다."
-            )
         headroom = max(0, int(reserve or 0)) + self._reserved
         used = self.state.effective_weekly_bytes
         if self.weekly_limit and used + headroom >= self.weekly_limit:

@@ -338,6 +338,8 @@ async def run_retrieval(
         "retrieval_rounds": [record.usage for record in run.rounds],
         "retrieval_round_count": len(run.rounds),
         "retrieval_pages_read": run.pages_read,
+        "retrieval_deferred_executed": run.deferred_executed,
+        "retrieval_deferred_pending": len(run.deferred_pending),
     }
 
     bundle = None
@@ -386,6 +388,14 @@ async def run_retrieval(
             {
                 "id": state.id,
                 "label": state.label,
+                "importance": state.declared_importance,
+                "importance_reasons": list(state.importance_reasons),
+                "depends_on": list(state.depends_on),
+                "priority": state.current_priority,
+                "uncertainty": state.uncertainty,
+                "priority_reasons": list(state.priority_reasons),
+                "search_completeness": state.search_completeness,
+                "coverage_ratio": round(state.coverage_ratio, 3),
                 "queries": list(state.queries),
                 "channels_used": list(state.channels_used),
                 "channels_failed": list(state.failed_channels),
@@ -400,10 +410,19 @@ async def run_retrieval(
                     for document in documents
                     if document.attachment_id not in state.searched
                 ],
+                "candidate_ledger": state.top_candidates(),
+                "deferred_actions": [
+                    item
+                    for item in run.deferred_pending
+                    if item.get("component_id") == state.id
+                ],
             }
             for state in run.components
         ],
         "action_errors": list(run.action_errors),
+        "deferred_actions": list(run.deferred_actions),
+        "deferred_pending": list(run.deferred_pending),
+        "deferred_executed": run.deferred_executed,
         "notes": list(run.notes),
         "budget_exhausted": run.budget_exhausted,
         "error": run.error or "",

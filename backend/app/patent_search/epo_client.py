@@ -78,7 +78,17 @@ TOKEN_REFRESH_MARGIN_SECONDS = 60.0
 
 
 class OpsError(PatentSearchError):
-    """OPS 호출이 실패했다."""
+    """OPS 호출이 실패했다.
+
+    ``status`` 는 이 실패를 관측한 HTTP 상태다. 0 은 "상태를 보기 전에
+    끝났다"(예산 소진·취소·연결 실패)이며 성공이 아니다. 메시지 문자열에서
+    숫자를 다시 긁어내지 않도록 필드로 들고 있는다 — 문구가 바뀌면 조용히
+    깨지는 파싱이 되고, 그 값이 검증 기록에 남는다.
+    """
+
+    def __init__(self, message: str = "", *, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = int(status or 0)
 
 
 class OpsAuthError(OpsError):
@@ -289,6 +299,11 @@ class OpsClient:
 
     _token: str = field(default="", init=False, repr=False)
     _token_expires_at: float = field(default=0.0, init=False, repr=False)
+    # X-Throttling-Control 의 black 은 주간 쿼터가 아니라 60초 요청 창의
+    # 일시정지다. 클라이언트(=현재 작업) 안에서만 기억해 DB의 과거 관측값이
+    # 다음 작업을 영구 차단하지 않게 한다.
+    _throttled_until: float = field(default=0.0, init=False, repr=False)
+    _throttle_raw: str = field(default="", init=False, repr=False)
     _spent_seconds: float = field(default=0.0, init=False)
     calls: list = field(default_factory=list, init=False)
 
@@ -315,6 +330,33 @@ class OpsClient:
     # --- 토큰 -----------------------------------------------------------
     def _token_valid(self) -> bool:
         return bool(self._token) and self.clock() < self._token_expires_at
+
+    def _check_transient_throttle(self) -> None:
+        """현재 작업에서 관측한 OPS ``black`` 60초 창만 차단한다."""
+        if self._throttled_until <= 0:
+            return
+        remaining = self._throttled_until - self.clock()
+        if remaining <= 0:
+            self._throttled_until = 0.0
+            self._throttle_raw = ""
+            return
+        raise epo_quota.Throttled(
+            "EPO OPS 가 search/retrieval 서비스를 일시정지(black)했습니다"
+            f"({self._throttle_raw or 'black'}). 약 {remaining:.0f}초 뒤 다시 "
+            "시도할 수 있어 현재 EPO 채널을 중단합니다."
+        )
+
+    def _observe_transient_throttle(
+        self, reading: epo_quota.ThrottleReading
+    ) -> None:
+        """응답의 실제 정지 신호만 현재 클라이언트에 60초간 기억한다."""
+        if not reading.dangerous:
+            return
+        self._throttled_until = max(
+            self._throttled_until,
+            self.clock() + epo_quota.THROTTLE_WINDOW_SECONDS,
+        )
+        self._throttle_raw = reading.raw
 
     def _acquire_token(self) -> None:
         """client_credentials 로 토큰을 받는다. 실패는 재시도하지 않는다."""
@@ -402,9 +444,17 @@ class OpsClient:
         #
         # 토큰 발급 응답도 넣는다. 작지만 세지 않으면 계정 전체 사용량과
         # 우리 숫자가 계속 어긋난다.
-        self.ledger.settle(
+        state = self.ledger.settle(
             reservation, body_bytes=len(response.body), headers=response.headers
         )
+        # 헤더가 없는 응답에서 원장이 보존한 이전 관측을 다시 새 관측처럼
+        # 처리하면 60초 창이 부당하게 연장된다. 이번 응답에 헤더가 있을 때만
+        # 현재 클라이언트의 단기 상태를 갱신한다.
+        if any(
+            str(name).lower() == epo_quota.HEADER_THROTTLE
+            for name in dict(response.headers or {})
+        ):
+            self._observe_transient_throttle(state.throttle)
         self.calls.append(
             {
                 "kind": kind,
@@ -425,11 +475,12 @@ class OpsClient:
         self, build_request: Callable[[str], urllib.request.Request], *, kind: str
     ) -> OpsCall:
         """인증 헤더를 붙여 보내고, 필요한 만큼만 재시도한다."""
-        # 쿼터 예약은 _send 가 전송마다 한다. 여기서는 시작 전에 스로틀 상태만
-        # 확인한다 — 이미 위험 상태면 토큰부터 받을 이유가 없다.
-        self.ledger.check()
+        # 영속 원장은 주간·시간당 데이터량만 맡는다. 60초짜리 black 상태는
+        # 이 작업의 클라이언트 안에서만 확인한다.
+        self._check_transient_throttle()
         if not self._token_valid():
             self._acquire_token()
+            self._check_transient_throttle()
 
         retries = 0
         reauthorized = False
@@ -443,6 +494,7 @@ class OpsClient:
                 reauthorized = True
                 self._token = ""
                 self._acquire_token()
+                self._check_transient_throttle()
                 continue
             if response.status in (401, 403):
                 detail = scrub(
@@ -450,7 +502,8 @@ class OpsClient:
                     *credential_tokens(self.key, self.secret),
                 )
                 raise OpsAuthError(
-                    f"EPO OPS 접근이 거부되었습니다(HTTP {response.status}). {detail}"
+                    f"EPO OPS 접근이 거부되었습니다(HTTP {response.status}). {detail}",
+                    status=response.status,
                 )
             if response.status in RETRYABLE_STATUSES and retries < MAX_RETRIES:
                 wait = _retry_after_seconds(response.headers)
@@ -467,13 +520,14 @@ class OpsClient:
                 # 시간"이 아니라 "이 채널이 붙잡고 있은 시간"이다.
                 self._spent_seconds += wait
                 self.sleep(wait)
-                # 스로틀 헤더가 위험 상태로 바뀌었으면 여기서 멈춘다.
-                self.ledger.check()
+                # 방금 응답이 black 을 보고했으면 더 보내지 않는다.
+                self._check_transient_throttle()
                 continue
             if response.status in RETRYABLE_STATUSES:
                 raise OpsUnavailable(
                     f"EPO OPS 가 계속 실패합니다(HTTP {response.status}, "
-                    f"재시도 {retries}회)."
+                    f"재시도 {retries}회).",
+                    status=response.status,
                 )
             if _is_search_no_results(kind, response.status, response.body):
                 # OPS 는 "검색 결과 0건"을 404 + SERVER.EntityNotFound 로 알린다.
@@ -496,7 +550,10 @@ class OpsClient:
                     response.body[:500].decode("utf-8", errors="replace"),
                     *credential_tokens(self.key, self.secret),
                 )
-                raise OpsError(f"EPO OPS 오류(HTTP {response.status}). {detail}")
+                raise OpsError(
+                    f"EPO OPS 오류(HTTP {response.status}). {detail}",
+                    status=response.status,
+                )
 
             return OpsCall(
                 url=request.full_url,

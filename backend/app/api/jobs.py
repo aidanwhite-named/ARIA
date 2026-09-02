@@ -245,7 +245,6 @@ def _job_out(job: ExecutionJob) -> JobOut:
         job_kind=job.job_kind or JobKind.PATENT_ANALYSIS,
         prompt_id=job.prompt_id,
         prompt_name=job.prompt_name,
-        prompt_version=job.prompt_version,
         prompt_snapshot=job.prompt_snapshot,
         output_mode=job.output_mode,
         claim_text=job.claim_text or "",
@@ -312,8 +311,7 @@ def _job_out(job: ExecutionJob) -> JobOut:
 def source_label(job: ExecutionJob) -> str:
     """원본 실행이 삭제된 뒤에도 화면에 남길 표시용 라벨."""
     stamp = job.created_at.strftime("%Y-%m-%d %H:%M") if job.created_at else ""
-    version = f" v{job.prompt_version}" if job.prompt_version else ""
-    return f"{stamp} · {job.prompt_name}{version}".strip().strip("·").strip()
+    return f"{stamp} · {job.prompt_name}".strip().strip("·").strip()
 
 
 def _clone_parent_attachments(
@@ -613,7 +611,6 @@ async def _create_search_job(
         job_kind=JobKind.SIMILARITY_SEARCH,
         prompt_id=prompt.id,
         prompt_name=prompt.name,
-        prompt_version=prompt.version,
         prompt_snapshot=prompt.body,
         output_mode=prompt.output_mode,
         claim_text=claim_text,
@@ -772,7 +769,6 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         job_kind=JobKind.PATENT_ANALYSIS,
         prompt_id=prompt.id,
         prompt_name=prompt.name,
-        prompt_version=prompt.version,
         prompt_snapshot=prompt.body,
         output_mode=prompt.output_mode,
         claim_text=payload.claim_text or "",

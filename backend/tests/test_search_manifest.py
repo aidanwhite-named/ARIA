@@ -421,7 +421,6 @@ def test_channels_used_is_empty_for_web_only_run() -> None:
     manifest = search_manifest.build(
         claim_text="청구항",
         prompt_id="search_prompt.md",
-        prompt_version=1,
         prompt_sha256="a" * 64,
         claim_boundary_neutralized=False,
         started_at=None,
@@ -585,7 +584,6 @@ def test_build_keeps_record_even_when_the_model_block_is_unreadable() -> None:
     manifest = search_manifest.build(
         claim_text="청구항 1.",
         prompt_id="search_prompt.md",
-        prompt_version=1,
         prompt_sha256="abc",
         claim_boundary_neutralized=False,
         started_at="2026-08-21T00:00:00+00:00",
@@ -787,7 +785,6 @@ def test_spec_document_is_recorded_in_the_input_section() -> None:
     manifest = search_manifest.build(
         claim_text="청구항 1.",
         prompt_id="search_prompt.md",
-        prompt_version=2,
         prompt_sha256="b" * 64,
         claim_boundary_neutralized=False,
         spec_document={
@@ -816,7 +813,6 @@ def test_manifest_without_a_spec_says_so_explicitly() -> None:
     manifest = search_manifest.build(
         claim_text="청구항 1.",
         prompt_id="search_prompt.md",
-        prompt_version=2,
         prompt_sha256="b" * 64,
         claim_boundary_neutralized=False,
         started_at=None,
@@ -978,7 +974,6 @@ def test_manifest_separates_template_hash_from_the_prompt_actually_sent() -> Non
     manifest = search_manifest.build(
         claim_text="청구항 1. 테스트",
         prompt_id="search_prompt.md",
-        prompt_version=6,
         prompt_sha256="a" * 64,
         runtime_context_sha256="b" * 64,
         claim_boundary_neutralized=False,
@@ -1013,7 +1008,6 @@ def test_manifest_without_lanes_has_an_empty_effective_hash_map() -> None:
     manifest = search_manifest.build(
         claim_text="청구항 1. 테스트",
         prompt_id="search_prompt.md",
-        prompt_version=6,
         prompt_sha256="a" * 64,
         claim_boundary_neutralized=False,
         started_at="2026-08-30T00:00:00+00:00",
@@ -1028,3 +1022,77 @@ def test_manifest_without_lanes_has_an_empty_effective_hash_map() -> None:
     )
     assert manifest["prompt"]["effective_prompt_sha256"] == {}
     assert manifest["prompt"]["runtime_context_sha256"] == ""
+
+
+def test_manifest_records_the_requested_effort_not_the_applied_one() -> None:
+    """CLI 는 실제로 적용된 추론강도를 알려주지 않는다.
+
+    그러므로 기록할 수 있는 것은 "무엇을 요청했는가" 뿐이다. 추정값을 적으면
+    감사 기록이 관측이 아니라 추측이 된다.
+    """
+    def _build(effort: str) -> dict:
+        return search_manifest.build(
+            claim_text="청구항 1. 테스트",
+            prompt_id="search_prompt.md",
+            prompt_sha256="a" * 64,
+            reasoning_effort=effort,
+            claim_boundary_neutralized=False,
+            started_at="2026-08-30T00:00:00+00:00",
+            completed_at="2026-08-30T00:01:00+00:00",
+            tool_calls=[],
+            tool_uses=[],
+            tool_policy_name="codex_web_search",
+            allowed_tools=("web_search",),
+            reported=None,
+            notes=[],
+            error=None,
+        )
+
+    chosen = _build("high")["reasoning_effort"]
+    assert chosen == {"requested": "high", "model_default": False}
+
+    default = _build("")["reasoning_effort"]
+    assert default == {"requested": "", "model_default": True}
+
+    # 적용값을 짐작해 적는 필드가 생기면 이 테스트가 막는다.
+    for section in (chosen, default):
+        assert set(section) == {"requested", "model_default"}
+
+
+def test_legacy_group_without_saved_gate_is_only_provisional() -> None:
+    """과거 group을 새 기준의 정식 등급으로 조용히 승격하지 않는다."""
+    view = search_manifest.classification_view(
+        {"group": "A", "provisional_group": None}, manifest_version=3
+    )
+    assert view == {
+        "group": None,
+        "provisional_group": "A",
+        "basis": search_manifest.CLASSIFICATION_LEGACY,
+    }
+
+
+def test_explicit_failed_gate_recovers_old_group_as_search_proposal() -> None:
+    """v6의 탈락 group도 버리지 않고 검색 결과 기반 잠정 등급으로 읽는다."""
+    view = search_manifest.classification_view(
+        {"group": "B", "group_eligible": False}, manifest_version=6
+    )
+    assert view["group"] is None
+    assert view["provisional_group"] == "B"
+    assert view["basis"] == search_manifest.CLASSIFICATION_SEARCH
+
+
+def test_saved_page_gate_keeps_past_group_formal() -> None:
+    """당시 페이지 관측 근거가 저장된 과거 후보는 정식 분류를 유지한다."""
+    view = search_manifest.classification_view(
+        {
+            "group": "C",
+            "group_eligible": True,
+            "page_fetch_succeeded": True,
+            "identifier_url_matched": True,
+            "page_supported_rows": 1,
+        },
+        manifest_version=6,
+    )
+    assert view["group"] == "C"
+    assert view["provisional_group"] is None
+    assert view["basis"] == search_manifest.CLASSIFICATION_PAGE

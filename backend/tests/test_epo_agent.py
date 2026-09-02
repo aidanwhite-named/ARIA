@@ -21,6 +21,7 @@ from app.patent_search import (
     epo_backend,
     epo_client,
     epo_cql,
+    epo_prompts,
     epo_quota,
 )
 
@@ -32,23 +33,59 @@ from .test_epo_search import TEST_KEY, TEST_SECRET, FakeTransport, ok, token_res
 
 
 class FakeOutcome:
-    def __init__(self, text: str, *, cancelled=False, timed_out=False) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        cancelled=False,
+        timed_out=False,
+        tool_uses=(),
+        tool_calls=(),
+        usage=None,
+    ) -> None:
         self.result_text = text
         self.cancelled = cancelled
         self.timed_out = timed_out
-        self.usage = {}
-        self.tool_calls = []
-        self.tool_uses = []
+        # Provider 가 알려준 사용량. 알려주지 않는 Provider 도 있으므로 기본은
+        # 빈 dict 다.
+        self.usage = dict(usage or {})
+        self.tool_calls = list(tool_calls)
+        # NO_TOOLS 턴이므로 보통은 비어 있다. 위반 경로를 시험할 때만 채운다.
+        self.tool_uses = list(tool_uses)
+
+
+#: 최소한의 청구항 분석. 검색 action 을 실행하려면 **반드시** 있어야 한다.
+#: 계약이 여기 한 곳에만 적혀 있어야, 계약이 바뀌면 테스트가 같이 움직인다.
+MINIMAL_ANALYSIS = {
+    "elements": [{"id": "E1", "text": "로봇 팔", "essential": True}],
+    "concept_combinations": [{"elements": ["E1"], "terms": ["robot arm"]}],
+}
+
+#: 최종 선택 턴의 기본 응답. 이 턴은 검색 뒤에 항상 한 번 오므로, 각 테스트가
+#: 자기 관심사와 무관한 응답을 매번 큐에 넣지 않아도 되게 기본값을 둔다.
+DEFAULT_SELECTION = json.dumps({"actions": [{"action": "finish", "notes": "선택 완료"}]})
 
 
 class FakeProvider:
-    """미리 정해 둔 응답을 라운드 순서대로 돌려준다."""
+    """미리 정해 둔 응답을 라운드 순서대로 돌려준다.
 
-    def __init__(self, *responses) -> None:
+    검색 라운드와 최종 선택 턴을 **시스템 프롬프트로** 구분한다. 두 턴은 계약이
+    다르므로(선택 턴은 검색 금지) 같은 큐에서 꺼내면 테스트가 어느 턴을 보고
+    있는지 알 수 없게 된다.
+    """
+
+    def __init__(self, *responses, selection: str | None = None) -> None:
         self.queue = list(responses)
+        self.selection = selection
+        #: 검색 라운드 요청만. 최종 선택 턴은 아래 목록에 따로 쌓인다.
         self.requests = []
+        self.selection_requests = []
 
     async def execute(self, request, emit):
+        if epo_prompts.SELECTION_MARKER in (request.system_prompt or ""):
+            self.selection_requests.append(request)
+            reply = self.selection if self.selection is not None else DEFAULT_SELECTION
+            return reply if isinstance(reply, FakeOutcome) else FakeOutcome(reply)
         self.requests.append(request)
         if not self.queue:
             raise AssertionError("준비된 모델 응답보다 라운드가 많습니다.")
@@ -56,8 +93,17 @@ class FakeProvider:
         return item if isinstance(item, FakeOutcome) else FakeOutcome(item)
 
 
-def say(*actions, strategy: str = "") -> str:
-    return json.dumps({"strategy": strategy, "actions": list(actions)})
+def say(*actions, strategy: str = "", analysis: dict | None = MINIMAL_ANALYSIS) -> str:
+    """검색 라운드 응답 하나.
+
+    claim_analysis 를 기본으로 넣는다. 그것이 계약이고, 넣지 않은 응답의 검색
+    action 은 실행되지 않는다. 그 경로를 시험하는 테스트만 analysis=None 을
+    넘긴다.
+    """
+    payload = {"strategy": strategy, "actions": list(actions)}
+    if analysis is not None:
+        payload["claim_analysis"] = analysis
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def search_action(value: str = "robot arm", field: str = "ta", **extra) -> dict:
@@ -503,7 +549,7 @@ def test_throttling_ends_the_channel(store, tmp_path) -> None:
     provider = FakeProvider(say(search_action("a"), search_action("b")))
     transport = FakeTransport(
         token_response(),
-        ok(fx.SEARCH_BIBLIO, headers=fx.HEADERS_OVERLOADED),
+        ok(fx.SEARCH_BIBLIO, headers=fx.HEADERS_BLACK),
         ok(fx.SEARCH_BIBLIO),
     )
     result = run(make_agent(provider, transport, store, tmp_path))
@@ -717,8 +763,13 @@ def test_parse_response_action_list_without_wrapper() -> None:
 
 def test_single_action_without_wrapper_executes_in_agent_loop(store, tmp_path) -> None:
     """실제 에이전트 루프에서도 단일 action dict 응답이 parse_error 나 no_actions 없이 동작한다."""
+    # 짧은 형식에도 claim_analysis 를 함께 실을 수 있어야 한다. 감싸기가 형제
+    # 필드를 버리면, 이 형식을 쓴 모델은 계약을 지킬 방법이 없어진다.
     provider = FakeProvider(
-        json.dumps(search_action("radar surveillance", "ta")),
+        json.dumps(
+            {**search_action("radar surveillance", "ta"), "claim_analysis": MINIMAL_ANALYSIS},
+            ensure_ascii=False,
+        ),
         json.dumps(FINISH),
     )
     transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))

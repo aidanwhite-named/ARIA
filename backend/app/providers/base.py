@@ -169,6 +169,17 @@ NO_TOOLS = ToolPolicy(name="no_tools")
 #
 # Bash/Read/Write/Edit/Task 등은 목록에 없으므로 광고되기만 해도 정책 위반이다.
 # WebSearch 를 한 번도 부르지 않으면 검색을 수행한 것이 아니므로 실패로 본다.
+# 추론강도. 값이 이 목록에 있어도 **모든 모델이 그 레벨을 지원하지는 않는다** —
+# 2026-08-30 기준 gpt-5.6-sol 은 여섯 개 전부, luna 는 ultra 없이 다섯 개,
+# gpt-5.5/5.4 는 앞의 네 개다. ARIA 는 모델별 지원 여부를 검사하지 않는다.
+# 검사하려면 계정별 모델 카탈로그를 읽어야 하는데, 그 값은 CLI 가 명령으로
+# 알려주지 않고 캐시 파일 형태로만 있어서 우리가 보증할 수 없다. 지원하지 않는
+# 레벨을 넘기면 CLI 가 거절하고, 그 오류를 그대로 사용자에게 보인다.
+#
+# 목록에 **없는 값을 저장하지는 못하게** 한다. 오타 하나가 실행 전체를 실패로
+# 만드는데, 그건 설정 화면에서 막는 편이 낫다.
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+
 WEB_SEARCH = ToolPolicy(
     name="web_search",
     allowed_tools=("WebSearch", "WebFetch"),
@@ -241,6 +252,10 @@ class ExecutionRequest:
     system_prompt: str
     user_message: str
     model: str | None = None
+    # 빈 문자열이면 **모델 기본값**이다. 그때 Provider 는 CLI 에 추론강도를
+    # 아예 넘기지 않는다. 여기에 기본 레벨을 채워 두면 사용자가 고르지 않았는데
+    # ARIA 가 모델 카탈로그의 기본값을 덮어쓰게 된다.
+    reasoning_effort: str = ""
     timeout_seconds: int = 900
     # 지정하지 않으면 도구 없음. 새 호출 경로가 실수로 도구를 여는 일이 없도록
     # 기본값을 닫힌 쪽에 둔다.

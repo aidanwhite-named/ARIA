@@ -21,10 +21,22 @@
 
 from __future__ import annotations
 
+import re
+from html import unescape
+
+from . import search_manifest
 from .search_manifest import (
+    CLASSIFICATION_LEGACY,
+    CLASSIFICATION_NONE,
+    CLASSIFICATION_OFFICIAL,
+    CLASSIFICATION_ORIGINAL,
+    CLASSIFICATION_PAGE,
+    CLASSIFICATION_SEARCH,
+    EVIDENCE_OFFICIAL,
     EVIDENCE_REVIEWED,
     GROUP_DEFINITIONS,
     GROUPS,
+    PROV_OFFICIAL_RESPONSE,
     PROV_RAW,
     PROV_SNIPPET,
     PROV_WEBFETCH,
@@ -33,18 +45,21 @@ from .search_manifest import (
     SCOPE_FULL_TEXT,
     SCOPE_UNKNOWN,
     SUPPORT_NONE,
+    SUPPORT_OFFICIAL,
     SUPPORT_PAGE,
     SUPPORT_SNIPPET,
+    classification_view,
 )
 
 DISCLAIMER = (
-    "현재 검색 결과는 웹 기반 검토 후보 탐색 자료입니다. "
+    "현재 검색 결과는 문헌 검토 후보 탐색 자료이며 A/B/C는 AI 분류입니다. "
     "원문 직접 인용과 법적 판단을 보장하지 않습니다."
 )
 
 # 후보 식별 게이트와 행별 근거 게이트가 들어간 매니페스트 버전. 이보다 낮은
 # 기록은 그 검사를 통과한 적이 없으므로 화면에서 그 사실을 밝힌다.
 LEGACY_GATE_VERSION = 4
+CLASSIFICATION_SCHEMA_VERSION = 8
 
 def _group_titles(manifest: dict) -> dict[str, str]:
     """이 실행이 실제로 쓴 그룹 정의에서 제목을 만든다.
@@ -65,6 +80,7 @@ def _group_titles(manifest: dict) -> dict[str, str]:
 
 _SUPPORT_LABEL = {
     SUPPORT_PAGE: "페이지 관측",
+    SUPPORT_OFFICIAL: "공식 문헌 대조",
     SUPPORT_SNIPPET: "검색 스니펫",
     SUPPORT_NONE: "근거 없음",
 }
@@ -80,11 +96,57 @@ _PROVENANCE_LABEL = {
     PROV_SNIPPET: "검색 스니펫만 확인 (페이지 미열람)",
     PROV_WEBFETCH: "페이지 요약 확인 (원문 아님)",
     PROV_RAW: "원문 대조 완료",
+    PROV_OFFICIAL_RESPONSE: "EPO 공식 응답에서 발견 (원문 인용 아님)",
+}
+
+# 이 후보를 데려온 검색 경로. search_origins(무엇을 입력으로 검색했나)와
+# 다른 축이다.
+_DISCOVERY_LABEL = {
+    "web": "웹 검색",
+    "epo": "EPO 독립 검색",
+    "literature": "ARIA 서지 검색(Crossref·Europe PMC)",
+}
+
+# 웹 페이지를 열지 않는 발견 경로. 이 경로로만 온 후보에게 "페이지를 열지
+# 못했다"고 적으면 안 된다 — 애초에 열 페이지가 없었다.
+_NO_WEB_PAGE_ORIGINS = ("epo", "literature")
+
+# 계획 턴에서 도구를 막은 수단. "막았다"와 "막을 수 없어 사후에 봤다"를 같은
+# 말로 적으면 기록이 실제로 아는 것보다 강해진다.
+_ISOLATION_LABEL = {
+    "provider_enforced": "CLI 단계에서 도구를 차단(그런데도 호출이 관측됨)",
+    # **사후 탐지는 차단이 아니다.** 이 값이 붙은 실행에서 외부 호출은 이미
+    # 나갔고, ARIA 가 한 일은 그 응답을 쓰지 않기로 한 것뿐이다. 문구에서 그
+    # 경계를 흐리면 기록이 실제로 보증하는 것보다 강해진다.
+    "post_hoc_detection": (
+        "사후 탐지 — 도구를 끌 수단이 없어 호출을 막지 못했고, "
+        "이미 나간 외부 호출은 되돌릴 수 없음"
+    ),
+    "unknown": "도구 통제 수준 확인 불가",
 }
 
 _EVIDENCE_LABEL = {
     "candidate_only": "후보 단계",
     EVIDENCE_REVIEWED: "페이지 열람 성공",
+    EVIDENCE_OFFICIAL: "EPO 공식 기록 대조",
+}
+
+_CLASSIFICATION_LABEL = {
+    CLASSIFICATION_NONE: "분류 없음",
+    CLASSIFICATION_LEGACY: "과거 분류(검증 근거 미기록)",
+    CLASSIFICATION_SEARCH: "검색 결과 기반 AI 잠정 분류",
+    CLASSIFICATION_PAGE: "페이지 관측 근거가 있는 AI 분류",
+    CLASSIFICATION_OFFICIAL: "공식 기록 대조가 있는 AI 분류",
+    CLASSIFICATION_ORIGINAL: "원문 직접 대조가 있는 AI 분류",
+}
+
+_VERIFICATION_LABEL = {
+    "not_attempted": "공식 검증 미시도",
+    "fetch_failed": "공식 문헌 확보 실패",
+    "record_fetched": "공식 문헌 확보 완료",
+    "classification_failed": "2차 분류 실패",
+    "evidence_mismatch": "근거 문장 대조 실패",
+    "promoted": "공식 근거 분류 완료",
 }
 
 _ORIGIN_LABEL = {
@@ -124,16 +186,52 @@ def _cell(value: str) -> str:
     return " ".join(text.split()) or "-"
 
 
+def _verification_detail(value) -> str:
+    """옛 기록에 저장된 EPO XML 오류가 보고서 본문을 밀어내지 않게 줄인다."""
+    text = str(value or "").strip()
+    if "<fault" in text.lower() or "<?xml" in text.lower():
+        status = re.search(r"HTTP\s+(\d+)", text, re.IGNORECASE)
+        codes = [
+            " ".join(unescape(part).split())
+            for part in re.findall(r"<code>(.*?)</code>", text, re.DOTALL | re.IGNORECASE)
+        ]
+        messages = [
+            " ".join(unescape(part).split())[:240]
+            for part in re.findall(
+                r"<message>(.*?)</message>", text, re.DOTALL | re.IGNORECASE
+            )
+        ]
+        details = list(dict.fromkeys([*codes, *messages]))
+        head = f"EPO OPS HTTP {status.group(1)}" if status else "EPO OPS 조회 오류"
+        return " · ".join([head, *details])[:600]
+    text = " ".join(text.split())
+    return text[:600] + ("…" if len(text) > 600 else "")
+
+
+def _no_web_channel_label(discovered) -> str:
+    """웹 페이지를 열지 않는 발견 경로의 이름. 둘 다면 둘 다 적는다.
+
+    예전에는 이 자리에 "EPO 독립 검색"이 박혀 있었다. 서지 검색이 데려온 논문
+    후보에게도 그 문구가 나가면, 보고서가 실제와 다른 경로를 말하게 된다.
+    """
+    names = [
+        _DISCOVERY_LABEL.get(origin, origin)
+        for origin in discovered
+        if origin in _NO_WEB_PAGE_ORIGINS
+    ]
+    return " + ".join(names) or "ARIA 직접 검색"
+
+
 def _candidate_section(item: dict) -> list[str]:
-    identity = item["doc_number"] or item["doi"] or "문헌번호 확인 필요"
+    identity = _cell(item["doc_number"] or item["doi"] or "문헌번호 확인 필요")
     lines = [f"#### {identity}"]
     if item["title"]:
-        lines.append(f"- 명칭: {item['title']}")
+        lines.append(f"- 명칭: {_cell(item['title'])}")
     if item["applicant"]:
-        lines.append(f"- 출원인·저자: {item['applicant']}")
+        lines.append(f"- 출원인·저자: {_cell(item['applicant'])}")
     if item["doi"] and item["doc_number"]:
         lines.append(f"- DOI: {item['doi']}")
-    lines.append(f"- 패밀리: {item['family'] or '확인 필요'}")
+    lines.append(f"- 패밀리: {_cell(item['family'] or '확인 필요')}")
     if item["url"]:
         lines.append(f"- 원문 링크: {item['url']}")
     lines.append(
@@ -142,31 +240,126 @@ def _candidate_section(item: dict) -> list[str]:
         + " / "
         + _EVIDENCE_LABEL.get(item["evidence_status"], item["evidence_status"])
     )
+    lines.append(
+        "- 분류 근거: "
+        + _CLASSIFICATION_LABEL.get(
+            item.get("classification_basis"),
+            str(item.get("classification_basis") or "확인 필요"),
+        )
+    )
+    # 공식 대조로 덮이기 전의 1차 분류. 두 분류를 같은 줄에 나란히 쓰지 않는다 —
+    # 나란히 두면 같은 위계로 읽히고, 그러면 등급을 나눈 의미가 없다. 이 후보의
+    # 분류는 위의 '분류 근거' 줄이고, 여기는 대체되기 전의 기록이다.
+    page_prior = item.get("page_classification")
+    if isinstance(page_prior, dict) and page_prior.get("group"):
+        agreed = page_prior.get("group") == item.get("group")
+        lines.append(
+            f"- 대체된 1차 분류: {page_prior['group']} "
+            + _CLASSIFICATION_LABEL.get(
+                page_prior.get("classification_basis"),
+                str(page_prior.get("classification_basis") or "확인 필요"),
+            )
+            + f" · 페이지 근거 행 {int(page_prior.get('page_supported_rows') or 0)}개"
+            + (
+                " (공식 대조 결과와 같음)"
+                if agreed
+                else " — 공식 대조 결과와 달라 공식 분류를 채택했습니다"
+            )
+        )
+    if item.get("matched_feature_rows") is not None:
+        lines.append(
+            f"- 공식 기록에서 대조된 구성 행: "
+            f"{int(item.get('matched_feature_rows') or 0)}개"
+        )
+    verification = item.get("verification") or {}
+    if verification:
+        lines.append(
+            "- 후보별 공식 검증: "
+            + _VERIFICATION_LABEL.get(
+                verification.get("status"), verification.get("status") or "기록 없음"
+            )
+            + (
+                f" — {_verification_detail(verification.get('detail'))}"
+                if _verification_detail(verification.get("detail"))
+                else ""
+            )
+        )
     origins = item.get("search_origins") or []
     if origins:
         lines.append(
-            "- 발견 경로: "
+            "- 검색 입력: "
             + " + ".join(_ORIGIN_LABEL.get(origin, origin) for origin in origins)
         )
+    # 어느 검색 경로가 이 문헌을 데려왔는가. 둘 다면 둘 다 적는다 — 한쪽만
+    # 적으면 "EPO 를 켜서 무엇을 더 얻었는가"에 답할 수 없다.
+    discovered = search_manifest.discovery_origins(item)
+    lines.append(
+        "- 발견 경로: "
+        + " + ".join(_DISCOVERY_LABEL.get(origin, origin) for origin in discovered)
+    )
+    epo_discovery = item.get("epo_discovery")
+    if isinstance(epo_discovery, dict) and epo_discovery:
+        lanes = ", ".join(epo_discovery.get("lanes") or []) or "레인 미기록"
+        lines.append(f"  - EPO 검색 레인: {lanes}")
+        for entry in epo_discovery.get("shortlist") or []:
+            reason = _cell(entry.get("reason") or "이유 미기록")
+            lines.append(f"  - EPO 선정 이유: {reason}")
+        artifact_ids = epo_discovery.get("artifact_ids") or []
+        if artifact_ids:
+            lines.append(
+                "  - 재사용한 EPO 응답 아티팩트: "
+                + ", ".join(str(value)[:12] + "…" for value in artifact_ids[:5])
+            )
+    literature_discovery = item.get("literature_discovery")
+    if isinstance(literature_discovery, dict) and literature_discovery:
+        sources = ", ".join(literature_discovery.get("sources") or []) or "미기록"
+        lines.append(f"  - 서지 출처: {sources}")
+        container = _cell(literature_discovery.get("container") or "")
+        if container:
+            lines.append(f"  - 게재지: {container}")
+        for query in (literature_discovery.get("queries") or [])[:3]:
+            lines.append(f"  - ARIA 가 보낸 질의: `{_cell(query)}`")
+        artifact_ids = literature_discovery.get("artifact_ids") or []
+        if artifact_ids:
+            lines.append(
+                "  - 보존한 서지 응답 아티팩트: "
+                + ", ".join(str(value)[:12] + "…" for value in artifact_ids[:5])
+            )
+    epo_only = search_manifest.DISCOVERY_WEB not in discovered
     lines.append(
         "- ARIA 관측: 페이지 본문 "
         + ("읽음" if item["page_fetch_succeeded"] else "읽은 기록 없음")
         + " · 원문 대조 "
         + ("완료" if item["original_verified"] else "안 됨")
         + " · 문헌번호-주소 대조 "
-        + ("완료" if item.get("identifier_url_matched") else "안 됨")
+        + (
+            "해당 없음(웹 페이지를 열지 않는 경로)"
+            if epo_only
+            else "완료"
+            if item.get("identifier_url_matched")
+            else "안 됨"
+        )
     )
-    if not item.get("identifier_url_matched", True):
+    if epo_only:
+        # 웹 게이트의 문구를 그대로 쓰면 "확인 실패"로 읽힌다. 이 후보에는
+        # 애초에 열어 볼 웹 페이지가 없었고, 존재하지 않는 페이지 관측을
+        # 지어내지 않는 것이 규칙이다.
+        lines.append(
+            f"- 이 후보는 {_no_web_channel_label(discovered)}이 데려왔습니다. 웹 "
+            "페이지 관측이 없으므로 페이지 근거 분류는 만들지 않으며, 정식 A/B/C "
+            "는 공식 응답에 구성 대응이 대조된 경우에만 붙습니다."
+        )
+    elif not item.get("identifier_url_matched", True):
         lines.append(
             "- 이 후보의 문헌번호가 위 주소에서 확인되지 않아 명칭·출원인·"
             "패밀리를 표시하지 않았습니다."
         )
-    if item["provisional"]:
-        lines.append("- **잠정 분류** — 원문으로 검증되지 않았습니다.")
+    if not item["original_verified"]:
+        lines.append("- 원문 직접 발췌 상태: 검증되지 않았습니다.")
     lines.append(f"- 원문 위치: {item['source_location']}")
     lines.append(f"- 직접 발췌: {item['verbatim_excerpt']}")
     if item["note"]:
-        lines.append(f"- 비고: {item['note']}")
+        lines.append(f"- 비고: {_cell(item['note'])}")
 
     if item["mapping"]:
         lines += [
@@ -178,6 +371,11 @@ def _candidate_section(item: dict) -> list[str]:
         ]
         for row in item["mapping"]:
             support = row.get("support_source", SUPPORT_NONE)
+            location = (
+                f"공식 응답 필드: {row.get('support_field')}"
+                if support == SUPPORT_OFFICIAL and row.get("support_field")
+                else row["source_location"]
+            )
             lines.append(
                 "| "
                 + " | ".join(
@@ -191,7 +389,7 @@ def _candidate_section(item: dict) -> list[str]:
                         ),
                         row["degree"],
                         row["counterpart"],
-                        row["source_location"],
+                        location,
                         row["verbatim_excerpt"],
                         row["translation"],
                         row["similar"],
@@ -200,6 +398,51 @@ def _candidate_section(item: dict) -> list[str]:
                 )
                 + " |"
             )
+    lines.append("")
+    return lines
+
+
+def _provisional_candidates(items: list[tuple[dict, dict]]) -> list[str]:
+    """한 A/B/C 그룹 안에서 검증되지 않은 후보를 잠정 하위 절로 표시한다."""
+    if not items:
+        return []
+    lines = [
+        "### 잠정 분류",
+        "",
+    ]
+    for item, view in items:
+        identity = item.get("doc_number") or item.get("doi") or "문헌번호 확인 필요"
+        discovered = search_manifest.discovery_origins(item)
+        epo_only = search_manifest.DISCOVERY_WEB not in discovered
+        lines.append(f"- `{identity}`")
+        lines.append(
+            "  - 발견 경로: "
+            + " + ".join(_DISCOVERY_LABEL.get(origin, origin) for origin in discovered)
+        )
+        if item.get("url"):
+            lines.append(
+                ("  - 공식 응답의 주소: " if epo_only else "  - 모델이 제시한 주소: ")
+                + item["url"]
+            )
+        lines.append(
+            "  - 분류 근거: "
+            + _CLASSIFICATION_LABEL.get(view["basis"], view["basis"])
+        )
+        verification = item.get("verification") or {}
+        if verification:
+            detail = _verification_detail(verification.get("detail")) or (
+                "세부 사유가 기록되지 않았습니다."
+            )
+            lines.append(
+                "  - 정식 승격되지 않은 이유: "
+                + _VERIFICATION_LABEL.get(
+                    verification.get("status"),
+                    verification.get("status") or "검증 기록 없음",
+                )
+                + f" — {detail}"
+            )
+        elif item.get("quarantine_reason"):
+            lines.append(f"  - 정식 승격되지 않은 이유: {item['quarantine_reason']}")
     lines.append("")
     return lines
 
@@ -278,29 +521,55 @@ def _isolated_section(items: list[dict]) -> list[str]:
     영역에 그럴듯한 명칭이 찍히면 사용자는 번호와 명칭의 결합을 믿게 되고,
     그것이 애초에 막으려던 실패다.
     """
-    if not items:
-        return []
     lines = [
         "## 미확인 검색 단서",
         "",
-        "아래 후보는 문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 "
-        "없어 그룹 분류와 구성 대응표에서 제외했습니다. 문헌번호는 다시 확인해 "
-        "볼 단서로만 남깁니다. 명칭·출원인·대응 내용은 검증되지 않았으므로 "
-        "표시하지 않습니다.",
+        "아래 후보는 아직 그룹 분류와 구성 대응표에 들어가지 못했습니다. 웹 후보는 "
+        "문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어서이고, "
+        "EPO 독립 검색과 ARIA 서지 검색 후보는 공식 응답에 구성 대응이 아직 "
+        "대조되지 않아서입니다. "
+        "각 항목의 사유를 함께 적었습니다. 문헌번호는 다시 확인해 볼 단서로 "
+        "남기며, 검증되지 않은 대응 내용은 표시하지 않습니다.",
         "",
     ]
+    if not items:
+        lines += ["해당 후보가 없습니다.", ""]
+        return lines
     for item in items:
         identity = item["doc_number"] or item["doi"] or "문헌번호 확인 필요"
+        discovered = search_manifest.discovery_origins(item)
+        epo_only = search_manifest.DISCOVERY_WEB not in discovered
         lines.append(f"- `{identity}`")
         lines.append(
-            "  - 제외 사유: "
-            + (
-                item.get("quarantine_reason")
-                or "페이지 관측에 근거한 대응표 행이 없습니다."
-            )
+            "  - 발견 경로: "
+            + " + ".join(_DISCOVERY_LABEL.get(origin, origin) for origin in discovered)
         )
+        verification = item.get("verification") or {}
+        if epo_only:
+            # 웹 게이트 문구를 쓰지 않는다. 이 후보는 격리된 것이 아니라 아직
+            # 공식 근거 대조를 통과하지 못한 EPO 독립 검색 후보다.
+            detail = _verification_detail(verification.get("detail"))
+            lines.append(
+                f"  - 상태: {_no_web_channel_label(discovered)} 후보 — "
+                + _VERIFICATION_LABEL.get(
+                    verification.get("status"),
+                    verification.get("status") or "공식 근거 대조 전",
+                )
+                + (f" ({detail})" if detail else "")
+            )
+        else:
+            lines.append(
+                "  - 제외 사유: "
+                + (
+                    item.get("quarantine_reason")
+                    or "페이지 관측에 근거한 대응표 행이 없습니다."
+                )
+            )
         if item["url"]:
-            lines.append(f"  - 모델이 제시한 주소: {item['url']}")
+            lines.append(
+                ("  - 공식 응답의 주소: " if epo_only else "  - 모델이 제시한 주소: ")
+                + item["url"]
+            )
         lines.append(
             "  - 증거 등급: "
             + _PROVENANCE_LABEL.get(item["provenance"], item["provenance"])
@@ -334,6 +603,238 @@ def _focus_section(focus: dict | None) -> list[str]:
     return lines
 
 
+def _epo_strategy_section(manifest: dict) -> list[str]:
+    """EPO 레인이 검색 전에 청구항을 어떻게 나눠 읽었는가.
+
+    검색어의 근거다. 이것이 없으면 "왜 이 검색식이었나"에 답하려면 CQL 문자열을
+    거꾸로 읽는 수밖에 없고, 거기에는 동의어를 왜 그렇게 골랐는지가 없다.
+
+    이 절은 **모델의 판단**이지 ARIA 의 관측이 아니다. 그렇게 읽히도록 제목과
+    문구를 붙인다.
+    """
+    epo = manifest.get("epo") or {}
+    lanes = [lane for lane in (epo.get("lanes") or []) if isinstance(lane, dict)]
+    analyzed = [lane for lane in lanes if (lane.get("claim_analysis") or {}).get("elements")]
+    excluded = [
+        (lane, row)
+        for lane in lanes
+        for row in (lane.get("excluded") or [])
+        if isinstance(row, dict)
+    ]
+    selections = [
+        lane
+        for lane in lanes
+        if isinstance(lane.get("selection"), dict) and lane.get("selection")
+    ]
+    if not analyzed and not excluded and not selections:
+        return []
+
+    lines = [
+        "<details>",
+        "<summary><b>EPO 검색 전략(청구항 분석) 펼치기/접기</b></summary>",
+        "",
+        "아래는 EPO 검색 레인이 **검색어를 만들기 전에** 적은 청구항 분해입니다. "
+        "모델의 판단이며 ARIA 가 대조한 사실이 아닙니다. 여기 있는 값이 실제로 "
+        "어떤 검색식이 되었는지는 아래 레인별 질의 기록과 대조하십시오.",
+        "",
+    ]
+    for lane in analyzed:
+        analysis = lane.get("claim_analysis") or {}
+        lines.append(f"#### {lane.get('id') or '(이름 없는 EPO 레인)'}")
+        elements = analysis.get("elements") or []
+        if elements:
+            lines += [
+                "",
+                "| 구성요소 | 청구항 문언 | 필수 여부 | 동의어·유사 표현 |",
+                "| --- | --- | --- | --- |",
+            ]
+            for element in elements:
+                essential = element.get("essential")
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        _cell(value)
+                        for value in (
+                            element.get("id") or "-",
+                            element.get("text") or "-",
+                            # 불리언이 아니라 세 상태다. 모델이 적지 않은 것을
+                            # '아니다'로 인쇄하면 없는 판단을 만들어 낸다.
+                            "필수"
+                            if essential is True
+                            else "필수 아님"
+                            if essential is False
+                            else "판단 없음",
+                            ", ".join(element.get("synonyms") or []) or "-",
+                        )
+                    )
+                    + " |"
+                )
+        relations = analysis.get("relations") or []
+        if relations:
+            lines += ["", "구성요소 사이의 관계", ""]
+            for relation in relations:
+                source = relation.get("source") or "?"
+                target = relation.get("target") or "?"
+                kind = relation.get("kind") or "관계"
+                lines.append(
+                    f"- {_cell(source)} → {_cell(target)} ({_cell(kind)}): "
+                    + _cell(relation.get("description") or "-")
+                )
+        combinations = analysis.get("concept_combinations") or []
+        if combinations:
+            lines += ["", "EPO 검색에 사용한 개념 조합", ""]
+            for combo in combinations:
+                lines.append(
+                    "- "
+                    + (", ".join(combo.get("elements") or []) or "구성요소 미기록")
+                    + " → "
+                    + (_cell(", ".join(combo.get("terms") or [])) or "-")
+                    + (
+                        f" — {_cell(combo.get('reason'))}"
+                        if combo.get("reason")
+                        else ""
+                    )
+                )
+        conditions = analysis.get("search_conditions") or []
+        if conditions:
+            lines += ["", "사용한 분류·검색 조건", ""]
+            for condition in conditions:
+                lines.append(
+                    f"- {_cell(condition.get('kind') or '조건')}: "
+                    + _cell(condition.get("value") or "-")
+                    + (
+                        f" — {_cell(condition.get('reason'))}"
+                        if condition.get("reason")
+                        else ""
+                    )
+                )
+        if analysis.get("notes"):
+            lines += ["", f"- 비고: {_cell(analysis['notes'])}"]
+        lines.append("")
+
+    # 검색하지 않는 최종 선택 턴. 마지막 검색 결과가 shortlist 평가를 받았는지는
+    # "왜 이 문헌이 후보에 없나"에 답할 때 필요한 사실이다.
+    selection_rows = [
+        (lane, lane.get("selection") or {})
+        for lane in lanes
+        if isinstance(lane.get("selection"), dict) and lane.get("selection")
+    ]
+    if selection_rows:
+        lines += [
+            "최종 선택 턴 (검색 없음)",
+            "",
+            "이 턴은 OPS 를 부르지 않습니다. 마지막 검색이 데려온 문헌까지 포함해 "
+            "shortlist 를 한 번 더 고르는 자리이며, 검색 라운드와 사용량을 따로 "
+            "기록합니다.",
+            "",
+            "| 레인 | 시도 | 상태 | 검토한 후보 | 추가된 shortlist | 거절된 검색 action |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for lane, selection in selection_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    _cell(value)
+                    for value in (
+                        lane.get("id") or "-",
+                        "예" if selection.get("attempted") else "아니오",
+                        selection.get("status") or selection.get("reason") or "-",
+                        str(int(selection.get("candidates_reviewed") or 0)),
+                        str(int(selection.get("shortlist_added") or 0)),
+                        str(int(selection.get("rejected_actions") or 0)),
+                    )
+                )
+                + " |"
+            )
+        lines.append("")
+
+    if excluded:
+        lines += [
+            "상한 때문에 처리하지 않은 것",
+            "",
+            "| 레인 | 종류 | 값 | 사유 |",
+            "| --- | --- | --- | --- |",
+        ]
+        for lane, row in excluded:
+            lines.append(
+                "| "
+                + " | ".join(
+                    _cell(value)
+                    for value in (
+                        lane.get("id") or "-",
+                        row.get("kind") or "-",
+                        row.get("value") or "-",
+                        row.get("detail") or row.get("reason_code") or "-",
+                    )
+                )
+                + " |"
+            )
+        lines.append("")
+
+    lines += ["</details>", ""]
+    return lines
+
+
+def _tool_isolation_section(manifest: dict) -> list[str]:
+    """EPO 계획 턴에서 도구 호출이 감지됐는가.
+
+    감지된 실행에서는 그 응답의 action 을 하나도 실행하지 않았다. 사용자가 제일
+    먼저 알아야 하는 사실이라 접지 않고 본문에 둔다.
+    """
+    epo = manifest.get("epo") or {}
+    rows = [
+        (lane, violation)
+        for lane in (epo.get("lanes") or [])
+        if isinstance(lane, dict)
+        for violation in (lane.get("tool_violations") or [])
+        if isinstance(violation, dict)
+    ]
+    if not rows:
+        return []
+    post_hoc = any(
+        violation.get("isolation") == "post_hoc_detection"
+        for _lane, violation in rows
+    )
+    lines = [
+        "## EPO 계획 턴의 도구 호출 감지",
+        "",
+        "EPO 검색 계획 턴은 도구 없는 실행입니다. 아래 레인에서는 모델이 외부 "
+        "도구를 호출한 것이 관측되어, **그 응답의 검색·조회 지시를 하나도 "
+        "실행하지 않고 폐기**했습니다.",
+        "",
+    ]
+    if post_hoc:
+        lines += [
+            "> **사후 탐지는 차단이 아닙니다.** 격리 수준이 "
+            "`post_hoc_detection` 인 레인에서는 ARIA 가 도구 호출을 막을 수단이 "
+            "없습니다. 그 외부 호출은 **이미 나갔고 되돌릴 수 없으며**, ARIA 가 "
+            "한 일은 그 응답을 검색 계획으로 쓰지 않기로 한 것뿐입니다. 모델이 "
+            "무엇을 읽었는지는 ARIA 가 알지 못합니다.",
+            "",
+        ]
+    lines += [
+        "| 레인 | Provider | 감지된 도구 | 격리 수준 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for lane, violation in rows:
+        isolation = violation.get("isolation")
+        lines.append(
+            "| "
+            + " | ".join(
+                _cell(value)
+                for value in (
+                    lane.get("id") or "-",
+                    violation.get("provider") or "-",
+                    ", ".join(violation.get("tools") or []) or "-",
+                    _ISOLATION_LABEL.get(isolation, isolation or "-"),
+                )
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def _channel_comparison_section(manifest: dict) -> list[str]:
     """웹과 EPO의 공개번호 교집합·차집합을 사용자에게 보여 준다.
 
@@ -350,10 +851,13 @@ def _channel_comparison_section(manifest: dict) -> list[str]:
         if not epo.get("enabled"):
             return []
         return [
-            "## 웹/EPO 채널 교차 발견",
+            "<details>",
+            "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>",
             "",
             "두 채널을 대조하지 못했습니다: "
             + str(comparison.get("reason") or "비교할 기록이 없습니다."),
+            "",
+            "</details>",
             "",
         ]
 
@@ -361,11 +865,15 @@ def _channel_comparison_section(manifest: dict) -> list[str]:
     web = comparison.get("web") or {}
     epo_stats = comparison.get("epo") or {}
     lines = [
-        "## 웹/EPO 채널 교차 발견",
+        "<details>",
+        "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>",
         "",
         "이 표는 **국가코드를 보존한 공개번호 표기**만 맞춘 발견 경로 비교입니다. "
         "특허 패밀리 판정이나 A/B/C 유사도 분류가 아니며, `EPO에서만`은 이번 "
         "웹 검색 기록에 같은 공개번호가 없었다는 뜻일 뿐입니다.",
+        "후보를 검증하기 위해 번호로 직접 조회한 EPO 기록은 이 발견 경로 비교에 "
+        "포함하지 않습니다. 따라서 공식 검증을 마친 후보도 독립 EPO 검색에서 "
+        "발견되지 않았다면 `웹에서만`으로 표시될 수 있습니다.",
         "",
         f"- 양쪽 채널에서 발견: {int(counts.get('both') or 0)}건",
         f"- EPO에서만 발견: {int(counts.get('epo_only') or 0)}건",
@@ -401,13 +909,12 @@ def _channel_comparison_section(manifest: dict) -> list[str]:
         rows.extend((label, item) for item in comparison.get(key) or [])
 
     if not rows:
-        lines += ["", "식별 가능한 공개번호 후보가 없습니다.", ""]
+        lines += ["", "식별 가능한 공개번호 후보가 없습니다.", "", "</details>", ""]
         return lines
 
     lines += [
         "",
-        "<details>",
-        f"<summary><b>교차 발견 문헌 목록 펼치기/접기 (총 {len(rows)}건)</b></summary>",
+        f"교차 발견 문헌 목록: 총 {len(rows)}건",
         "",
         "| 구분 | 대표 문헌번호 | 명칭 | 웹 기록 | EPO 기록 |",
         "| --- | --- | --- | --- | --- |",
@@ -455,10 +962,24 @@ def render(manifest: dict) -> str:
 
     verified = sum(1 for item in candidates if item["original_verified"])
     reviewed = sum(1 for item in candidates if item["page_fetch_succeeded"])
-    # group_eligible 이 없는 옛 매니페스트는 그대로 그룹에 둔다. 지난 기록을
-    # 다시 그릴 때 화면이 비어 버리면 안 된다.
-    grouped = [item for item in candidates if item.get("group_eligible", True)]
-    isolated = [item for item in candidates if not item.get("group_eligible", True)]
+    classified = [
+        (item, classification_view(item, manifest.get("version")))
+        for item in candidates
+    ]
+    # 과거 group_eligible 누락을 True로 간주하지 않는다. 저장된 검증 흔적이
+    # 없으면 잠정 그룹으로 보이게 해 과거 검색 제안을 정식 분류로 승격하지 않는다.
+    grouped = [(item, view) for item, view in classified if view["group"]]
+    provisional = [
+        (item, view) for item, view in classified if view["provisional_group"]
+    ]
+    isolated = [
+        item
+        for item, view in classified
+        if not view["group"] and not view["provisional_group"]
+    ]
+    official = sum(
+        1 for _item, view in classified if view["basis"] == CLASSIFICATION_OFFICIAL
+    )
     base_candidates = sum(
         1 for item in candidates if "claim_only" in (item.get("search_origins") or [])
     )
@@ -468,6 +989,32 @@ def render(manifest: dict) -> str:
         if item.get("search_origins") == ["spec_assisted"]
     )
     both = sum(1 for item in candidates if len(item.get("search_origins") or []) > 1)
+    # 발견 경로별 집계. search_origins 와 다른 축이라 따로 센다.
+    epo_discovered = [
+        item
+        for item in candidates
+        if search_manifest.DISCOVERY_EPO in search_manifest.discovery_origins(item)
+    ]
+    epo_only_count = sum(
+        1
+        for item in epo_discovered
+        if search_manifest.DISCOVERY_WEB
+        not in search_manifest.discovery_origins(item)
+    )
+    literature_discovered = [
+        item
+        for item in candidates
+        if search_manifest.DISCOVERY_LITERATURE
+        in search_manifest.discovery_origins(item)
+    ]
+    # 웹 검색이 식별하지 못한 문헌을 서지 검색이 몇 건이나 데려왔는가. 이 채널을
+    # 켠 효과를 한 숫자로 읽을 수 있는 자리다.
+    literature_only_count = sum(
+        1
+        for item in literature_discovered
+        if search_manifest.DISCOVERY_WEB
+        not in search_manifest.discovery_origins(item)
+    )
 
     lines = [
         (
@@ -497,7 +1044,25 @@ def render(manifest: dict) -> str:
                 f"- 두 검색에서 모두 발견된 후보 {both}건",
             ]
         ),
-        f"- 그룹 분류된 후보 {len(grouped)}건 · 미확인 검색 단서 {len(isolated)}건",
+        *(
+            [
+                f"- EPO 독립 검색이 데려온 후보 {len(epo_discovered)}건 "
+                f"(그중 웹 검색에 없던 후보 {epo_only_count}건)",
+            ]
+            if epo_discovered
+            else []
+        ),
+        *(
+            [
+                f"- ARIA 서지 검색이 데려온 후보 {len(literature_discovered)}건 "
+                f"(그중 웹 검색에 없던 후보 {literature_only_count}건)",
+            ]
+            if literature_discovered
+            else []
+        ),
+        f"- 정식 그룹 분류 {len(grouped)}건 · 잠정 그룹 분류 "
+        f"{len(provisional)}건 · 미분류 검색 단서 {len(isolated)}건",
+        f"- 공식 문헌 근거로 정식 분류된 후보 {official}건",
         f"- 페이지 본문을 읽은 것이 확인된 후보 {reviewed}건",
         f"- 원문 대조가 확인된 후보 {verified}건",
         # 옛 기록에는 search_call_count 가 없다. 그때는 호출당 질의 하나였으므로
@@ -529,6 +1094,45 @@ def render(manifest: dict) -> str:
             "",
         ]
 
+    if int(manifest.get("version") or 0) < CLASSIFICATION_SCHEMA_VERSION:
+        lines += [
+            "> **과거 분류 안전 해석:** 이 기록에 정식 분류 근거가 저장되어 있지 "
+            "않은 A/B/C는 잠정 등급으로 표시합니다. 원본 매니페스트 값은 수정하지 "
+            "않았습니다.",
+            "",
+        ]
+
+    verification = manifest.get("verification") or {}
+    if verification.get("attempted") or verification.get("reason"):
+        counts = verification.get("counts") or {}
+        lines += ["## 공식 문헌 2차 검증", ""]
+        if verification.get("reason"):
+            lines.append(f"- 상태: {verification['reason']}")
+        lines.append(
+            "- 대상/결과: "
+            f"{int(counts.get('targets') or 0)}건 · 공식 문헌 확보 "
+            f"{int(counts.get('verified') or 0)}건 · 확보 실패 "
+            f"{int(counts.get('fetch_failed') or 0)}건 · 미시도 "
+            f"{int(counts.get('not_attempted') or 0)}건"
+        )
+        usage = verification.get("usage") or {}
+        if int(usage.get("reused_artifact_calls") or 0):
+            lines.append(
+                "- EPO 응답 재사용: 계획상 완전 재사용 "
+                f"{int(usage.get('fully_reused_documents') or 0)}건 · 부분 재사용 "
+                f"{int(usage.get('partially_reused_documents') or 0)}건 · 실제 추가 "
+                "호출 없이 종료 "
+                f"{int(usage.get('reused_without_fresh_fetch_documents') or 0)}건 · "
+                "추가 호출 발생 "
+                f"{int(usage.get('reused_with_fresh_fetch_documents') or 0)}건"
+            )
+        lines += [
+            "- A/B/C는 AI 분류이며, ARIA는 보존된 공식 응답에서 그대로 대조된 "
+            "구성 행 수를 공개합니다. 안정적인 특징 분모가 없어 임의의 커버리지 "
+            "백분율은 계산하지 않습니다.",
+            "",
+        ]
+
     if verified == 0 and candidates:
         lines += [
             "이번 실행에서 원문 대조가 확인된 문헌은 없습니다. 모든 발췌 칸은 "
@@ -537,23 +1141,57 @@ def render(manifest: dict) -> str:
             "",
         ]
 
+    # 웹 채널의 출력을 읽지 못한 실행. 후보가 EPO 하나에서만 나왔다는 사실은
+    # 결과를 읽기 전에 알아야 하므로 접지 않고 맨 앞에 둔다.
+    web_error = str(reported.get("web_report_error") or "")
+    if web_error:
+        lines += [
+            "> **웹 채널의 검색 결과를 읽지 못했습니다.** 아래 후보는 EPO 독립 "
+            "검색만으로 만들어졌으며, 웹 검색이 찾은 문헌은 하나도 들어 있지 "
+            f"않습니다. 사유: {web_error}",
+            "",
+        ]
+
+    lines += _tool_isolation_section(manifest)
     lines += _focus_section(focus)
     lines += _expansion_section(manifest, reported)
-    lines += _channel_comparison_section(manifest)
 
     if not candidates:
         lines += ["## 후보", "", "제시된 후보가 없습니다.", ""]
 
+    if provisional:
+        lines += [
+            "> **잠정 분류 안내:** 검색 결과를 바탕으로 모델이 제안했지만 "
+            "페이지 본문 또는 공식 문헌 근거로 정식 승격되지 않은 후보입니다. "
+            "문헌번호와 주소는 재검토 단서로만 사용하십시오.",
+            "",
+        ]
+
     titles = _group_titles(manifest)
     for group in GROUPS:
-        rows = [item for item in grouped if item["group"] == group]
-        if not rows:
+        formal_rows = [
+            (item, view) for item, view in grouped if view["group"] == group
+        ]
+        provisional_rows = [
+            (item, view)
+            for item, view in provisional
+            if view["provisional_group"] == group
+        ]
+        if not formal_rows and not provisional_rows:
             continue
         lines += [f"## {titles[group]}", ""]
-        for item in rows:
-            lines += _candidate_section(item)
+        if formal_rows:
+            lines += ["### 정식 분류", ""]
+            for item, view in formal_rows:
+                item = {**item, "classification_basis": view["basis"]}
+                lines += _candidate_section(item)
+        lines += _provisional_candidates(provisional_rows)
 
     lines += _isolated_section(isolated)
+    # 후보 분류를 모두 읽은 뒤에만 채널 감사 표가 나온다. 표 전체는 기본으로
+    # 접혀 있어 20~30건의 EPO 차집합이 핵심 A/B/C 결과를 밀어내지 않는다.
+    lines += _channel_comparison_section(manifest)
+    lines += _epo_strategy_section(manifest)
 
     failures = (reported.get("access_failures") or [])
     if failures:

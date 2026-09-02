@@ -40,22 +40,19 @@ def test_health(client) -> None:
     assert client.get("/api/health").json()["status"] == "ok"
 
 
-def test_prompt_crud_and_versioning(client) -> None:
+def test_prompt_crud(client) -> None:
     created = client.post(
         "/api/prompts", json={"name": "CRUD", "body": "본문 1", "tags": ["t1"]}
     ).json()
-    assert created["version"] == 1
+    assert "version" not in created
 
     updated = client.put(f"/api/prompts/{created['id']}", json={"body": "본문 2"}).json()
-    assert updated["version"] == 2
+    assert updated["body"] == "본문 2"
 
-    # 본문이 그대로면 버전을 올리지 않는다.
     same = client.put(f"/api/prompts/{created['id']}", json={"body": "본문 2"}).json()
-    assert same["version"] == 2
+    assert same["body"] == "본문 2"
 
-    versions = client.get(f"/api/prompts/{created['id']}/versions").json()
-    assert [v["version"] for v in versions] == [2, 1]
-    assert versions[1]["body"] == "본문 1"
+    assert client.get(f"/api/prompts/{created['id']}/versions").status_code == 404
 
     assert client.delete(f"/api/prompts/{created['id']}").status_code == 204
     assert client.get(f"/api/prompts/{created['id']}").status_code == 404
@@ -117,10 +114,10 @@ def test_search_prompt_catalog_edit_validates_execution_contract(client) -> None
     assert invalid.status_code == 422
     assert "{{CLAIM_TEXT}}" in invalid.json()["detail"]
 
-    versions = client.get(
-        "/api/prompts/reserved/search_prompt.md/versions"
-    ).json()
-    assert versions[0]["name"] == "검색 프롬프트"
+    assert (
+        client.get("/api/prompts/reserved/search_prompt.md/versions").status_code
+        == 404
+    )
 
 
 def test_prompt_file_is_the_live_source(client) -> None:
@@ -246,7 +243,7 @@ def test_job_success_flow(client, prompt) -> None:
     assert final["result_text"]
     assert final["final_prompt_sha256"]
     assert final["prompt_snapshot"] == prompt["body"]
-    assert final["prompt_version"] == prompt["version"]
+    assert "prompt_version" not in final
     assert final["duration_ms"] is not None
 
 
@@ -729,3 +726,34 @@ def test_no_api_key_endpoint_exists(client) -> None:
 
     paths = {r.path for r in app.routes if hasattr(r, "path")}
     assert not any("key" in p.lower() or "token" in p.lower() for p in paths)
+
+
+# ------------------------------------------------------------------- 추론강도
+
+
+def test_reasoning_effort_defaults_to_the_model_default(client) -> None:
+    """기본값은 "모델 기본값" 이다. ARIA 가 레벨을 대신 정해 주지 않는다."""
+    values = client.get("/api/settings").json()["values"]
+    assert values["reasoning_effort"] == {}
+
+
+def test_reasoning_effort_accepts_a_known_level(client) -> None:
+    updated = client.put(
+        "/api/settings", json={"values": {"reasoning_effort": {"codex": "high"}}}
+    ).json()
+    assert updated["values"]["reasoning_effort"] == {"codex": "high"}
+    # 빈 값으로 되돌리면 키가 사라진다 = 모델 기본값.
+    restored = client.put(
+        "/api/settings", json={"values": {"reasoning_effort": {"codex": ""}}}
+    ).json()
+    assert restored["values"]["reasoning_effort"] == {}
+
+
+def test_reasoning_effort_rejects_an_unknown_level(client) -> None:
+    """오타 하나가 실행 전체를 실패로 만든다. 설정 화면에서 막는다."""
+    assert (
+        client.put(
+            "/api/settings", json={"values": {"reasoning_effort": {"codex": "higher"}}}
+        ).status_code
+        == 400
+    )

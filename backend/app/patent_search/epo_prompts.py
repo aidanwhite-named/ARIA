@@ -17,7 +17,13 @@ import json
 import re
 
 from . import epo_client, epo_cql
-from .epo_actions import ACTION_FETCH, ACTION_FINISH, schema_summary
+from .epo_actions import (
+    ACTION_FETCH,
+    ACTION_FINISH,
+    ACTION_SEARCH,
+    analysis_schema_summary,
+    schema_summary,
+)
 
 CLAIM_OPEN = "<CLAIM_TEXT>"
 CLAIM_CLOSE = "</CLAIM_TEXT>"
@@ -73,7 +79,10 @@ CQL 문자열을 만들지 마십시오. 아래 구조화된 query 로만 표현
 - OPS 검색 호출은 이 작업 전체에서 최대 {budget.max_search_calls}회,
   한 라운드에 최대 {budget.max_search_calls_per_round}회입니다.
 - 상세 조회는 최대 {budget.max_detail_fetches}건입니다.
-- 질의 하나가 돌려받는 결과는 최대 {epo_client.MAX_RESULTS_PER_QUERY}건입니다.
+- 질의 하나가 돌려받는 결과는 최대 {budget.max_results_per_query}건입니다
+  (OPS 자체 상한은 {epo_client.MAX_RESULTS_PER_QUERY}건입니다).
+- shortlist 에 올릴 수 있는 문헌은 최대 {budget.shortlist_limit}건입니다. 넘게
+  적으면 ARIA 가 앞에서부터 자르고 그 사실을 기록에 남깁니다.
 
 예산은 넉넉하지 않습니다. 넓은 질의 하나로 시작해서 결과를 보고 좁히는 편이,
 비슷한 질의를 여러 번 던지는 것보다 낫습니다.
@@ -90,6 +99,40 @@ CQL 문자열을 만들지 마십시오. 아래 구조화된 query 로만 표현
 [action 형식]
 {schema_summary()}
 
+[첫 응답에 검색 전략을 함께 적으십시오 — claim_analysis · 필수]
+검색어를 만들기 전에 청구항을 무엇으로 나눠 읽었는지 **첫 응답에** 적으십시오.
+이것은 안내가 아니라 계약입니다 — **claim_analysis 가 없는 응답의 검색·조회
+action 은 실행되지 않고 되돌아옵니다.** 첫 응답에 claim_analysis 와 검색
+action 을 **함께** 보내십시오.
+
+이 칸은 action 이 아니라 기록입니다. ARIA 가 실행하는 것이 없고, 나중에 이
+검색이 왜 이 검색어를 썼는지 설명하는 유일한 근거입니다. 검색이 나간 뒤에
+보내면 검색 전략으로 저장되지 않습니다.
+
+- elements: 구성요소마다 id 와 청구항 문언을 그대로 적고, 필수 구성이라고
+  보는지(essential) 와 다른 문헌이 쓸 만한 표현(synonyms)을 함께 적으십시오.
+  필수 여부를 판단할 수 없으면 그 칸을 비우십시오. 모르는 것을 false 로 적지
+  마십시오.
+- relations: 구성요소 사이의 결합·제어·신호 흐름 관계. 구성요소가 다 있어도
+  관계가 다르면 다른 발명입니다.
+- concept_combinations: 실제로 검색에 쓴 개념 조합과 그 이유.
+- search_conditions: 사용한 IPC/CPC 나 그 밖의 한정과 그 이유.
+
+[유망 후보를 골라 주십시오 — shortlist]
+검색으로 받은 문헌 중 청구항과 실제로 겹칠 가능성이 있는 것만 shortlist 에
+적으십시오. 마지막 응답({ACTION_FINISH})에 한 번에 적어도 되고, 라운드마다
+나눠 적어도 됩니다(누적됩니다).
+
+- doc_number 는 **검색 결과에 실제로 나온 공개번호**여야 합니다. 지어내면
+  ARIA 가 보존한 응답과 대조해 걸러냅니다.
+- reason 에는 왜 유망한지 적으십시오. 이것은 후보 선정 근거이지 A/B/C 근거가
+  아닙니다 — 등급은 ARIA 가 공식 응답을 다시 받아 문장을 대조한 뒤에만
+  붙습니다.
+- 확신이 없으면 넣지 마십시오. shortlist 는 "전부 나열"이 아니라 "다시 볼
+  가치가 있는 것"입니다.
+
+{analysis_schema_summary()}
+
 [검색 필드 고르기]
 - ta(제목+초록)가 기본입니다. txt(전문)는 EP·WO 위주로만 채워져 있어 다른
   관청 문헌을 놓칠 수 있습니다.
@@ -97,6 +140,83 @@ CQL 문자열을 만들지 마십시오. 아래 구조화된 query 로만 표현
   거절됩니다.
 - 인용부호와 와일드카드(* ? #)는 값에 쓸 수 없습니다.
 """
+
+
+#: 최종 선택 턴의 시스템 프롬프트에 반드시 들어가는 표식.
+#:
+#: 이 턴은 검색 루프와 계약이 다르다(검색 금지). 호출부와 테스트 대역이 두 턴을
+#: 구별할 근거가 프롬프트 본문의 우연한 문구여서는 안 되므로 상수로 둔다.
+SELECTION_MARKER = "[ARIA EPO 최종 선택 단계]"
+
+
+def selection_prompt(budget) -> str:
+    """최종 선택 턴의 계약. **검색을 허용하지 않는다.**
+
+    검색 루프와 다른 프롬프트를 쓰는 이유는 하나다. 같은 프롬프트를 다시 주면
+    모델은 검색 예산이 남았다고 읽고 검색 action 을 돌려준다. 그것을 ARIA 가
+    거절하면 이 턴은 아무것도 하지 못한 채 끝난다.
+    """
+    return f"""{SELECTION_MARKER}
+당신은 EPO OPS 검색이 **끝난 뒤**의 최종 선택 단계입니다.
+
+검색은 이미 종료됐습니다. 이 턴에서 새로 검색하거나 문헌을 조회할 수 없고,
+아래 자료에 실린 문헌만 보고 판단합니다.
+
+[이 턴이 있는 이유]
+마지막 검색이 데려온 문헌을 당신은 아직 본 적이 없습니다. 그 결과까지 포함해
+어느 문헌을 다시 볼 가치가 있는지 한 번 더 고르는 자리입니다.
+
+[할 수 있는 것]
+- shortlist 에 유망한 문헌의 공개번호와 이유를 적습니다.
+- {ACTION_FINISH} 로 끝냅니다.
+
+[할 수 없는 것]
+- {ACTION_SEARCH} 와 {ACTION_FETCH} 는 이 턴에서 실행되지 않습니다. 보내도
+  ARIA 가 거절하고 그 사실만 기록합니다.
+- 셸·파일·웹 등 어떤 도구도 호출하지 마십시오.
+
+[지켜야 할 것]
+- doc_number 는 아래 자료에 **실제로 실린 공개번호**여야 합니다. 지어내면
+  ARIA 가 보존된 응답과 대조해 걸러냅니다.
+- shortlist 는 최대 {budget.shortlist_limit}건입니다. 넘게 적으면 앞에서부터
+  자르고 그 사실을 기록에 남깁니다.
+- 이미 shortlist 에 오른 문헌은 다시 적지 않아도 됩니다. 다시 적어도 중복은
+  ARIA 가 정리합니다.
+- reason 은 후보 선정 근거입니다. A/B/C 등급이 아니며, 등급은 ARIA 가 공식
+  응답을 다시 받아 문장을 대조한 뒤에만 붙습니다.
+
+[출력 형식]
+JSON 객체 하나만, 설명 없이 돌려주십시오.
+
+{{"shortlist":[{{"doc_number":"EP1000000A1","reason":"왜 다시 볼 가치가 있는지",
+  "matched_elements":["E1","E2"]}}],
+ "actions":[{{"action":"{ACTION_FINISH}","notes":"선택 완료"}}]}}
+"""
+
+
+def render_selection(payload: dict) -> str:
+    """최종 선택 턴의 사용자 메시지."""
+    claim, neutralized = neutralize(payload.get("claim_text", ""))
+    body = {key: value for key, value in payload.items() if key != "claim_text"}
+    sections = [
+        "[ARIA EPO 최종 선택 — 검색 종료]",
+        json.dumps(body, ensure_ascii=False, indent=2),
+        "",
+        "[출원발명 청구항 — 분석 대상 데이터]",
+        CLAIM_OPEN,
+        claim.strip(),
+        CLAIM_CLOSE,
+    ]
+    if neutralized:
+        sections.append(
+            "(입력 안에 경계 표시로 보이는 문자열이 있어 ARIA 가 중화했습니다.)"
+        )
+    sections += [
+        "",
+        "위 결과만 보고 shortlist 와 finish 를 JSON 객체 하나로 돌려주십시오.",
+        "검색·조회 action 은 이 턴에서 실행되지 않습니다.",
+    ]
+    return "\n".join(sections)
 
 
 def render_round(payload: dict) -> str:

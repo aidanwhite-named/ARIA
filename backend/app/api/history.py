@@ -75,7 +75,6 @@ def _history_item(row: ExecutionJob, descendant_count: int = 0) -> HistoryItem:
         error_code=row.error_code,
         job_kind=row.job_kind or JobKind.PATENT_ANALYSIS,
         prompt_name=row.prompt_name,
-        prompt_version=row.prompt_version,
         provider=row.provider,
         model=row.model,
         created_at=row.created_at,

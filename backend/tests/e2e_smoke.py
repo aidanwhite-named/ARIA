@@ -49,12 +49,12 @@ def main(base: str, live_provider: str | None = None) -> int:
                 "tags": ["e2e"],
             },
         ).json()
-        check("프롬프트 생성", prompt.get("version") == 1, json.dumps(prompt)[:200])
+        check("프롬프트 생성", "version" not in prompt, json.dumps(prompt)[:200])
 
         updated = client.put(
             f"/api/prompts/{prompt['id']}", json={"body": "첨부 자료의 핵심을 요약하십시오."}
         ).json()
-        check("본문 수정 시 버전 증가", updated["version"] == 2)
+        check("프롬프트 본문 수정", updated["body"] == "첨부 자료의 핵심을 요약하십시오.")
 
         pdf_bytes = build_pdf(
             [

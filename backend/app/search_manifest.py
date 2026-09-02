@@ -12,7 +12,7 @@
 
   모델이 보고한 것 : 검색 라운드, 후보 목록, 접근 실패
   ARIA 가 관측한 것 : 실제 도구 호출 이름·시각·검색어·성공 여부, 청구항,
-                      검색 프롬프트 버전과 해시, 실행 시각
+                      검색 프롬프트 해시, 실행 시각
 
 둘을 섞지 않는다. 모델의 자기 보고와 ARIA 가 스트림에서 직접 본 것은 증거
 등급이 다르다. `observed` 아래 있는 것만 ARIA 가 보증한다.
@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 7
+MANIFEST_VERSION = 10
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -89,13 +89,65 @@ KNOWN_CHANNELS = MODEL_REPORTED_CHANNELS + ARIA_PRODUCED_CHANNELS
 PROV_SNIPPET = "search_snippet"
 PROV_WEBFETCH = "webfetch_summary"
 PROV_RAW = "raw_original_verified"
-PROVENANCE = (PROV_SNIPPET, PROV_WEBFETCH, PROV_RAW)
+# ARIA 가 OPS 를 직접 불러 받은 응답에서 후보를 만들었다. 모델이 주장할 수 없는
+# 값이다 — 이 값이 붙는 유일한 경로는 epo_agent 가 돌린 검색이고, 그 응답은
+# 아티팩트로 보존되어 있다. "원문 대조 완료"와 다르다: 응답을 받아 보존했다는
+# 뜻이지, 그 안의 문장이 특허 원문의 직접 인용이라는 뜻이 아니다.
+PROV_OFFICIAL_RESPONSE = "official_record_response"
+MODEL_REPORTED_PROVENANCE = (PROV_SNIPPET, PROV_WEBFETCH, PROV_RAW)
+ARIA_PRODUCED_PROVENANCE = (PROV_OFFICIAL_RESPONSE,)
+PROVENANCE = MODEL_REPORTED_PROVENANCE + ARIA_PRODUCED_PROVENANCE
 
 EVIDENCE_CANDIDATE = "candidate_only"
 EVIDENCE_REVIEWED = "source_page_reviewed"
-EVIDENCE_STATUS = (EVIDENCE_CANDIDATE, EVIDENCE_REVIEWED)
+# ARIA 가 서버에서 공식 문헌(EPO OPS)을 직접 받아 아티팩트로 보존하고, 그
+# 아티팩트에 대조가 끝난 후보. 채널과 같은 이유로 목록을 둘로 나눈다 — 모델
+# 보고에 이 값을 허용하는 순간, 열어 보지도 않은 후보가 "공식 문헌 확인됨"
+# 으로 보고서에 실린다.
+EVIDENCE_OFFICIAL = "official_record_verified"
+MODEL_REPORTED_EVIDENCE_STATUS = (EVIDENCE_CANDIDATE, EVIDENCE_REVIEWED)
+ARIA_PRODUCED_EVIDENCE_STATUS = (EVIDENCE_OFFICIAL,)
+EVIDENCE_STATUS = MODEL_REPORTED_EVIDENCE_STATUS + ARIA_PRODUCED_EVIDENCE_STATUS
 
 GROUPS = ("A", "B", "C")
+
+# A/B/C 값과 그 값을 뒷받침하는 근거는 별개의 축이다. ``group`` 하나만
+# 저장하면 페이지 본문을 본 분류와 공식 문헌을 대조한 분류가 화면에서 같은
+# 것으로 보인다. 또한 과거 매니페스트의 group 을 새 기준의 정식 분류로
+# 오인하기 쉽다. 아래 값은 ARIA 가 저장된 관측 필드로 계산하며 모델이 고르지
+# 않는다.
+CLASSIFICATION_NONE = "none"
+CLASSIFICATION_LEGACY = "legacy_unknown"
+CLASSIFICATION_SEARCH = "search_result"
+CLASSIFICATION_PAGE = "page_observed"
+CLASSIFICATION_OFFICIAL = "official_record"
+CLASSIFICATION_ORIGINAL = "original_text"
+CLASSIFICATION_BASES = (
+    CLASSIFICATION_NONE,
+    CLASSIFICATION_LEGACY,
+    CLASSIFICATION_SEARCH,
+    CLASSIFICATION_PAGE,
+    CLASSIFICATION_OFFICIAL,
+    CLASSIFICATION_ORIGINAL,
+)
+
+# 후보별 검증 상태. 검색 전체의 실패 사유만 남기면 일부 후보만 OPS 조회에
+# 실패한 실행을 설명할 수 없다. 모든 새 후보는 이 객체를 가지며, 공식 검증
+# 단계가 진행될 때 후보마다 상태와 사유가 갱신된다.
+VERIFY_NOT_ATTEMPTED = "not_attempted"
+VERIFY_FETCH_FAILED = "fetch_failed"
+VERIFY_RECORD_FETCHED = "record_fetched"
+VERIFY_CLASSIFICATION_FAILED = "classification_failed"
+VERIFY_EVIDENCE_MISMATCH = "evidence_mismatch"
+VERIFY_PROMOTED = "promoted"
+VERIFICATION_STATUSES = (
+    VERIFY_NOT_ATTEMPTED,
+    VERIFY_FETCH_FAILED,
+    VERIFY_RECORD_FETCHED,
+    VERIFY_CLASSIFICATION_FAILED,
+    VERIFY_EVIDENCE_MISMATCH,
+    VERIFY_PROMOTED,
+)
 
 # 그룹 정의의 단일 출처.
 #
@@ -131,7 +183,13 @@ DEGREES = ("강한 대응", "부분 대응", "관련은 있으나 다름", DEGRE
 SUPPORT_PAGE = "page_text"
 SUPPORT_SNIPPET = "snippet"
 SUPPORT_NONE = "none"
-SUPPORT_SOURCES = (SUPPORT_PAGE, SUPPORT_SNIPPET, SUPPORT_NONE)
+# ARIA 가 보존한 공식 응답 아티팩트에서 이 행의 support_text 를 실제로 찾아낸
+# 경우에만 붙는다. 모델은 이 값을 고르지 못한다 — 2차 분류 턴에서도 마찬가지다.
+# 그 턴의 support_source 는 모델이 적는 것이 아니라, ARIA 가 대조 결과로 붙인다.
+SUPPORT_OFFICIAL = "official_record"
+MODEL_REPORTED_SUPPORT_SOURCES = (SUPPORT_PAGE, SUPPORT_SNIPPET, SUPPORT_NONE)
+ARIA_PRODUCED_SUPPORT_SOURCES = (SUPPORT_OFFICIAL,)
+SUPPORT_SOURCES = MODEL_REPORTED_SUPPORT_SOURCES + ARIA_PRODUCED_SUPPORT_SOURCES
 
 # 그 근거를 문헌의 어디까지 보고 말하는가.
 #
@@ -163,6 +221,33 @@ ORIGIN_CLAIM_ONLY = "claim_only"
 ORIGIN_SPEC_ASSISTED = "spec_assisted"
 SEARCH_ORIGINS = (ORIGIN_CLAIM_ONLY, ORIGIN_SPEC_ASSISTED)
 
+# --- 발견 경로 --------------------------------------------------------------
+#
+# search_origins(claim_only / spec_assisted)와 **다른 축**이다. 저쪽은 "무엇을
+# 입력으로 검색했나"이고 이쪽은 "어느 검색 경로가 이 문헌을 데려왔나"이다. 한
+# 후보가 두 경로에서 모두 나올 수 있고, 그때 두 값을 다 남긴다 — 한쪽을 지우면
+# "EPO 를 켜서 더 얻은 것이 무엇인가"에 답할 수 없다.
+#
+# 값이 없는 옛 후보는 web 으로 읽는다. v8 까지 후보를 만든 경로는 모델의 웹
+# 검색 보고뿐이었다.
+DISCOVERY_WEB = "web"
+DISCOVERY_EPO = "epo"
+# ARIA 가 서지 DB(Crossref·Europe PMC)에 직접 물어 데려온 후보. 웹 검색이 논문을
+# **식별**하지 못하는 실행에서 유일하게 제목과 DOI 가 붙은 후보를 만드는 경로다.
+DISCOVERY_LITERATURE = "literature"
+DISCOVERY_ORIGINS = (DISCOVERY_WEB, DISCOVERY_EPO, DISCOVERY_LITERATURE)
+
+
+def discovery_origins(candidate: dict) -> list[str]:
+    """이 후보를 데려온 경로. 옛 기록은 web 하나로 읽는다."""
+    raw = (candidate or {}).get("discovery_origins")
+    found = [
+        origin
+        for origin in DISCOVERY_ORIGINS
+        if isinstance(raw, list) and origin in raw
+    ]
+    return found or [DISCOVERY_WEB]
+
 # --- 레인 ------------------------------------------------------------------
 #
 # 레인은 (검색 경로 × 검색 기원)이다. 네 개가 전부이고 id 는 고정이다.
@@ -178,6 +263,7 @@ LANE_CHANNEL_EPO = "epo"
 LANE_CHANNELS = (LANE_CHANNEL_WEB, LANE_CHANNEL_EPO)
 
 EPO_BACKEND_ID = "epo"
+LITERATURE_BACKEND_ID = "literature"
 
 
 def lane_id(channel: str, origin: str) -> str:
@@ -191,8 +277,13 @@ LANE_IDS = tuple(
     for origin in SEARCH_ORIGINS
 )
 
-_UNVERIFIED_EXCERPT = "원문에서 확인되지 않음"
-_UNVERIFIED_LOCATION = "확인 필요"
+# 원문을 확보하지 못한 칸에 들어가는 고정 문구. 검증 단계(search_verification)도
+# 같은 문구를 쓴다 — 두 곳에서 따로 적으면 한쪽만 바뀌었을 때 보고서에 두 가지
+# "미확인" 표기가 섞인다.
+UNVERIFIED_EXCERPT = "원문에서 확인되지 않음"
+UNVERIFIED_LOCATION = "확인 필요"
+_UNVERIFIED_EXCERPT = UNVERIFIED_EXCERPT
+_UNVERIFIED_LOCATION = UNVERIFIED_LOCATION
 
 # Provider 별 도구 이름. 감사 스키마는 같은 web 채널로 정규화하지만 실제 호출
 # 이름은 tool_calls 에 그대로 보존한다.
@@ -247,9 +338,100 @@ def _text(value, limit: int = _MAX_TEXT) -> str:
     return str(value).strip()[:limit]
 
 
-def _one_of(value, allowed: tuple[str, ...], fallback: str) -> str:
+def one_of(value, allowed: tuple[str, ...], fallback: str) -> str:
+    """허용 목록 밖의 값은 조용히 fallback 으로 바꾼다."""
     candidate = _text(value, 60)
     return candidate if candidate in allowed else fallback
+
+
+_one_of = one_of
+
+
+def empty_candidate_verification(
+    *, reason_code: str = "not_requested", detail: str = ""
+) -> dict:
+    """새 후보에 붙이는 후보 단위 검증 감사 기록."""
+    return {
+        "status": VERIFY_NOT_ATTEMPTED,
+        "reason_code": _text(reason_code, 120),
+        "detail": _text(detail, 1000),
+        "backend_id": "",
+        "artifact_ids": [],
+    }
+
+
+def classification_view(candidate: dict, manifest_version: int | None = None) -> dict:
+    """저장된 후보를 정식/잠정 분류로 안전하게 해석한다.
+
+    과거 스키마에는 ``group_eligible`` 자체가 없었다. 그 값을 ``True`` 로
+    간주하면 검색 결과만 보고 붙인 옛 A/B/C가 새 기준의 정식 분류로 승격된다.
+    따라서 명시적인 게이트 또는 저장된 검증 흔적이 없으면 항상 잠정으로 본다.
+    이 함수는 입력 dict를 수정하지 않으므로 과거 아티팩트도 그대로 보존된다.
+    """
+    raw_group = candidate.get("group") if candidate.get("group") in GROUPS else None
+    raw_provisional = (
+        candidate.get("provisional_group")
+        if candidate.get("provisional_group") in GROUPS
+        else None
+    )
+    eligibility = candidate.get("group_eligible")
+
+    def has_rows(key: str) -> bool:
+        try:
+            return int(candidate.get(key) or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    official_supported = has_rows("official_supported_rows")
+    official_evidence = candidate.get("official_evidence")
+    official_evidence = official_evidence if isinstance(official_evidence, dict) else {}
+    official_saved = bool(
+        candidate.get("evidence_status") == EVIDENCE_OFFICIAL
+        and official_evidence.get("artifact_ids")
+        and official_supported
+    )
+    original_saved = bool(candidate.get("original_verified") and raw_group)
+    page_saved = bool(
+        candidate.get("identifier_url_matched")
+        and candidate.get("page_fetch_succeeded")
+        and has_rows("page_supported_rows")
+    )
+    explicitly_formal = eligibility is True or official_saved or original_saved or page_saved
+
+    if raw_group and explicitly_formal:
+        stored_basis = candidate.get("classification_basis")
+        if stored_basis in (
+            CLASSIFICATION_PAGE,
+            CLASSIFICATION_OFFICIAL,
+            CLASSIFICATION_ORIGINAL,
+        ):
+            basis = stored_basis
+        elif original_saved:
+            basis = CLASSIFICATION_ORIGINAL
+        elif official_saved or candidate.get("evidence_status") == EVIDENCE_OFFICIAL:
+            basis = CLASSIFICATION_OFFICIAL
+        else:
+            basis = CLASSIFICATION_PAGE
+        return {"group": raw_group, "provisional_group": None, "basis": basis}
+
+    proposed = raw_provisional or raw_group
+    if proposed:
+        stored_basis = candidate.get("classification_basis")
+        if stored_basis in (CLASSIFICATION_SEARCH, CLASSIFICATION_LEGACY):
+            basis = stored_basis
+        # 명시적으로 게이트에서 탈락했거나 잠정 칸이 있으면 당시 분류가 검색
+        # 결과 기반 제안이었다는 구조적 흔적이 남아 있다.
+        elif eligibility is False or raw_provisional:
+            basis = CLASSIFICATION_SEARCH
+        else:
+            basis = CLASSIFICATION_LEGACY
+        return {"group": None, "provisional_group": proposed, "basis": basis}
+
+    return {
+        "group": None,
+        "provisional_group": None,
+        "basis": CLASSIFICATION_NONE,
+    }
 
 
 def normalize_url(raw) -> str:
@@ -392,7 +574,9 @@ def _mapping_row(
     근거가 없는 행은 등급만 내리지 않고 서술 칸도 비운다. 등급을 내려도 산문이
     남아 있으면 사용자는 그 산문을 읽는다.
     """
-    support = _one_of(entry.get("support_source"), SUPPORT_SOURCES, SUPPORT_NONE)
+    support = _one_of(
+        entry.get("support_source"), MODEL_REPORTED_SUPPORT_SOURCES, SUPPORT_NONE
+    )
     degree = _one_of(entry.get("degree"), DEGREES, DEGREE_UNKNOWN)
     counterpart = _text(entry.get("counterpart"), 1500)
     similar = _text(entry.get("similar"), 1500)
@@ -546,8 +730,14 @@ def _normalize_candidate(
             f"후보 {index}: 모델이 보고한 채널 '{claimed_channel}' 은 모델이 "
             f"주장할 수 없는 값이므로 '{channel}' 로 바꿨습니다."
         )
-    provenance = _one_of(entry.get("provenance"), PROVENANCE, PROV_SNIPPET)
-    evidence = _one_of(entry.get("evidence_status"), EVIDENCE_STATUS, EVIDENCE_CANDIDATE)
+    # 모델이 고를 수 있는 값만 받는다. official_record_response 는 ARIA 가
+    # OPS 를 직접 부른 경로에만 붙으므로, 모델이 주장하면 스니펫으로 내려간다.
+    provenance = _one_of(entry.get("provenance"), MODEL_REPORTED_PROVENANCE, PROV_SNIPPET)
+    evidence = _one_of(
+        entry.get("evidence_status"),
+        MODEL_REPORTED_EVIDENCE_STATUS,
+        EVIDENCE_CANDIDATE,
+    )
     url = _text(entry.get("url"), 1000)
     canonical = normalize_url(url)
 
@@ -737,9 +927,34 @@ def _normalize_candidate(
     # 분류된 후보처럼 읽힌다 — 채널 대조와 프런트 집계가 그 값을 그대로 쓴다.
     group = _one_of(entry.get("group"), GROUPS, "C") if group_eligible else None
 
+    # 검증되지 않은 분류는 **버리지 않고 다른 칸에 둔다.** 예전에는 group 에
+    # null 을 넣는 것으로 끝냈는데, 그러면 모델이 실제로 내린 판단이 기록에서
+    # 통째로 사라진다. 사용자에게는 "그 후보를 어떻게 봤는지"가 다시 확인해 볼
+    # 단서이고, 없앨 이유는 "검증되지 않았다"는 것뿐이다 — 그건 값을 지우는
+    # 대신 칸을 나눠서 말하면 된다.
+    #
+    # 두 칸은 **동시에 차지 않는다.** group 이 차면 provisional_group 은 null
+    # 이다. 둘 다 값이 있으면 화면과 집계가 어느 쪽을 이 후보의 분류로 읽어야
+    # 하는지 알 수 없고, 결국 둘 중 하나가 조용히 승격된다.
+    claimed_group = entry.get("group") if entry.get("group") in GROUPS else None
+    provisional_group = None if group_eligible else claimed_group
+    classification_basis = (
+        CLASSIFICATION_ORIGINAL
+        if group_eligible and original_verified
+        else CLASSIFICATION_PAGE
+        if group_eligible
+        else CLASSIFICATION_SEARCH
+        if provisional_group
+        else CLASSIFICATION_NONE
+    )
+
     return {
         "index": index,
         "group": group,
+        # 검증되지 않은 잠정 A/B/C. group 이 null 인 후보에만 값이 있다.
+        "provisional_group": provisional_group,
+        # 모델이 고르는 값이 아니라 위의 ARIA 게이트 결과로 계산한다.
+        "classification_basis": classification_basis,
         "provisional": provisional,
         "channel": channel,
         "doc_type": _one_of(entry.get("doc_type"), DOC_TYPES, "other"),
@@ -768,6 +983,14 @@ def _normalize_candidate(
         "quarantine_reason": quarantine_reason,
         "group_eligible": group_eligible,
         "page_supported_rows": page_supported_rows,
+        # ARIA 가 서버에서 공식 문헌을 조회한 기록. 조회하지 않은 후보는 빈
+        # dict 다. "조회했는데 실패" 와 "아예 조회하지 않음" 을 구별해야 하므로
+        # 없는 키로 두지 않는다.
+        "official_evidence": {},
+        "verification": empty_candidate_verification(
+            reason_code="official_verification_not_run",
+            detail="공식 문헌 검증을 아직 실행하지 않았습니다.",
+        ),
         "verbatim_excerpt": excerpt,
         "source_location": location,
         "mapping": mapping,
@@ -775,6 +998,12 @@ def _normalize_candidate(
         # 이 값은 모델이 고르는 것이 아니라 ARIA 가 실행 경로에서 붙인다.
         "search_origins": [search_origin],
         "origin_groups": {search_origin: group},
+        "origin_provisional_groups": {search_origin: provisional_group},
+        # 이 후보를 데려온 검색 경로. 모델 보고 경로는 언제나 web 이다.
+        "discovery_origins": [DISCOVERY_WEB],
+        # EPO 독립 검색이 같은 문헌을 데려왔을 때 그 기록이 붙는 자리.
+        # 비어 있으면 EPO 검색에서는 나오지 않았다는 뜻이다.
+        "epo_discovery": {},
     }
 
 
@@ -973,6 +1202,54 @@ def _evidence_score(candidate: dict) -> tuple[int, int, int, int, int]:
     )
 
 
+def _with_classification_metadata(candidate: dict) -> dict:
+    """후보의 분류 불변식과 출처별 정식/잠정 지도를 맞춘 복사본."""
+    value = dict(candidate)
+    view = classification_view(value)
+    value["group"] = view["group"]
+    value["provisional_group"] = view["provisional_group"]
+    value["classification_basis"] = view["basis"]
+    value.setdefault(
+        "verification",
+        empty_candidate_verification(
+            reason_code="legacy_or_not_requested",
+            detail="후보 단위 공식 검증 기록이 없습니다.",
+        ),
+    )
+
+    origins = list(value.get("search_origins") or [])
+    formal = {
+        origin: group
+        for origin, group in dict(value.get("origin_groups") or {}).items()
+        if origin in SEARCH_ORIGINS and group in GROUPS
+    }
+    provisional = {
+        origin: group
+        for origin, group in dict(
+            value.get("origin_provisional_groups") or {}
+        ).items()
+        if origin in SEARCH_ORIGINS and group in GROUPS
+    }
+    if not view["group"]:
+        # 예전 origin_groups에는 검증되지 않은 모델 분류도 들어갔다. 후보 자체가
+        # 정식이 아닌데 출처 지도만 정식으로 남으면 병합 때 다시 승격된다.
+        formal = {}
+    if not view["provisional_group"]:
+        provisional = {}
+    if len(origins) == 1:
+        origin = origins[0]
+        if view["group"]:
+            formal.setdefault(origin, view["group"])
+        elif view["provisional_group"]:
+            provisional.setdefault(origin, view["provisional_group"])
+    value["origin_groups"] = formal
+    value["origin_provisional_groups"] = provisional
+    # 발견 경로는 계산하지 않고 정규화만 한다. 옛 후보는 web 으로 읽는다.
+    value["discovery_origins"] = discovery_origins(value)
+    value.setdefault("epo_discovery", {})
+    return value
+
+
 def merge_reported(*reports: dict | None) -> dict | None:
     """독립 검색 결과를 합집합으로 병합한다.
 
@@ -999,10 +1276,11 @@ def merge_reported(*reports: dict | None) -> dict | None:
                 failures.append(failure)
 
         for candidate_index, candidate in enumerate(report.get("candidates") or []):
+            candidate = _with_classification_metadata(candidate)
             key = _identity_key(candidate, f"anon:{report_index}:{candidate_index}")
             existing = candidates.get(key)
             if existing is None:
-                candidates[key] = dict(candidate)
+                candidates[key] = candidate
                 continue
 
             prior_origins = list(existing.get("search_origins") or [])
@@ -1014,24 +1292,65 @@ def merge_reported(*reports: dict | None) -> dict | None:
             ]
             origin_groups = dict(existing.get("origin_groups") or {})
             origin_groups.update(candidate.get("origin_groups") or {})
+            origin_provisional_groups = dict(
+                existing.get("origin_provisional_groups") or {}
+            )
+            origin_provisional_groups.update(
+                candidate.get("origin_provisional_groups") or {}
+            )
 
             # 더 잘 확인된 경로의 서지·증거 필드를 사용하되, 기본 검색의 분류는
             # 명세서 보조 검색이 덮어쓰지 못한다.
             if _evidence_score(candidate) > _evidence_score(existing):
                 replacement = dict(candidate)
-                if not replacement.get("group_eligible", True):
-                    # 병합 결과가 그룹 자격을 잃었으면 어느 경로의 분류도
-                    # 물려받지 않는다. 미확인 단서에 A/B/C 가 남으면 안 된다.
+                replacement_view = classification_view(replacement)
+                if not replacement_view["group"]:
+                    # 검증되지 않은 분류도 버리지는 않되 정식 칸으로 물려받지
+                    # 않는다. claim_only의 잠정 분류를 우선 보존한다.
                     replacement["group"] = None
+                    base_provisional = origin_provisional_groups.get(
+                        ORIGIN_CLAIM_ONLY
+                    )
+                    if base_provisional not in GROUPS:
+                        base_provisional = (
+                            classification_view(existing)["provisional_group"]
+                            or replacement_view["provisional_group"]
+                        )
+                    replacement["provisional_group"] = (
+                        base_provisional if base_provisional in GROUPS else None
+                    )
+                    replacement["classification_basis"] = (
+                        CLASSIFICATION_SEARCH
+                        if replacement["provisional_group"]
+                        else CLASSIFICATION_NONE
+                    )
                 else:
                     base_group = origin_groups.get(ORIGIN_CLAIM_ONLY)
                     if base_group not in GROUPS:
-                        base_group = existing.get("group") or replacement.get("group")
-                    replacement["group"] = base_group if base_group in GROUPS else "C"
+                        # 검증 근거가 없는 claim_only 잠정 등급을, 다른 레인의
+                        # 근거를 빌려 정식으로 승격하지 않는다.
+                        base_group = replacement_view["group"]
+                    replacement["group"] = (
+                        base_group if base_group in GROUPS else replacement_view["group"]
+                    )
+                    replacement["provisional_group"] = None
                 existing = replacement
+
+            discovered = [
+                origin
+                for origin in DISCOVERY_ORIGINS
+                if origin in discovery_origins(existing)
+                or origin in discovery_origins(candidate)
+            ]
+            epo_discovery = dict(existing.get("epo_discovery") or {}) or dict(
+                candidate.get("epo_discovery") or {}
+            )
 
             existing["search_origins"] = origins
             existing["origin_groups"] = origin_groups
+            existing["origin_provisional_groups"] = origin_provisional_groups
+            existing["discovery_origins"] = discovered
+            existing["epo_discovery"] = epo_discovery
             if candidate.get("note") and candidate.get("note") != existing.get("note"):
                 notes = [value for value in (existing.get("note"), candidate.get("note")) if value]
                 existing["note"] = " / ".join(dict.fromkeys(notes))
@@ -1039,6 +1358,9 @@ def merge_reported(*reports: dict | None) -> dict | None:
 
     merged_candidates = list(candidates.values())
     for index, candidate in enumerate(merged_candidates, start=1):
+        normalized = _with_classification_metadata(candidate)
+        candidate.clear()
+        candidate.update(normalized)
         candidate["index"] = index
 
     return {
@@ -1233,7 +1555,507 @@ def epo_lane_record(
         "invalid_responses": data.get("invalid_responses", 0),
         "notes": data.get("notes", []),
         "usage": data.get("usage", {}),
+        # 이 레인이 검색 전에 청구항을 어떻게 나눠 읽었는가. 검색어의 근거이며
+        # 별도 모델 턴 없이 첫 응답에서 온다.
+        "claim_analysis": data.get("claim_analysis", {}),
+        # 모델이 고른 유망 후보. 최종 대응표로 넘어가는 것은 이 목록뿐이다.
+        "shortlist": data.get("shortlist", []),
+        # 상한·대조 실패로 넘기지 않은 것. 조용히 누락하지 않는다.
+        "excluded": data.get("excluded", []),
+        # NO_TOOLS 계획 턴에서 감지된 도구 호출과 그때의 격리 수준.
+        "tool_violations": data.get("tool_violations", []),
+        "tool_isolation": data.get("tool_isolation", ""),
+        # 검색하지 않는 최종 선택 턴. 검색 라운드와 사용량 축이 다르다.
+        "selection": data.get("selection", {}),
     }
+
+
+def epo_candidate(
+    *,
+    index: int,
+    doc_number: str,
+    title: str = "",
+    source_url: str = "",
+    lanes: list[str] | None = None,
+    search_origins: list[str] | None = None,
+    shortlist_reasons: list[dict] | None = None,
+    artifact_ids: list[str] | None = None,
+    evidence_fields: list[str] | None = None,
+    first_seen_round: int = 0,
+) -> dict:
+    """EPO 독립 검색이 데려온 후보 하나를 대응표에 넣을 모양으로 만든다.
+
+    모델이 채우는 칸이 하나도 없다. 문헌번호·명칭·주소는 ARIA 가 받아 보존한
+    OPS 응답에서 나왔고, 모델이 준 것은 "이것을 다시 보라"는 선택과 그 이유뿐이다.
+    그래서 shortlist 의 이유는 note 가 아니라 별도 칸에 담는다 — note 는
+    보고서에서 대응 판단으로 읽히는 자리다.
+
+    **페이지 분류를 만들지 않는다.** 이 후보에는 열어 본 웹 페이지가 없으므로
+    page_fetch_succeeded 도 identifier_url_matched 도 거짓이고, 그 값으로
+    page_observed 근거가 만들어질 수 없다. 존재하지 않는 관측을 지어내지 않기
+    위해서다. 정식 분류는 공식 응답 대조를 통과한 뒤에만 붙는다.
+    """
+    url = _text(source_url, 1000)
+    return {
+        "index": index,
+        "group": None,
+        "provisional_group": None,
+        "classification_basis": CLASSIFICATION_NONE,
+        "provisional": True,
+        "channel": CHANNEL_PATENT_DB,
+        "backend_id": EPO_BACKEND_ID,
+        "doc_type": "patent",
+        "doc_number": _text(doc_number, 120),
+        "doi": "",
+        "title": _text(title, 500),
+        "applicant": "",
+        "url": url,
+        "canonical_url": normalize_url(url),
+        "family": "",
+        "provenance": PROV_OFFICIAL_RESPONSE,
+        "evidence_status": EVIDENCE_CANDIDATE,
+        # OPS 응답을 받아 보존했다는 것과 그 문장이 원문 인용이라는 것은 다르다.
+        # 원문 등급은 provenance 검증기만 붙일 수 있고 여기서 열지 않는다.
+        "original_verified": False,
+        # 웹 축의 값은 전부 거짓이다. 이 후보에는 연 페이지가 없다.
+        "page_fetch_succeeded": False,
+        "url_is_document": bool(url),
+        "identifier_url_matched": False,
+        "quarantined": False,
+        "quarantine_reason": "",
+        "group_eligible": False,
+        "page_supported_rows": 0,
+        "official_evidence": {},
+        "verification": empty_candidate_verification(
+            reason_code="official_verification_not_run",
+            detail="공식 문헌 검증을 아직 실행하지 않았습니다.",
+        ),
+        "verbatim_excerpt": UNVERIFIED_EXCERPT,
+        "source_location": UNVERIFIED_LOCATION,
+        "mapping": [],
+        "note": "",
+        "search_origins": list(search_origins or [ORIGIN_CLAIM_ONLY]),
+        "origin_groups": {},
+        "origin_provisional_groups": {},
+        "discovery_origins": [DISCOVERY_EPO],
+        "epo_discovery": {
+            "lanes": list(lanes or []),
+            "first_seen_round": int(first_seen_round or 0),
+            # 검증 단계가 이 참조로 원본을 다시 읽는다. 같은 자료를 다시
+            # 내려받지 않기 위한 유일한 통로다.
+            "artifact_ids": list(artifact_ids or []),
+            "evidence_fields": sorted(evidence_fields or []),
+            "shortlist": [dict(item) for item in (shortlist_reasons or [])],
+        },
+    }
+
+
+def _shortlisted(epo: dict | None) -> list[dict]:
+    """완료된 EPO 레인의 shortlist 를 문헌 단위로 모은다.
+
+    완료되지 않은 레인은 제외한다. 채널 대조와 같은 기준을 쓴다 — 중간에
+    끊긴 레인의 목록을 최종 대응표에 올리면, 예산이 마른 실행과 실제로 그
+    문헌만 찾은 실행이 같아 보인다.
+    """
+    rows: dict[str, dict] = {}
+    for lane in (epo or {}).get("lanes") or []:
+        if not isinstance(lane, dict):
+            continue
+        if lane.get("status") != "ok":
+            continue
+        if lane.get("termination_reason") not in _COMPARABLE_EPO_TERMINATIONS:
+            continue
+        candidates = {
+            _text(item.get("doc_number"), 120): item
+            for item in lane.get("candidates") or []
+            if isinstance(item, dict) and item.get("doc_number")
+        }
+        for entry in lane.get("shortlist") or []:
+            if not isinstance(entry, dict):
+                continue
+            number = _text(entry.get("doc_number"), 120)
+            source = candidates.get(number)
+            if source is None:
+                # epo_agent 가 이미 걸러 낸 값이다. 여기 남아 있으면 옛 기록이며
+                # 근거가 없으므로 올리지 않는다.
+                continue
+            key = "|".join(sorted(_comparison_number_variants(number))) or number
+            row = rows.setdefault(
+                key,
+                {
+                    "doc_number": number,
+                    "title": _text(source.get("title"), 500),
+                    "source_url": _text(source.get("source_url"), 1000),
+                    "lanes": [],
+                    "search_origins": [],
+                    "artifact_ids": [],
+                    "evidence_fields": [],
+                    "shortlist": [],
+                    "first_seen_round": int(source.get("first_seen_round") or 0),
+                },
+            )
+            lane_id_value = _text(lane.get("id"), 120)
+            if lane_id_value and lane_id_value not in row["lanes"]:
+                row["lanes"].append(lane_id_value)
+            origin = _text(lane.get("origin"), 60)
+            if origin in SEARCH_ORIGINS and origin not in row["search_origins"]:
+                row["search_origins"].append(origin)
+            for artifact_id in source.get("artifact_ids") or []:
+                if artifact_id and artifact_id not in row["artifact_ids"]:
+                    row["artifact_ids"].append(artifact_id)
+            for name in (source.get("evidence") or {}):
+                if name not in row["evidence_fields"]:
+                    row["evidence_fields"].append(name)
+            row["shortlist"].append(
+                {
+                    "lane": lane_id_value,
+                    "round": int(entry.get("round") or 0),
+                    "reason": _text(entry.get("reason"), 2000),
+                    "matched_elements": _string_list(entry.get("matched_elements")),
+                }
+            )
+            if not row["title"]:
+                row["title"] = _text(source.get("title"), 500)
+    return list(rows.values())
+
+
+def empty_reported(*, web_report_error: str = "") -> dict:
+    """후보 목록의 빈 골격. 웹 보고를 읽지 못한 실행에서 쓴다.
+
+    키 모양은 parse()/merge_reported() 가 만드는 것과 **같아야** 한다. 다운스트림
+    (검증·보고서·화면)이 모양으로 분기하지 않고 내용으로만 판단하게 하기
+    위해서다.
+
+    ``web_report_error`` 는 이 골격이 왜 비었는지다. 비어 있지 않다는 것은 "웹
+    채널이 후보를 못 찾았다"가 아니라 **"웹 채널의 출력을 읽지 못했다"**는 뜻이고,
+    그 둘은 사용자에게 전혀 다른 말이다. 이 값을 잃으면 EPO 만으로 만든 결과가
+    두 채널을 다 돌린 결과처럼 읽힌다.
+    """
+    return {
+        "rounds": [],
+        "term_expansions": [],
+        "candidates": [],
+        "access_failures": [],
+        "web_report_error": _text(web_report_error, 2000),
+    }
+
+
+def empty_literature_section(*, enabled: bool = False, reason: str = "") -> dict:
+    """ARIA 서지 검색 채널의 빈 기록. 돌지 않은 실행에서도 같은 모양으로 남는다.
+
+    "검색하지 않았다"와 "검색했는데 0건이었다"를 구분할 수 있어야 한다. 전자는
+    enabled=False 이고 reason 이 있으며, 후자는 enabled=True 에 queries 가 있고
+    candidates 가 비어 있다.
+    """
+    return {
+        "enabled": bool(enabled),
+        "backend_id": LITERATURE_BACKEND_ID,
+        "reason": _text(reason, 500),
+        "queries": [],
+        # 후보표에 올린 문헌.
+        "candidates": [],
+        # 받은 문헌 전부. 상한에 걸려 올리지 못한 것도 여기 남는다.
+        "discovered": [],
+        "usage": {},
+        "limits": {},
+    }
+
+
+def merge_epo_discoveries(
+    reported: dict | None,
+    epo: dict | None,
+    *,
+    web_report_error: str = "",
+) -> tuple[dict | None, list[str]]:
+    """EPO 독립 검색의 유망 후보를 주 대응표 후보 목록에 연결한다.
+
+    **epo.lanes 원본은 손대지 않는다.** 이 함수는 reported 쪽에만 쓴다. 레인
+    기록은 검색 감사용으로 그대로 남아야, "EPO 를 켜서 무엇을 더 찾았는가"를
+    나중에도 물을 수 있다.
+
+    같은 문헌이 양쪽에 있으면 **웹 후보를 기준으로 합친다.** 웹 후보에는 페이지
+    관측 근거로 받은 분류가 붙어 있을 수 있고, 그 분류를 EPO 발견 사실로 덮으면
+    안 된다(충돌 규칙은 공식 응답 대조 단계가 판정한다). EPO 쪽에서 오는 것은
+    발견 경로 표시와 재사용할 아티팩트 참조뿐이다.
+    """
+    notes: list[str] = []
+    rows = _shortlisted(epo)
+    if not rows:
+        return reported, notes
+
+    if reported is None:
+        # 웹 보고를 읽지 못했다. 그렇다고 완료된 EPO 검색까지 버릴 이유는 없다 —
+        # 두 채널은 격리되어 있고, 한쪽의 출력 형식 오류가 다른 쪽이 실제로 받아
+        # 보존한 공식 응답을 무효로 만들지 않는다.
+        #
+        # 웹의 실패 상태는 골격 안에 그대로 들고 간다. 지우면 EPO 만으로 만든
+        # 결과가 두 채널을 다 돌린 결과처럼 보인다.
+        reported = empty_reported(web_report_error=web_report_error)
+        notes.append(
+            "웹 채널의 구조화 결과를 읽지 못했지만 완료된 EPO 독립 검색이 있어 "
+            "EPO 후보만으로 후보 목록을 만들었습니다. 이 목록에는 웹 검색이 찾은 "
+            "문헌이 하나도 들어 있지 않습니다."
+        )
+
+    candidates = list(reported.get("candidates") or [])
+    by_variant: dict[str, dict] = {}
+    for candidate in candidates:
+        for variant in _comparison_number_variants(candidate.get("doc_number")):
+            by_variant.setdefault(variant, candidate)
+
+    next_index = max((int(item.get("index") or 0) for item in candidates), default=0)
+    for row in rows:
+        matched = None
+        for variant in _comparison_number_variants(row["doc_number"]):
+            if variant in by_variant:
+                matched = by_variant[variant]
+                break
+        if matched is not None:
+            # 중복이다. 후보를 새로 만들지 않고 출처만 늘린다.
+            origins = discovery_origins(matched)
+            if DISCOVERY_EPO not in origins:
+                origins.append(DISCOVERY_EPO)
+            matched["discovery_origins"] = [
+                origin for origin in DISCOVERY_ORIGINS if origin in origins
+            ]
+            existing = dict(matched.get("epo_discovery") or {})
+            merged_artifacts = list(existing.get("artifact_ids") or [])
+            for artifact_id in row["artifact_ids"]:
+                if artifact_id not in merged_artifacts:
+                    merged_artifacts.append(artifact_id)
+            matched["epo_discovery"] = {
+                "lanes": row["lanes"],
+                "first_seen_round": row["first_seen_round"],
+                "artifact_ids": merged_artifacts,
+                "evidence_fields": sorted(row["evidence_fields"]),
+                "shortlist": row["shortlist"],
+                # 웹 후보의 표기와 OPS 표기가 다를 수 있다. 둘 다 남긴다.
+                "doc_number": row["doc_number"],
+            }
+            notes.append(
+                f"후보 {matched.get('index')}: 같은 공개번호를 EPO 독립 검색"
+                f"({', '.join(row['lanes']) or '레인 미기록'})도 찾아 발견 경로를 "
+                "web + epo 로 합쳤습니다."
+            )
+            continue
+
+        next_index += 1
+        candidate = epo_candidate(
+            index=next_index,
+            doc_number=row["doc_number"],
+            title=row["title"],
+            source_url=row["source_url"],
+            lanes=row["lanes"],
+            search_origins=row["search_origins"] or [ORIGIN_CLAIM_ONLY],
+            shortlist_reasons=row["shortlist"],
+            artifact_ids=row["artifact_ids"],
+            evidence_fields=row["evidence_fields"],
+            first_seen_round=row["first_seen_round"],
+        )
+        candidates.append(candidate)
+        for variant in _comparison_number_variants(candidate["doc_number"]):
+            by_variant.setdefault(variant, candidate)
+        notes.append(
+            f"후보 {next_index}: EPO 독립 검색이 찾은 {row['doc_number']} 를 "
+            "대응표 후보로 올렸습니다. 정식 A/B/C 는 공식 응답에 구성 대응이 "
+            "대조된 뒤에만 붙습니다."
+        )
+
+    reported["candidates"] = candidates
+    return reported, notes
+
+
+def _doi_key(raw) -> str:
+    """후보 표기에서 DOI 키 하나를 뽑는다. 아니면 빈 문자열.
+
+    특허번호 변형 규칙(_comparison_number_variants)을 DOI 에 쓰면 안 된다. 그쪽은
+    앞 두 글자를 국가코드로 보고 떼어 내므로 ``10.3390/...`` 의 ``10`` 이 사라진다.
+    """
+    from .patent_search import literature_client
+
+    try:
+        return literature_client.normalize_doi(raw)
+    except Exception:
+        return ""
+
+
+def candidate_doi(candidate: dict) -> str:
+    """후보의 DOI. doi 칸을 먼저 보고 없으면 문헌번호에서 찾는다."""
+    entry = candidate or {}
+    return _doi_key(entry.get("doi")) or _doi_key(entry.get("doc_number"))
+
+
+def literature_candidate(
+    *,
+    index: int,
+    doi: str,
+    title: str = "",
+    authors: str = "",
+    container: str = "",
+    source_url: str = "",
+    search_origins: list[str] | None = None,
+    queries: list[str] | None = None,
+    artifact_ids: list[str] | None = None,
+    evidence_fields: list[str] | None = None,
+    sources: list[str] | None = None,
+) -> dict:
+    """ARIA 의 서지 검색이 데려온 논문 후보 하나.
+
+    epo_candidate 와 같은 원칙이다 — 모델이 채우는 칸이 하나도 없다. DOI·제목·
+    저자·저널은 ARIA 가 받아 보존한 Crossref/Europe PMC 응답에서 나왔고, 모델이
+    준 것은 검색어뿐이다.
+
+    **페이지 분류를 만들지 않는다.** 이 후보에는 열어 본 웹 페이지가 없다. 정식
+    분류는 공식 서지 대조를 통과한 뒤에만 붙는다.
+    """
+    url = _text(source_url, 1000)
+    key = _doi_key(doi)
+    return {
+        "index": index,
+        "group": None,
+        "provisional_group": None,
+        "classification_basis": CLASSIFICATION_NONE,
+        "provisional": True,
+        "channel": CHANNEL_PATENT_DB,
+        "backend_id": LITERATURE_BACKEND_ID,
+        "doc_type": "paper",
+        "doc_number": key,
+        "doi": key,
+        "title": _text(title, 500),
+        # 논문에는 출원인이 없다. 저자를 그 칸에 넣되 라벨은 보고서가 정한다.
+        "applicant": _text(authors, 500),
+        "url": url,
+        "canonical_url": normalize_url(url),
+        "family": "",
+        "provenance": PROV_OFFICIAL_RESPONSE,
+        "evidence_status": EVIDENCE_CANDIDATE,
+        "original_verified": False,
+        "page_fetch_succeeded": False,
+        "url_is_document": bool(url),
+        "identifier_url_matched": False,
+        "quarantined": False,
+        "quarantine_reason": "",
+        "group_eligible": False,
+        "page_supported_rows": 0,
+        "official_evidence": {},
+        "verification": empty_candidate_verification(
+            reason_code="official_verification_not_run",
+            detail="공식 서지 대조를 아직 실행하지 않았습니다.",
+        ),
+        "verbatim_excerpt": UNVERIFIED_EXCERPT,
+        "source_location": UNVERIFIED_LOCATION,
+        "mapping": [],
+        "note": "",
+        "search_origins": list(search_origins or [ORIGIN_CLAIM_ONLY]),
+        "origin_groups": {},
+        "origin_provisional_groups": {},
+        "discovery_origins": [DISCOVERY_LITERATURE],
+        "literature_discovery": {
+            "queries": [_text(item, 400) for item in (queries or [])],
+            "sources": sorted(sources or []),
+            "container": _text(container, 300),
+            "artifact_ids": list(artifact_ids or []),
+            "evidence_fields": sorted(evidence_fields or []),
+        },
+    }
+
+
+def merge_literature_discoveries(
+    reported: dict | None,
+    discovery: dict | None,
+    *,
+    web_report_error: str = "",
+) -> tuple[dict | None, list[str]]:
+    """ARIA 서지 검색의 후보를 주 대응표 후보 목록에 연결한다.
+
+    merge_epo_discoveries 와 같은 규칙이다. 같은 문헌이 양쪽에 있으면 **웹 후보를
+    기준으로 합치고**, 서지 쪽에서 오는 것은 발견 경로 표시와 아티팩트 참조뿐이다.
+
+    맞추는 키는 DOI 다. 웹 후보가 DOI 를 적었으면 같은 문헌으로 묶이고, 제목만
+    적었으면 묶이지 않는다 — 제목으로 문헌을 동일시하면 같은 학회의 후속 논문이
+    선행 논문과 하나로 합쳐진다.
+    """
+    notes: list[str] = []
+    rows = [
+        row
+        for row in ((discovery or {}).get("candidates") or [])
+        if isinstance(row, dict) and _doi_key(row.get("doi") or row.get("doc_number"))
+    ]
+    if not rows:
+        return reported, notes
+
+    if reported is None:
+        reported = empty_reported(web_report_error=web_report_error)
+        notes.append(
+            "웹 채널의 구조화 결과를 읽지 못했지만 ARIA 서지 검색 결과가 있어 "
+            "그 후보만으로 목록을 만들었습니다. 이 목록에는 웹 검색이 찾은 문헌이 "
+            "하나도 들어 있지 않습니다."
+        )
+
+    candidates = list(reported.get("candidates") or [])
+    by_doi: dict = {}
+    for candidate in candidates:
+        key = candidate_doi(candidate)
+        if key:
+            by_doi.setdefault(key, candidate)
+
+    next_index = max((int(item.get("index") or 0) for item in candidates), default=0)
+    for row in rows:
+        key = _doi_key(row.get("doi") or row.get("doc_number"))
+        matched = by_doi.get(key)
+        if matched is not None:
+            origins = discovery_origins(matched)
+            if DISCOVERY_LITERATURE not in origins:
+                origins.append(DISCOVERY_LITERATURE)
+            matched["discovery_origins"] = [
+                origin for origin in DISCOVERY_ORIGINS if origin in origins
+            ]
+            existing = dict(matched.get("literature_discovery") or {})
+            merged_artifacts = list(existing.get("artifact_ids") or [])
+            for artifact_id in row.get("artifact_ids") or []:
+                if artifact_id not in merged_artifacts:
+                    merged_artifacts.append(artifact_id)
+            matched["literature_discovery"] = {
+                "queries": [_text(item, 400) for item in (row.get("queries") or [])],
+                "sources": sorted(row.get("sources") or []),
+                "container": _text(row.get("container"), 300),
+                "artifact_ids": merged_artifacts,
+                "evidence_fields": sorted(row.get("evidence_fields") or []),
+            }
+            # 웹 후보가 DOI 만 적고 제목을 못 적은 경우가 흔하다. ARIA 가 공식
+            # 응답에서 받은 제목으로 빈 칸만 채운다 — 이미 있는 값은 덮지 않는다.
+            if not _text(matched.get("title"), 500) and row.get("title"):
+                matched["title"] = _text(row.get("title"), 500)
+            notes.append(
+                f"후보 {matched.get('index')}: 같은 DOI 를 ARIA 서지 검색도 찾아 "
+                "발견 경로를 합쳤습니다."
+            )
+            continue
+
+        next_index += 1
+        candidate = literature_candidate(
+            index=next_index,
+            doi=key,
+            title=row.get("title") or "",
+            authors=row.get("authors") or "",
+            container=row.get("container") or "",
+            source_url=row.get("url") or f"https://doi.org/{key}",
+            search_origins=row.get("search_origins") or [ORIGIN_CLAIM_ONLY],
+            queries=row.get("queries") or [],
+            artifact_ids=row.get("artifact_ids") or [],
+            evidence_fields=row.get("evidence_fields") or [],
+            sources=row.get("sources") or [],
+        )
+        candidates.append(candidate)
+        by_doi.setdefault(key, candidate)
+        notes.append(
+            f"후보 {next_index}: ARIA 서지 검색이 찾은 {key} 를 대응표 후보로 "
+            "올렸습니다. 정식 A/B/C 는 공식 응답에 구성 대응이 대조된 뒤에만 "
+            "붙습니다."
+        )
+
+    reported["candidates"] = candidates
+    return reported, notes
 
 
 def web_lane_record(record: dict) -> dict:
@@ -1407,7 +2229,15 @@ def compare_channels(reported: dict | None, epo: dict | None) -> dict:
             reason="완료된 OPS 검색이 없어 두 채널을 대조하지 않았습니다."
         )
 
-    web_candidates = list((reported or {}).get("candidates") or [])
+    # **웹이 데려온 후보만** 웹 쪽 숫자에 넣는다. EPO 독립 검색이 데려온 후보도
+    # merge_epo_discoveries 를 거치면 같은 목록에 들어 있는데, 그것을 웹으로
+    # 세면 "EPO 에서만 찾았다"가 실행할 때마다 0 이 된다 — 이 절이 답하려는
+    # 질문이 통째로 사라진다.
+    web_candidates = [
+        candidate
+        for candidate in ((reported or {}).get("candidates") or [])
+        if DISCOVERY_WEB in discovery_origins(candidate)
+    ]
     web_usable, web_unidentified = _comparable(web_candidates)
 
     # 같은 문헌이 두 EPO 레인에 다 나올 수 있다. 레인 이름을 모아 둔다.
@@ -1522,9 +2352,9 @@ def build(
     *,
     claim_text: str,
     prompt_id: str,
-    prompt_version: int | None,
     prompt_sha256: str,
     runtime_context_sha256: str = "",
+    reasoning_effort: str = "",
     claim_boundary_neutralized: bool,
     spec_document: dict | None = None,
     spec_boundary_neutralized: bool = False,
@@ -1549,6 +2379,8 @@ def build(
     content_read_lane_budgets: dict[str, int] | None = None,
     lanes: list[dict] | None = None,
     epo: dict | None = None,
+    literature: dict | None = None,
+    verification: dict | None = None,
 ) -> dict:
     """저장할 감사 기록을 만든다.
 
@@ -1559,6 +2391,7 @@ def build(
         "isolated_union" if spec_document is not None else ORIGIN_CLAIM_ONLY
     )
     epo_section = epo or empty_epo_section()
+    literature_section = literature or empty_literature_section()
     channels_used = {
         candidate.get("channel")
         for candidate in ((reported or {}).get("candidates") or [])
@@ -1569,6 +2402,8 @@ def build(
         for lane in (epo_section.get("lanes") or [])
         if isinstance(lane, dict)
     ):
+        channels_used.add(CHANNEL_PATENT_DB)
+    if literature_section.get("candidates"):
         channels_used.add(CHANNEL_PATENT_DB)
     return {
         "version": MANIFEST_VERSION,
@@ -1600,7 +2435,6 @@ def build(
         },
         "prompt": {
             "id": prompt_id,
-            "version": prompt_version,
             # 이 값은 **프롬프트 템플릿 파일**의 해시다. 모델에게 실제로 간
             # 프롬프트가 아니다. 런타임 컨텍스트와 청구항이 붙기 전 값이라,
             # 런타임 컨텍스트만 바뀐 두 실행이 여기서는 같아 보인다 —
@@ -1619,6 +2453,15 @@ def build(
                 for lane in (search_lanes or [])
                 if lane.get("id")
             },
+        },
+        # 추론강도. **실제로 적용된 값은 적지 않는다.** CLI 가 알려주지 않으므로
+        # 확정할 수 없고, 추정값을 적으면 감사 기록이 관측이 아니라 추측이 된다.
+        # 여기 있는 것은 "우리가 무엇을 요청했는가" 뿐이다.
+        "reasoning_effort": {
+            # 사용자가 고른 값. 빈 문자열이면 고르지 않았다는 뜻이다.
+            "requested": str(reasoning_effort or ""),
+            # 아무 것도 넘기지 않아 모델 카탈로그의 기본값에 맡겼는가.
+            "model_default": not str(reasoning_effort or "").strip(),
         },
         "policy": {
             "name": tool_policy_name,
@@ -1647,6 +2490,14 @@ def build(
         # 사용량이 전부 여기 따로 있다. 초기 보정 단계에서 두 채널을 비교하려면
         # 섞이지 않은 채로 남아 있어야 한다.
         "epo": epo_section,
+        # v10 의 정본. ARIA 가 Crossref·Europe PMC 에 직접 물어 만든 기록이다.
+        # 웹·EPO 와 섞지 않는다 — 이 채널만 논문을 **식별**할 수 있으므로, 무엇을
+        # 물어 무엇을 받았는지가 따로 남아야 "웹이 못 찾은 것을 여기서 찾았는가"에
+        # 답할 수 있다.
+        "literature": literature_section,
+        # Codex 후보의 공식 문헌 확보·2차 분류 기록. 검색 전체 요약과 별도로
+        # 각 후보에도 verification 객체가 있어 부분 실패를 추적할 수 있다.
+        "verification": dict(verification or {}),
         # v6 의 정본. 두 채널이 각각 무엇을 찾았는지 대조한 **파생** 기록이다.
         # 위의 reported 와 epo 는 그대로 두고, 여기서만 맞춰 본다.
         "channel_comparison": compare_channels(reported, epo_section),

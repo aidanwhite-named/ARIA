@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from . import patent_search
 from .config import DEFAULTS
 from .models import AppSetting
+from .providers.base import REASONING_EFFORTS
 from .providers.registry import TOOL_UNCONTROLLABLE_PROVIDERS
 
 # 사용자가 UI 에서 바꿀 수 있는 키. 이 목록에 없는 키는 PUT 으로 못 바꾼다.
@@ -30,6 +31,7 @@ EDITABLE_KEYS = frozenset(
         "default_provider",
         "provider_paths",
         "default_models",
+        "reasoning_effort",
         "keep_raw_output",
         "fail_on_tool_use",
         "max_search_tool_calls",
@@ -48,6 +50,16 @@ EDITABLE_KEYS = frozenset(
         "epo_max_detail_fetches",
         "epo_max_search_calls",
         "epo_channel_timeout_seconds",
+        "epo_max_results_per_query",
+        "epo_shortlist_limit",
+        "epo_verification_targets",
+        "literature_integration_enabled",
+        "literature_contact_email",
+        "literature_max_queries",
+        "literature_max_results_per_query",
+        "literature_shortlist_limit",
+        "literature_http_budget_seconds",
+        "literature_verification_targets",
         # epo_quota_state 는 일부러 없다. ARIA 가 관측해 적는 값이라
         # 사용자가 PUT 으로 고칠 수 있으면 사용량을 0 으로 되돌릴 수 있다.
             # 근거 패키지의 페이지 확장.
@@ -107,6 +119,14 @@ _INT_KEYS = frozenset(
         "epo_max_detail_fetches",
         "epo_max_search_calls",
         "epo_channel_timeout_seconds",
+        "epo_max_results_per_query",
+        "epo_shortlist_limit",
+        "epo_verification_targets",
+        "literature_max_queries",
+        "literature_max_results_per_query",
+        "literature_shortlist_limit",
+        "literature_http_budget_seconds",
+        "literature_verification_targets",
     }
 )
 
@@ -140,6 +160,21 @@ _LIMITS = {
     "epo_max_detail_fetches": (1, 50),
     "epo_max_search_calls": (1, 20),
     "epo_channel_timeout_seconds": (30, 900),
+    # OPS 가 한 질의로 돌려주는 최대 건수가 20 이다. 그보다 큰 값을 저장하게
+    # 두면 설정 화면이 지키지 못할 약속을 하게 된다.
+    "epo_max_results_per_query": (1, 20),
+    # 상한을 크게 잡으면 공식 검증 호출이 그만큼 늘어난다. 파서의 구조적
+    # 상한(epo_actions.MAX_SHORTLIST_ITEMS)을 넘지 않게 맞춘다.
+    "epo_shortlist_limit": (1, 50),
+    "epo_verification_targets": (1, 50),
+    # ARIA 가 한 실행에서 서지 DB 에 보내는 질의 수. 모델의 검색어를 다시 묻는
+    # 것이므로 그쪽 라운드 상한(2라운드 × 질의 몇 개)보다 클 이유가 없다.
+    "literature_max_queries": (1, 20),
+    # 두 DB 각각에 적용된다. 넘겨 받아 봐야 뒤쪽은 관련성이 급격히 떨어진다.
+    "literature_max_results_per_query": (1, 20),
+    "literature_shortlist_limit": (1, 50),
+    "literature_http_budget_seconds": (10, 600),
+    "literature_verification_targets": (1, 50),
 }
 
 # 인용발명 문헌 전달 방식. enums.RetrievalMode 와 같은 값이며, 여기서 import
@@ -484,6 +519,9 @@ def get_all(session: Session) -> dict[str, Any]:
     )
     values["provider_paths"] = _normalize_provider_map(values.get("provider_paths"))
     values["default_models"] = _normalize_provider_map(values.get("default_models"))
+    values["reasoning_effort"] = _normalize_provider_map(
+        values.get("reasoning_effort")
+    )
     return values
 
 
@@ -495,7 +533,7 @@ def get(session: Session, key: str) -> Any:
     if key == "default_provider":
         text = str(value).strip()
         return _normalize_provider_id(text) if text else ""
-    if key in ("provider_paths", "default_models"):
+    if key in ("provider_paths", "default_models", "reasoning_effort"):
         return _normalize_provider_map(value)
     return value
 
@@ -586,14 +624,26 @@ def _coerce(key: str, value: Any) -> Any:
                 "빈 값이어야 합니다."
             )
         return provider_id
-    if key in ("provider_paths", "default_models"):
+    if key in ("provider_paths", "default_models", "reasoning_effort"):
         if not isinstance(value, dict):
             raise ValueError(f"{key} 는 객체여야 합니다.")
-        return {
-            _normalize_provider_id(str(k)): str(v)
+        cleaned = {
+            _normalize_provider_id(str(k)): str(v).strip()
             for k, v in value.items()
             if str(v).strip()
         }
+        if key == "reasoning_effort":
+            # 빈 값은 위에서 이미 걸러졌다 — 그것이 "모델 기본값"이며 키 자체가
+            # 없는 상태로 저장된다. 남은 값은 아는 레벨이어야 한다. 모르는 문자열을
+            # 그대로 CLI 에 넘기면 실행이 통째로 실패한다.
+            for provider_id, level in cleaned.items():
+                if level not in REASONING_EFFORTS:
+                    raise ValueError(
+                        f"{provider_id} 의 추론강도는 "
+                        + ", ".join(REASONING_EFFORTS)
+                        + " 중 하나이거나 비어 있어야 합니다(비우면 모델 기본값)."
+                    )
+        return cleaned
     return value
 
 
@@ -746,8 +796,9 @@ def _epo_quota_notes(values: dict[str, Any]) -> list[str]:
         )
     if ledger.state.throttle.dangerous:
         notes.append(
-            "EPO OPS 가 과부하 상태를 보고했습니다"
-            f"({ledger.state.throttle.raw}). 지금은 EPO 채널이 중단됩니다."
+            "마지막 EPO OPS 응답에서 search/retrieval 일시정지(black)가 "
+            f"관측되었습니다({ledger.state.throttle.raw}). 이 값은 진단 기록이며 "
+            "새 EPO 작업을 영구 차단하지 않습니다."
         )
     used = ledger.state.effective_weekly_bytes
     if ledger.weekly_limit and used >= ledger.weekly_limit:

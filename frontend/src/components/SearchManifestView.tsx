@@ -14,6 +14,7 @@ import { useState } from "react";
 import type {
   Job,
   SearchCandidate,
+  SearchDiscoveryOrigin,
   SearchManifest,
   SearchProvenance,
 } from "../lib/types";
@@ -22,18 +23,95 @@ const PROVENANCE_LABEL: Record<SearchProvenance, string> = {
   search_snippet: "검색 스니펫만 확인 (페이지 미열람)",
   webfetch_summary: "페이지 요약 확인 (원문 아님)",
   raw_original_verified: "원문 대조 완료",
+  official_record_response: "EPO 공식 응답에서 발견 (원문 인용 아님)",
 };
 
 const PROVENANCE_CLASS: Record<SearchProvenance, string> = {
   search_snippet: "neutral",
   webfetch_summary: "warn",
   raw_original_verified: "ok",
+  official_record_response: "accent",
+};
+
+/** 이 후보를 데려온 검색 경로. 값이 없는 옛 기록은 web 하나로 읽는다.
+ *
+ *  ORIGIN_LABEL(청구항 단독 / 명세서 확장)과 **다른 축**이다. 저쪽은 무엇을
+ *  입력으로 검색했는가이고 이쪽은 어느 경로가 이 문헌을 찾았는가다.
+ */
+const DISCOVERY_LABEL: Record<SearchDiscoveryOrigin, string> = {
+  web: "웹 검색이 발견",
+  epo: "EPO 독립 검색이 발견",
+};
+
+export function discoveryOrigins(
+  item: SearchCandidate,
+): SearchDiscoveryOrigin[] {
+  const raw = item.discovery_origins;
+  const found = (["web", "epo"] as const).filter(
+    (origin) => Array.isArray(raw) && raw.includes(origin),
+  );
+  return found.length > 0 ? [...found] : ["web"];
+}
+
+// 사후 탐지는 **차단이 아니다.** 이 값이 붙은 실행에서 외부 호출은 이미 나갔고,
+// ARIA 가 한 일은 그 응답을 검색 계획으로 쓰지 않기로 한 것뿐이다.
+const ISOLATION_LABEL: Record<string, string> = {
+  provider_enforced: "CLI 단계에서 도구 차단(그런데도 호출이 관측됨)",
+  post_hoc_detection:
+    "사후 탐지 — 호출을 막지 못했고 이미 나간 외부 호출은 되돌릴 수 없음",
+  unknown: "도구 통제 수준 확인 불가",
 };
 
 const EVIDENCE_LABEL: Record<string, string> = {
   candidate_only: "후보 단계",
   source_page_reviewed: "페이지 열람 성공",
+  official_record_verified: "EPO 공식 기록 대조",
 };
+
+const CLASSIFICATION_LABEL: Record<string, string> = {
+  none: "분류 없음",
+  legacy_unknown: "과거 분류(검증 근거 미기록)",
+  search_result: "검색 결과 기반 AI 잠정 분류",
+  page_observed: "페이지 관측 근거가 있는 AI 분류",
+  official_record: "공식 기록 대조가 있는 AI 분류",
+  original_text: "원문 직접 대조가 있는 AI 분류",
+};
+
+const VERIFICATION_LABEL: Record<string, string> = {
+  not_attempted: "공식 검증 미시도",
+  fetch_failed: "공식 문헌 확보 실패",
+  record_fetched: "공식 문헌 확보 완료",
+  classification_failed: "2차 분류 실패",
+  evidence_mismatch: "근거 문장 대조 실패",
+  promoted: "공식 근거 분류 완료",
+};
+
+function verificationDetail(value?: string): string {
+  const text = (value ?? "").trim();
+  if (!/<fault|<\?xml/i.test(text)) {
+    return text.length > 600 ? `${text.slice(0, 600)}…` : text;
+  }
+  const decode = (part: string) =>
+    part
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/\s+/g, " ")
+      .trim();
+  const codes = [...text.matchAll(/<code>([\s\S]*?)<\/code>/gi)].map((match) =>
+    decode(match[1]),
+  );
+  const messages = [...text.matchAll(/<message>([\s\S]*?)<\/message>/gi)].map(
+    (match) => decode(match[1]).slice(0, 240),
+  );
+  const status = text.match(/HTTP\s+(\d+)/i)?.[1];
+  return [
+    status ? `EPO OPS HTTP ${status}` : "EPO OPS 조회 오류",
+    ...Array.from(new Set([...codes, ...messages])),
+  ]
+    .join(" · ")
+    .slice(0, 600);
+}
 
 const ORIGIN_LABEL: Record<string, string> = {
   claim_only: "청구항 단독",
@@ -76,9 +154,67 @@ function groupTitle(manifest: SearchManifest, group: string): string {
 
 const SUPPORT_LABEL: Record<string, string> = {
   page_text: "페이지 관측",
+  official_record: "공식 문헌 대조",
   snippet: "검색 스니펫",
   none: "근거 없음",
 };
+
+type SearchGroup = "A" | "B" | "C";
+type ClassificationView = {
+  group: SearchGroup | null;
+  provisionalGroup: SearchGroup | null;
+  basis: string;
+};
+
+/** 과거 group을 새 기준의 정식 분류로 자동 승격하지 않는 읽기 규칙. */
+export function classificationView(item: SearchCandidate): ClassificationView {
+  const rawGroup = item.group && ["A", "B", "C"].includes(item.group)
+    ? item.group
+    : null;
+  const rawProvisional =
+    item.provisional_group && ["A", "B", "C"].includes(item.provisional_group)
+      ? item.provisional_group
+      : null;
+  const officialSaved = Boolean(
+    item.evidence_status === "official_record_verified" &&
+      (item.official_evidence?.artifact_ids?.length ?? 0) > 0 &&
+      (item.official_supported_rows ?? 0) > 0,
+  );
+  const originalSaved = Boolean(item.original_verified && rawGroup);
+  const pageSaved = Boolean(
+    item.identifier_url_matched &&
+      item.page_fetch_succeeded &&
+      (item.page_supported_rows ?? 0) > 0,
+  );
+  const formal =
+    item.group_eligible === true || officialSaved || originalSaved || pageSaved;
+  if (rawGroup && formal) {
+    const stored = item.classification_basis;
+    const basis =
+      stored === "page_observed" ||
+      stored === "official_record" ||
+      stored === "original_text"
+        ? stored
+        : originalSaved
+          ? "original_text"
+          : officialSaved || item.evidence_status === "official_record_verified"
+            ? "official_record"
+            : "page_observed";
+    return { group: rawGroup, provisionalGroup: null, basis };
+  }
+  const proposed = rawProvisional || rawGroup;
+  if (proposed) {
+    const basis =
+      item.classification_basis === "search_result" ||
+      item.classification_basis === "legacy_unknown"
+        ? item.classification_basis
+        : item.group_eligible === false || rawProvisional
+          ? "search_result"
+          : "legacy_unknown";
+    return { group: null, provisionalGroup: proposed, basis };
+  }
+  return { group: null, provisionalGroup: null, basis: "none" };
+}
 
 const SCOPE_LABEL: Record<string, string> = {
   claims: "청구항",
@@ -96,11 +232,20 @@ function CandidateRow({
 }) {
   const identity = item.doc_number || item.doi || "문헌번호 확인 필요";
   const origins = item.search_origins ?? [];
+  const classification = classificationView(item);
+  const verification = item.verification;
+  const discovered = discoveryOrigins(item);
+  // 웹 페이지를 한 번도 열지 않는 경로로 온 후보. 웹 게이트의 문구를 그대로
+  // 쓰면 "확인 실패"로 읽히지만, 이 후보에는 애초에 열어 볼 페이지가 없었다.
+  const epoOnly = !discovered.includes("web");
+  const pagePrior = item.page_classification;
   return (
     <li className="search-candidate">
       <div className="search-candidate-head">
         <span className="mono-text">{identity}</span>
-        {item.provisional && <span className="pill warn">잠정 분류</span>}
+        {!item.original_verified && (
+          <span className="pill warn">원문 발췌 미검증</span>
+        )}
         <span className={`pill ${PROVENANCE_CLASS[item.provenance] ?? "neutral"}`}>
           {PROVENANCE_LABEL[item.provenance] ?? item.provenance}
         </span>
@@ -115,6 +260,22 @@ function CandidateRow({
           {EVIDENCE_LABEL[item.evidence_status] ?? item.evidence_status}
         </span>
         <span className="pill neutral">{item.channel}</span>
+        <span className="pill ok">
+          {CLASSIFICATION_LABEL[classification.basis] ?? classification.basis}
+        </span>
+        {discovered.map((origin) => (
+          <span
+            key={`discovery-${origin}`}
+            className={`pill ${origin === "epo" ? "accent" : "neutral"}`}
+            title={
+              origin === "epo"
+                ? "ARIA 가 EPO OPS 를 직접 검색해 이 문헌을 찾았습니다."
+                : "모델의 웹 검색 보고에서 이 문헌이 나왔습니다."
+            }
+          >
+            {DISCOVERY_LABEL[origin]}
+          </span>
+        ))}
         {origins.map((origin) => (
           <span
             key={origin}
@@ -132,18 +293,73 @@ function CandidateRow({
         {item.family && <>패밀리 {item.family} · </>}
         원문 위치 {item.source_location}
       </div>
+      {/* 공식 대조로 덮이기 전의 1차 분류. 지금 분류와 나란히 두지 않는다 —
+          같은 줄에 두면 같은 위계로 읽히고, 그러면 등급을 나눈 의미가 없다. */}
+      {pagePrior?.group && (
+        <div className="faint">
+          대체된 1차 분류: <strong>{pagePrior.group}</strong>{" "}
+          {CLASSIFICATION_LABEL[pagePrior.classification_basis] ??
+            pagePrior.classification_basis}{" "}
+          · 페이지 근거 행 {pagePrior.page_supported_rows ?? 0}개
+          {pagePrior.group === item.group
+            ? " (공식 대조 결과와 같음)"
+            : " — 공식 대조 결과와 달라 공식 분류를 채택했습니다"}
+        </div>
+      )}
+      {item.epo_discovery?.lanes?.length ? (
+        <div className="faint">
+          EPO 검색 레인: {item.epo_discovery.lanes.join(", ")}
+          {(item.epo_discovery.shortlist ?? []).map((entry, i) =>
+            entry.reason ? (
+              <div key={i}>EPO 선정 이유: {entry.reason}</div>
+            ) : null,
+          )}
+          {(item.epo_discovery.artifact_ids ?? []).length > 0 && (
+            <div>
+              재사용한 EPO 응답 아티팩트{" "}
+              {(item.epo_discovery.artifact_ids ?? []).length}건 — 공식 검증에서
+              다시 내려받지 않았습니다.
+            </div>
+          )}
+        </div>
+      ) : null}
+      {item.matched_feature_rows !== undefined && (
+        <div className="faint">
+          공식 기록에서 대조된 구성 행 {item.matched_feature_rows}개
+        </div>
+      )}
+      {verification && (
+        <div className="faint">
+          후보별 공식 검증: {VERIFICATION_LABEL[verification.status] ?? verification.status}
+          {verificationDetail(verification.detail)
+            ? ` — ${verificationDetail(verification.detail)}`
+            : ""}
+        </div>
+      )}
       <div className="faint">직접 발췌: {item.verbatim_excerpt}</div>
       <div className="faint">
         ARIA 관측: 페이지 본문{" "}
         {item.page_fetch_succeeded ? "읽음" : "읽은 기록 없음"} · 원문 대조{" "}
         {item.original_verified ? "완료" : "안 됨"} · 문헌번호-주소 대조{" "}
-        {item.identifier_url_matched ? "완료" : "안 됨"}
+        {epoOnly
+          ? "해당 없음(웹 페이지를 열지 않는 경로)"
+          : item.identifier_url_matched
+            ? "완료"
+            : "안 됨"}
       </div>
-      {item.identifier_url_matched === false && (
+      {epoOnly ? (
         <div className="faint">
-          문헌번호가 위 주소에서 확인되지 않아 명칭·출원인·패밀리를 표시하지
-          않았습니다.
+          EPO 독립 검색이 데려온 후보입니다. 웹 페이지 관측이 없으므로 페이지
+          근거 분류는 만들지 않으며, 정식 A/B/C는 공식 응답에 구성 대응이
+          대조된 경우에만 붙습니다.
         </div>
+      ) : (
+        item.identifier_url_matched === false && (
+          <div className="faint">
+            문헌번호가 위 주소에서 확인되지 않아 명칭·출원인·패밀리를 표시하지
+            않았습니다.
+          </div>
+        )
       )}
       {item.note && <div className="search-candidate-note">{item.note}</div>}
       {item.url && (
@@ -170,10 +386,18 @@ function CandidateRow({
               {(item.mapping ?? []).map((row, i) => (
                 <tr key={i}>
                   <td>{row.feature || "-"}</td>
-                  <td className={row.page_supported ? "" : "faint"}>
+                  <td
+                    className={
+                      row.page_supported || row.official_supported ? "" : "faint"
+                    }
+                  >
                     {SUPPORT_LABEL[row.support_source ?? "none"] ?? "근거 없음"}
                   </td>
-                  <td className={row.page_supported ? "" : "faint"}>
+                  <td
+                    className={
+                      row.page_supported || row.official_supported ? "" : "faint"
+                    }
+                  >
                     {row.support_text || "-"}
                   </td>
                   <td className="faint">
@@ -182,7 +406,9 @@ function CandidateRow({
                   <td>{row.degree}</td>
                   <td>{row.counterpart || "-"}</td>
                   <td className={row.verified ? "" : "faint"}>
-                    {row.source_location}
+                    {row.support_source === "official_record" && row.support_field
+                      ? `공식 응답 필드: ${row.support_field}`
+                      : row.source_location}
                   </td>
                   <td className={row.verified ? "" : "faint"}>
                     {row.verbatim_excerpt}
@@ -303,10 +529,22 @@ export default function SearchManifestView({ job }: { job: Job }) {
   const exposureEnforced = manifest.policy.advertised_tools_enforced !== false;
   const reported = manifest.reported;
   const candidates = reported?.candidates ?? [];
-  // group_eligible 이 없는 옛 매니페스트는 그대로 그룹에 둔다. 지난 기록을 다시
-  // 열었을 때 화면이 비어 버리면 안 된다.
-  const grouped = candidates.filter((c) => c.group_eligible !== false);
-  const isolated = candidates.filter((c) => c.group_eligible === false);
+  const classified = candidates.map((item) => ({
+    item,
+    classification: classificationView(item),
+  }));
+  // group_eligible 이 없는 옛 기록은 정식으로 간주하지 않는다. 저장된 검증
+  // 흔적이 없으면 잠정 등급으로 보이되 후보 자체는 숨기지 않는다.
+  const grouped = classified.filter(({ classification }) => classification.group);
+  const provisional = classified.filter(
+    ({ classification }) => classification.provisionalGroup,
+  );
+  const isolated = classified
+    .filter(
+      ({ classification }) =>
+        !classification.group && !classification.provisionalGroup,
+    )
+    .map(({ item }) => item);
   const hasOriginData = candidates.some(
     (candidate) => (candidate.search_origins ?? []).length > 0,
   );
@@ -321,7 +559,32 @@ export default function SearchManifestView({ job }: { job: Job }) {
   const foundByBoth = candidates.filter(
     (candidate) => (candidate.search_origins ?? []).length > 1,
   ).length;
+  // 발견 경로별 집계. search_origins 와 다른 축이라 따로 센다.
+  const epoDiscovered = candidates.filter((candidate) =>
+    discoveryOrigins(candidate).includes("epo"),
+  );
+  const epoOnlyCount = epoDiscovered.filter(
+    (candidate) => !discoveryOrigins(candidate).includes("web"),
+  ).length;
+  const officialClassified = classified.filter(
+    ({ classification }) => classification.basis === "official_record",
+  ).length;
   const focus = manifest.input?.search_focus ?? null;
+  const epoLanes = manifest.epo?.lanes ?? [];
+  const toolViolations = epoLanes.flatMap((lane) =>
+    (lane.tool_violations ?? []).map((violation) => ({ lane, violation })),
+  );
+  const epoExclusions = epoLanes.flatMap((lane) =>
+    (lane.excluded ?? []).map((row) => ({ lane, row })),
+  );
+  const verificationExclusions =
+    manifest.verification?.excluded_candidates ?? [];
+  const selectionOrder = manifest.verification?.selection_order ?? [];
+  // 검색하지 않는 최종 선택 턴. 레인마다 최대 한 번이다.
+  const selectionTurns = epoLanes
+    .map((lane) => ({ lane, selection: lane.selection }))
+    .filter(({ selection }) => selection && Object.keys(selection).length > 0);
+  const webReportError = reported?.web_report_error ?? "";
 
   return (
     <section className="search-panel no-print">
@@ -399,9 +662,19 @@ export default function SearchManifestView({ job }: { job: Job }) {
             </span>
           </>
         )}
+        {epoDiscovered.length > 0 && (
+          <span>
+            <strong>EPO 독립 검색이 발견</strong> {epoDiscovered.length}건 (웹에
+            없던 후보 {epoOnlyCount}건)
+          </span>
+        )}
         <span>
-          <strong>그룹 분류</strong> {grouped.length}건 ·{" "}
-          <strong>미확인 단서</strong> {isolated.length}건
+          <strong>정식 그룹</strong> {grouped.length}건 ·{" "}
+          <strong>잠정 그룹</strong> {provisional.length}건 ·{" "}
+          <strong>미분류 단서</strong> {isolated.length}건
+        </span>
+        <span>
+          <strong>공식 기록 대조로 분류</strong> {officialClassified}건
         </span>
         <span>
           <strong>본문 읽은 것이 확인된 후보</strong>{" "}
@@ -422,23 +695,240 @@ export default function SearchManifestView({ job }: { job: Job }) {
         </p>
       )}
 
-      {grouped.length > 0 && (
+      {(manifest.version ?? 0) < 8 && (
+        <div className="notice info">
+          <strong>과거 분류 안전 해석</strong>
+          <div style={{ marginTop: 4 }}>
+            정식 분류 근거가 저장되지 않은 과거 A/B/C는 잠정 등급으로 표시합니다.
+            원본 매니페스트 값은 수정하지 않았습니다.
+          </div>
+        </div>
+      )}
+
+      {/* 웹 채널의 출력을 읽지 못한 실행. 후보가 EPO 하나에서만 나왔다는
+          사실은 결과를 읽기 전에 알아야 한다. */}
+      {webReportError && (
+        <div className="notice danger">
+          <strong>웹 채널의 검색 결과를 읽지 못했습니다</strong>
+          <div style={{ marginTop: 4 }}>
+            아래 후보는 EPO 독립 검색만으로 만들어졌으며, 웹 검색이 찾은 문헌은
+            하나도 들어 있지 않습니다.
+          </div>
+          <div className="faint" style={{ marginTop: 4 }}>
+            사유: {webReportError}
+          </div>
+        </div>
+      )}
+
+      {/* 계획 턴에서 도구가 감지된 실행. 접지 않고 맨 위에 둔다 — 그 응답의
+          검색·조회 지시를 하나도 실행하지 않았다는 사실이 제일 중요하다. */}
+      {toolViolations.length > 0 && (
+        <div className="notice danger">
+          <strong>EPO 계획 턴에서 도구 호출이 감지되었습니다</strong>
+          <div style={{ marginTop: 4 }}>
+            EPO 검색 계획 턴은 도구 없는 실행입니다. 아래 레인에서는 모델이 외부
+            도구를 호출한 것이 관측되어, <strong>그 응답의 검색·조회 지시를
+            하나도 실행하지 않고 폐기</strong>했습니다.
+          </div>
+          {toolViolations.some(
+            ({ violation }) => violation.isolation === "post_hoc_detection",
+          ) && (
+            <div style={{ marginTop: 4 }}>
+              <strong>사후 탐지는 차단이 아닙니다.</strong> 격리 수준이{" "}
+              <span className="mono-text">post_hoc_detection</span> 인 레인에서는
+              ARIA 가 도구 호출을 막을 수단이 없습니다. 그 외부 호출은{" "}
+              <strong>이미 나갔고 되돌릴 수 없으며</strong>, ARIA 가 한 일은 그
+              응답을 검색 계획으로 쓰지 않기로 한 것뿐입니다. 모델이 무엇을
+              읽었는지는 ARIA 가 알지 못합니다.
+            </div>
+          )}
+          <ul className="search-query-list" style={{ marginTop: 4 }}>
+            {toolViolations.map(({ lane, violation }, i) => (
+              <li key={i}>
+                <span className="mono-text">{lane.id}</span> ·{" "}
+                {violation.provider || "provider 미기록"} · 감지된 도구{" "}
+                <span className="mono-text">
+                  {(violation.tools ?? []).join(", ") || "-"}
+                </span>{" "}
+                — {ISOLATION_LABEL[violation.isolation ?? "unknown"] ??
+                  violation.isolation}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {(manifest.verification?.attempted || manifest.verification?.reason) && (
+        <div className="notice info">
+          <strong>공식 문헌 2차 검증</strong>
+          {manifest.verification.reason && (
+            <div style={{ marginTop: 4 }}>{manifest.verification.reason}</div>
+          )}
+          <div className="faint" style={{ marginTop: 4 }}>
+            대상 {manifest.verification.counts?.targets ?? 0}건 · 공식 문헌 확보{" "}
+            {manifest.verification.counts?.verified ?? 0}건 · 확보 실패{" "}
+            {manifest.verification.counts?.fetch_failed ?? 0}건 · 미시도{" "}
+            {manifest.verification.counts?.not_attempted ?? 0}건
+          </div>
+          {(manifest.verification.usage?.reused_artifact_calls ?? 0) > 0 && (
+            <div className="faint" style={{ marginTop: 4 }}>
+              EPO 검색 레인이 이미 받아 둔 응답{" "}
+              {manifest.verification.usage?.reused_artifact_calls}건을 재사용해
+              같은 자료를 다시 내려받지 않았습니다 (이번 단계의 OPS 호출{" "}
+              {manifest.verification.usage?.official_fetch_calls ?? 0}건).
+              {/* 계획상 완전/부분 재사용과 실제 추가 호출 여부는 다른 축이다.
+                  예산 부족으로 호출이 없었다고 부분 재사용이 완전해지지 않는다. */}
+              {((manifest.verification.usage?.fully_reused_documents ?? 0) > 0 ||
+                (manifest.verification.usage?.partially_reused_documents ?? 0) >
+                  0) && (
+                <>
+                  {" "}
+                  선택 당시 계획은 완전 재사용{" "}
+                  {manifest.verification.usage?.fully_reused_documents ?? 0}건 · 부분
+                  재사용{" "}
+                  {manifest.verification.usage?.partially_reused_documents ?? 0}건이며,
+                  실제 추가 호출 없이 끝난 재사용 문헌은{" "}
+                  {manifest.verification.usage
+                    ?.reused_without_fresh_fetch_documents ?? 0}
+                  건 · 추가 호출이 발생한 재사용 문헌은{" "}
+                  {manifest.verification.usage?.reused_with_fresh_fetch_documents ?? 0}
+                  건입니다.
+                </>
+              )}
+            </div>
+          )}
+          {/* 무엇을 왜 골랐는가. 상한이 무엇을 잘랐는지는 아래 목록이 말하고,
+              왜 그것이 잘렸는지는 이 순서와 함께 읽어야 알 수 있다. */}
+          {selectionOrder.length > 0 && (
+            <div className="faint" style={{ marginTop: 4 }}>
+              <strong>공식 검증 대상 선택 순서</strong>
+              <ol className="search-query-list">
+                {selectionOrder.map((row) => (
+                  <li key={`${row.index}-${row.doc_number}`}>
+                    <span className="mono-text">{row.doc_number}</span> —{" "}
+                    {row.detail}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {/* 상한에 걸려 빠진 후보를 조용히 누락하지 않는다. */}
+          {(verificationExclusions.length > 0 || epoExclusions.length > 0) && (
+            <div className="faint" style={{ marginTop: 4 }}>
+              <strong>상한 때문에 처리하지 않은 것</strong>
+              <ul className="search-query-list">
+                {verificationExclusions.map((row, i) => (
+                  <li key={`v-${i}`}>
+                    <span className="mono-text">
+                      {row.doc_number || `후보 ${row.index}`}
+                    </span>{" "}
+                    — {row.detail}
+                  </li>
+                ))}
+                {epoExclusions.map(({ lane, row }, i) => (
+                  <li key={`e-${i}`}>
+                    <span className="mono-text">
+                      {lane.id} · {row.value || row.kind}
+                    </span>{" "}
+                    — {row.detail}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="faint" style={{ marginTop: 4 }}>
+            A/B/C는 AI 분류입니다. ARIA는 공식 응답에서 실제로 대조된 구성 행
+            수를 표시하며, 안정적인 특징 분모가 없어 임의의 커버리지 백분율은
+            계산하지 않습니다.
+          </div>
+        </div>
+      )}
+
+      {(grouped.length > 0 || provisional.length > 0) && (
         <div className="search-groups">
+          {provisional.length > 0 && (
+            <p className="faint">
+              <strong>잠정 분류 안내:</strong> 검색 결과를 바탕으로 모델이
+              제안했지만 페이지 본문 또는 공식 문헌 근거로 정식 승격되지 않은
+              후보입니다. 문헌번호와 주소는 재검토 단서로만 사용하십시오.
+            </p>
+          )}
           {(["A", "B", "C"] as const).map((group) => {
-            const rows = grouped.filter((c) => c.group === group);
-            if (rows.length === 0) return null;
+            const formalRows = grouped.filter(
+              ({ classification }) => classification.group === group,
+            );
+            const provisionalRows = provisional.filter(
+              ({ classification }) => classification.provisionalGroup === group,
+            );
+            if (formalRows.length === 0 && provisionalRows.length === 0) return null;
             return (
               <div key={group}>
                 <h4>{groupTitle(manifest, group)}</h4>
-                <ul className="search-candidate-list">
-                  {rows.map((item) => (
-                    <CandidateRow
-                      key={item.index}
-                      item={item}
-                      gapSearch={Boolean(focus)}
-                    />
-                  ))}
-                </ul>
+                {formalRows.length > 0 && (
+                  <>
+                    <h5>정식 분류</h5>
+                    <ul className="search-candidate-list">
+                      {formalRows.map(({ item }) => (
+                        <CandidateRow
+                          key={item.index}
+                          item={item}
+                          gapSearch={Boolean(focus)}
+                        />
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {provisionalRows.length > 0 && (
+                  <>
+                    <h5>잠정 분류</h5>
+                    <ul className="search-candidate-list">
+                      {provisionalRows.map(({ item, classification }) => (
+                        <li className="search-candidate" key={item.index}>
+                          <div className="search-candidate-head">
+                            <span className="mono-text">
+                              {item.doc_number || item.doi || "문헌번호 확인 필요"}
+                            </span>
+                            <span className="pill warn">잠정 {group}</span>
+                            <span className="pill neutral">
+                              {CLASSIFICATION_LABEL[classification.basis] ??
+                                classification.basis}
+                            </span>
+                            {discoveryOrigins(item).map((origin) => (
+                              <span
+                                key={origin}
+                                className={`pill ${
+                                  origin === "epo" ? "accent" : "neutral"
+                                }`}
+                              >
+                                {DISCOVERY_LABEL[origin]}
+                              </span>
+                            ))}
+                          </div>
+                          {item.verification && (
+                            <div className="faint">
+                              정식 승격되지 않은 이유:{" "}
+                              {VERIFICATION_LABEL[item.verification.status] ??
+                                item.verification.status}
+                              {verificationDetail(item.verification.detail)
+                                ? ` — ${verificationDetail(item.verification.detail)}`
+                                : ""}
+                            </div>
+                          )}
+                          {!item.verification && item.quarantine_reason && (
+                            <div className="faint">
+                              정식 승격되지 않은 이유: {item.quarantine_reason}
+                            </div>
+                          )}
+                          {item.url && (
+                            <div className="faint break">
+                              모델이 제시한 주소: {item.url}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
               </div>
             );
           })}
@@ -449,39 +939,69 @@ export default function SearchManifestView({ job }: { job: Job }) {
         <div className="search-groups">
           <h4>미확인 검색 단서</h4>
           <p className="faint">
-            문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어 그룹
-            분류와 구성 대응표에서 제외한 후보입니다. 문헌번호는 다시 확인해 볼
-            단서로만 남깁니다. 명칭·출원인·대응 내용은 검증되지 않았으므로
-            표시하지 않습니다.
+            아직 그룹 분류와 구성 대응표에 들어가지 못한 후보입니다. 웹 후보는
+            문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어서이고,
+            EPO 독립 검색 후보는 공식 응답에 구성 대응이 아직 대조되지
+            않아서입니다. 문헌번호는 다시 확인해 볼 단서로 남기며, 검증되지 않은
+            대응 내용은 표시하지 않습니다.
           </p>
           <ul className="search-candidate-list">
-            {isolated.map((item) => (
-              <li className="search-candidate" key={item.index}>
-                <div className="search-candidate-head">
-                  <span className="mono-text">
-                    {item.doc_number || item.doi || "문헌번호 확인 필요"}
-                  </span>
-                  <span className="pill warn">그룹 제외</span>
-                  <span
-                    className={`pill ${
-                      PROVENANCE_CLASS[item.provenance] ?? "neutral"
-                    }`}
-                  >
-                    {PROVENANCE_LABEL[item.provenance] ?? item.provenance}
-                  </span>
-                </div>
-                <div className="faint">
-                  제외 사유:{" "}
-                  {item.quarantine_reason ||
-                    "페이지 관측에 근거한 대응표 행이 없습니다."}
-                </div>
-                {item.url && (
-                  <div className="faint break">
-                    모델이 제시한 주소: {item.url}
+            {isolated.map((item) => {
+              const discovered = discoveryOrigins(item);
+              const epoOnly = !discovered.includes("web");
+              return (
+                <li className="search-candidate" key={item.index}>
+                  <div className="search-candidate-head">
+                    <span className="mono-text">
+                      {item.doc_number || item.doi || "문헌번호 확인 필요"}
+                    </span>
+                    <span className="pill warn">
+                      {epoOnly ? "공식 근거 대조 전" : "그룹 제외"}
+                    </span>
+                    <span
+                      className={`pill ${
+                        PROVENANCE_CLASS[item.provenance] ?? "neutral"
+                      }`}
+                    >
+                      {PROVENANCE_LABEL[item.provenance] ?? item.provenance}
+                    </span>
+                    {discovered.map((origin) => (
+                      <span
+                        key={origin}
+                        className={`pill ${
+                          origin === "epo" ? "accent" : "neutral"
+                        }`}
+                      >
+                        {DISCOVERY_LABEL[origin]}
+                      </span>
+                    ))}
                   </div>
-                )}
-              </li>
-            ))}
+                  {/* EPO 후보에는 웹 게이트 문구를 쓰지 않는다. 격리된 것이
+                      아니라 아직 공식 근거가 대조되지 않았을 뿐이다. */}
+                  <div className="faint">
+                    {epoOnly ? "상태: " : "제외 사유: "}
+                    {epoOnly
+                      ? `${
+                          VERIFICATION_LABEL[
+                            item.verification?.status ?? "not_attempted"
+                          ] ?? "공식 근거 대조 전"
+                        }${
+                          verificationDetail(item.verification?.detail)
+                            ? ` — ${verificationDetail(item.verification?.detail)}`
+                            : ""
+                        }`
+                      : item.quarantine_reason ||
+                        "페이지 관측에 근거한 대응표 행이 없습니다."}
+                  </div>
+                  {item.url && (
+                    <div className="faint break">
+                      {epoOnly ? "공식 응답의 주소: " : "모델이 제시한 주소: "}
+                      {item.url}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -496,6 +1016,127 @@ export default function SearchManifestView({ job }: { job: Job }) {
 
       {open && (
         <div className="search-log">
+          {/* EPO 레인이 검색어를 만들기 전에 적은 청구항 분해. 모델의 판단이지
+              ARIA 의 관측이 아니므로 그렇게 읽히도록 문구를 붙인다. */}
+          {epoLanes.some((lane) => lane.claim_analysis?.elements?.length) && (
+            <>
+              <h4>EPO 검색 전략 (청구항 분석 — 모델 판단)</h4>
+              <p className="faint">
+                검색어를 만들기 전에 EPO 레인이 적은 청구항 분해입니다. ARIA 가
+                대조한 사실이 아니며, 실제로 어떤 검색식이 되었는지는 아래 질의
+                기록과 대조하십시오.
+              </p>
+              {epoLanes
+                .filter((lane) => lane.claim_analysis?.elements?.length)
+                .map((lane) => (
+                  <div key={lane.id}>
+                    <strong>{lane.id}</strong>
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>구성요소</th>
+                            <th>청구항 문언</th>
+                            <th>필수 여부</th>
+                            <th>동의어·유사 표현</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(lane.claim_analysis?.elements ?? []).map((el) => (
+                            <tr key={el.id}>
+                              <td className="mono-text">{el.id}</td>
+                              <td>{el.text}</td>
+                              <td className="faint">
+                                {/* 세 상태다. 적지 않은 것을 '필수 아님'으로
+                                    인쇄하면 없는 판단을 만들어 낸다. */}
+                                {el.essential === true
+                                  ? "필수"
+                                  : el.essential === false
+                                    ? "필수 아님"
+                                    : "판단 없음"}
+                              </td>
+                              <td>{(el.synonyms ?? []).join(", ") || "-"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {(lane.claim_analysis?.relations ?? []).length > 0 && (
+                      <ul className="search-query-list">
+                        {(lane.claim_analysis?.relations ?? []).map((rel, i) => (
+                          <li key={i}>
+                            <span className="mono-text">
+                              {rel.source} → {rel.target}
+                            </span>{" "}
+                            ({rel.kind || "관계"}) {rel.description}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {(lane.claim_analysis?.concept_combinations ?? []).length >
+                      0 && (
+                      <ul className="search-query-list">
+                        {(lane.claim_analysis?.concept_combinations ?? []).map(
+                          (combo, i) => (
+                            <li key={i}>
+                              개념 조합{" "}
+                              <span className="mono-text">
+                                {(combo.elements ?? []).join(", ")}
+                              </span>{" "}
+                              → {(combo.terms ?? []).join(", ") || "-"}
+                              {combo.reason ? ` — ${combo.reason}` : ""}
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    )}
+                    {(lane.claim_analysis?.search_conditions ?? []).length >
+                      0 && (
+                      <ul className="search-query-list">
+                        {(lane.claim_analysis?.search_conditions ?? []).map(
+                          (cond, i) => (
+                            <li key={i}>
+                              {cond.kind || "조건"}:{" "}
+                              <span className="mono-text">{cond.value}</span>
+                              {cond.reason ? ` — ${cond.reason}` : ""}
+                            </li>
+                          ),
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+            </>
+          )}
+
+          {/* 검색하지 않는 최종 선택 턴. 마지막 검색 결과가 shortlist 평가를
+              받았는지는 "왜 이 문헌이 후보에 없나"에 답할 때 필요하다. */}
+          {selectionTurns.length > 0 && (
+            <>
+              <h4>최종 선택 턴 (검색 없음)</h4>
+              <p className="faint">
+                이 턴은 OPS 를 부르지 않습니다. 마지막 검색이 데려온 문헌까지
+                포함해 shortlist 를 한 번 더 고르는 자리이며, 검색 라운드와
+                사용량을 따로 기록합니다.
+              </p>
+              <ul className="search-query-list">
+                {selectionTurns.map(({ lane, selection }) => (
+                  <li key={lane.id}>
+                    <span className="mono-text">{lane.id}</span> —{" "}
+                    {selection?.attempted
+                      ? `${selection.status || "ok"} · 검토한 후보 ${
+                          selection.candidates_reviewed ?? 0
+                        }건 · 추가된 shortlist ${selection.shortlist_added ?? 0}건`
+                      : `돌리지 않음 — ${selection?.reason || "사유 미기록"}`}
+                    {(selection?.rejected_actions ?? 0) > 0 && (
+                      <> · 거절된 검색 action {selection?.rejected_actions}건</>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
           <h4>ARIA 가 관측한 검색어</h4>
           {Object.keys(queriesByOrigin).length > 0 ? (
             Object.entries(queriesByOrigin).map(([origin, queries]) => (
@@ -591,7 +1232,7 @@ export default function SearchManifestView({ job }: { job: Job }) {
                 <tr>
                   <th>검색 프롬프트</th>
                   <td className="break mono-text">
-                    {manifest.prompt.id} v{manifest.prompt.version ?? "-"} · sha256{" "}
+                    {manifest.prompt.id} · sha256{" "}
                     {manifest.prompt.sha256.slice(0, 16)}…
                   </td>
                 </tr>

@@ -182,10 +182,245 @@ class Finish(_Base):
         return str(value).strip()[:4000]
 
 
+# --- 청구항 분석 ----------------------------------------------------------
+#
+# 이것은 action 이 아니다. 모델이 **첫 응답에 함께 적는 기록**이며 ARIA 가
+# 실행하는 것이 없다. 별도 모델 턴을 만들지 않는 이유는 하나다 — 검색어를 만든
+# 그 판단이 곧 검색 전략이므로, 나중에 다시 물으면 그때의 근거가 아니라 새로
+# 지어낸 근거를 받게 된다.
+#
+# 조용히 자르지 않는다. 상한을 넘으면 pydantic 이 거절하고, 그 사유가 모델에게
+# 되돌아간다.
+MAX_CLAIM_ELEMENTS = 40
+MAX_RELATIONS = 60
+MAX_COMBINATIONS = 30
+MAX_SYNONYMS = 20
+MAX_CONDITIONS = 30
+
+
+class ClaimElement(_Base):
+    """청구항 구성요소 하나."""
+
+    id: str
+    text: str
+    # "필수 구성인가"를 불리언으로 두면 '아니다'와 '모르겠다'가 같은 값이 된다.
+    # 모델이 적지 않으면 None 으로 남고, 기록에도 '판단 없음'으로 남는다.
+    essential: bool | None = None
+    # 이 구성요소를 다른 문헌이 부르는 말. 검색어 확장의 근거가 된다.
+    synonyms: list[str] = Field(default_factory=list)
+
+    @field_validator("id", "text")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return str(value).strip()[:1000]
+
+    @field_validator("synonyms")
+    @classmethod
+    def _cap_synonyms(cls, value: list) -> list:
+        return [str(item).strip()[:200] for item in value[:MAX_SYNONYMS] if str(item).strip()]
+
+
+class ClaimRelation(_Base):
+    """구성요소 사이의 관계. 구성요소를 다 찾아도 관계가 다르면 다른 발명이다."""
+
+    source: str = ""
+    target: str = ""
+    kind: str = ""
+    description: str = ""
+
+    @field_validator("source", "target", "kind")
+    @classmethod
+    def _trim_short(cls, value: str) -> str:
+        return str(value).strip()[:200]
+
+    @field_validator("description")
+    @classmethod
+    def _trim_long(cls, value: str) -> str:
+        return str(value).strip()[:1000]
+
+
+class ConceptCombination(_Base):
+    """EPO 검색에 실제로 쓴 개념 조합."""
+
+    elements: list[str] = Field(default_factory=list)
+    terms: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+    @field_validator("elements", "terms")
+    @classmethod
+    def _cap(cls, value: list) -> list:
+        return [str(item).strip()[:200] for item in value[:MAX_SYNONYMS] if str(item).strip()]
+
+    @field_validator("reason")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return str(value).strip()[:1000]
+
+
+class SearchCondition(_Base):
+    """IPC/CPC 또는 그 밖의 검색 한정."""
+
+    kind: str = ""
+    value: str = ""
+    reason: str = ""
+
+    @field_validator("kind", "value")
+    @classmethod
+    def _trim_short(cls, value: str) -> str:
+        return str(value).strip()[:200]
+
+    @field_validator("reason")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return str(value).strip()[:1000]
+
+
+class ClaimAnalysis(_Base):
+    """검색 전략의 근거. 첫 응답에 한 번 적는다."""
+
+    elements: list[ClaimElement] = Field(default_factory=list)
+    relations: list[ClaimRelation] = Field(default_factory=list)
+    concept_combinations: list[ConceptCombination] = Field(default_factory=list)
+    search_conditions: list[SearchCondition] = Field(default_factory=list)
+    notes: str = ""
+
+    @field_validator("elements")
+    @classmethod
+    def _cap_elements(cls, value: list) -> list:
+        if len(value) > MAX_CLAIM_ELEMENTS:
+            raise ValueError(
+                f"청구항 구성요소가 상한({MAX_CLAIM_ELEMENTS}개)을 넘습니다"
+                f"({len(value)}개)."
+            )
+        return value
+
+    @field_validator("relations")
+    @classmethod
+    def _cap_relations(cls, value: list) -> list:
+        if len(value) > MAX_RELATIONS:
+            raise ValueError(
+                f"구성요소 관계가 상한({MAX_RELATIONS}개)을 넘습니다({len(value)}개)."
+            )
+        return value
+
+    @field_validator("concept_combinations")
+    @classmethod
+    def _cap_combinations(cls, value: list) -> list:
+        if len(value) > MAX_COMBINATIONS:
+            raise ValueError(
+                f"개념 조합이 상한({MAX_COMBINATIONS}개)을 넘습니다({len(value)}개)."
+            )
+        return value
+
+    @field_validator("search_conditions")
+    @classmethod
+    def _cap_conditions(cls, value: list) -> list:
+        if len(value) > MAX_CONDITIONS:
+            raise ValueError(
+                f"검색 조건이 상한({MAX_CONDITIONS}개)을 넘습니다({len(value)}개)."
+            )
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return str(value).strip()[:4000]
+
+    @property
+    def empty(self) -> bool:
+        return not (
+            self.elements
+            or self.relations
+            or self.concept_combinations
+            or self.search_conditions
+            or self.notes
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "elements": [
+                {
+                    "id": item.id,
+                    "text": item.text,
+                    "essential": item.essential,
+                    "synonyms": list(item.synonyms),
+                }
+                for item in self.elements
+            ],
+            "relations": [
+                {
+                    "source": item.source,
+                    "target": item.target,
+                    "kind": item.kind,
+                    "description": item.description,
+                }
+                for item in self.relations
+            ],
+            "concept_combinations": [
+                {
+                    "elements": list(item.elements),
+                    "terms": list(item.terms),
+                    "reason": item.reason,
+                }
+                for item in self.concept_combinations
+            ],
+            "search_conditions": [
+                {"kind": item.kind, "value": item.value, "reason": item.reason}
+                for item in self.search_conditions
+            ],
+            "notes": self.notes,
+        }
+
+
+class ShortlistItem(_Base):
+    """모델이 고른 유망 EPO 후보 하나.
+
+    ARIA 는 이 목록을 **후보 선정**으로만 쓴다. 여기 적힌 이유는 A/B/C 근거가
+    아니다 — 그 판정은 공식 응답 대조를 통과한 뒤에야 나온다.
+    """
+
+    doc_number: str
+    reason: str = ""
+    matched_elements: list[str] = Field(default_factory=list)
+
+    @field_validator("doc_number")
+    @classmethod
+    def _trim_number(cls, value: str) -> str:
+        return str(value).strip()[:MAX_TEXT]
+
+    @field_validator("reason")
+    @classmethod
+    def _trim(cls, value: str) -> str:
+        return str(value).strip()[:2000]
+
+    @field_validator("matched_elements")
+    @classmethod
+    def _cap(cls, value: list) -> list:
+        return [
+            str(item).strip()[:200]
+            for item in value[:MAX_CLAIM_ELEMENTS]
+            if str(item).strip()
+        ]
+
+    def to_dict(self) -> dict:
+        return {
+            "doc_number": self.doc_number,
+            "reason": self.reason,
+            "matched_elements": list(self.matched_elements),
+        }
+
+
 AnyAction = Annotated[
     Union[EpoSearch, EpoFetchDocument, Finish],
     Field(discriminator="action"),
 ]
+
+
+#: 한 응답에 실을 수 있는 shortlist 항목 수의 **구조적** 상한. 사용자 설정
+#: (epo_shortlist_limit)은 이것과 다른 축이다 — 이쪽은 응답을 파싱할 때의
+#: 안전 한도이고, 그쪽은 최종 대응표에 몇 건까지 올릴 것인가다. 설정이 이보다
+#: 크면 파서가 먼저 거절하므로 설정 상한을 여기에 맞춰 둔다.
+MAX_SHORTLIST_ITEMS = 50
 
 
 class AgentResponse(_Base):
@@ -193,11 +428,26 @@ class AgentResponse(_Base):
 
     strategy: str = ""
     actions: list[AnyAction] = Field(default_factory=list)
+    # 첫 응답에만 있으면 된다. 뒤 라운드에서 다시 오면 첫 것을 유지한다 —
+    # 검색을 하고 난 뒤 고쳐 쓴 분석은 '검색 전략'이 아니라 '결과 해설'이다.
+    claim_analysis: ClaimAnalysis | None = None
+    # 유망 후보. 어느 라운드에서든 올 수 있고 누적된다.
+    shortlist: list[ShortlistItem] = Field(default_factory=list)
 
     @field_validator("strategy")
     @classmethod
     def _trim(cls, value: str) -> str:
         return str(value).strip()[:4000]
+
+    @field_validator("shortlist")
+    @classmethod
+    def _cap_shortlist(cls, value: list) -> list:
+        if len(value) > MAX_SHORTLIST_ITEMS:
+            raise ValueError(
+                f"shortlist 가 상한({MAX_SHORTLIST_ITEMS}건)을 넘습니다"
+                f"({len(value)}건)."
+            )
+        return value
 
     @field_validator("actions")
     @classmethod
@@ -335,9 +585,17 @@ def parse_response(text: str) -> AgentResponse:
         elif isinstance(data, dict):
             # 모델이 최상위에 단일 action 객체를 직접 준 경우(예: {"action": "epo_search", ...})
             # AgentResponse 스키마에 맞게 actions 리스트로 감싼다.
+            #
+            # 형제 필드를 **버리지 않는다.** 감싸기는 모양을 너그럽게 받아 주려고
+            # 있는 것이지 내용을 줄이려고 있는 것이 아니다. claim_analysis 를
+            # 조용히 떨어뜨리면, 짧은 형식을 쓴 모델은 계약을 지킬 방법이 아예
+            # 없어지고 "분석이 없다"는 이유로 검색이 영원히 거절된다.
             if "action" in data and "actions" not in data:
-                strategy = str(data.get("strategy", "") or "")
-                data = {"strategy": strategy, "actions": [data]}
+                wrapped = {"actions": [data]}
+                for carried in ("strategy", "claim_analysis", "shortlist"):
+                    if carried in data:
+                        wrapped[carried] = data[carried]
+                data = wrapped
         else:
             last_error = "최상위가 객체 또는 배열이 아닙니다."
             continue
@@ -385,5 +643,28 @@ def schema_summary() -> str:
             "match 는 all(단어 전부) · any(하나라도) · exact(구 그대로) 중 하나.",
             'date_range 는 {"kind":"date_range","field":"pd",'
             '"begin":"20100101","end":"20201231"}.',
+        ]
+    )
+
+
+def analysis_schema_summary() -> str:
+    """프롬프트에 넣을 claim_analysis · shortlist 요약."""
+    return "\n".join(
+        [
+            '"claim_analysis": {',
+            '  "elements": [{"id":"E1","text":"청구항 문언 그대로","essential":true,',
+            '                "synonyms":["다른 문헌이 쓰는 표현"]}],',
+            '  "relations": [{"source":"E1","target":"E2","kind":"결합",',
+            '                 "description":"E2 가 E1 의 끝단에 배치된다"}],',
+            '  "concept_combinations": [{"elements":["E1","E2"],',
+            '                            "terms":["robot arm","force sensor"],',
+            '                            "reason":"이 조합으로 검색한 이유"}],',
+            '  "search_conditions": [{"kind":"ipc","value":"B25J 9/16",',
+            '                         "reason":"이 분류로 좁힌 이유"}],',
+            '  "notes": ""',
+            "},",
+            '"shortlist": [{"doc_number":"EP1000000A1",',
+            '               "reason":"이 문헌을 유망하다고 본 이유",',
+            '               "matched_elements":["E1","E2"]}]',
         ]
     )

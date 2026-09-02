@@ -62,7 +62,6 @@ def _manifest(reported: dict, epo: dict) -> dict:
     return search_manifest.build(
         claim_text="청구항 1. 테스트",
         prompt_id="search_prompt.md",
-        prompt_version=1,
         prompt_sha256="a" * 64,
         claim_boundary_neutralized=False,
         started_at="2026-08-28T00:00:00+00:00",
@@ -203,7 +202,7 @@ def test_manifest_v6_records_the_derived_comparison_and_used_channel() -> None:
         _epo(_lane("epo:claim_only", _epo_candidate("EP1000000A1"))),
     )
 
-    assert manifest["version"] == 7
+    assert manifest["version"] == search_manifest.MANIFEST_VERSION
     assert manifest["channel_comparison"]["counts"]["both"] == 1
     assert search_manifest.CHANNEL_PATENT_DB in manifest["channels_used"]
     # 원 채널 기록은 파생 비교를 만들면서 바뀌지 않는다.
@@ -223,9 +222,15 @@ def test_report_surfaces_epo_only_as_discovery_not_classification() -> None:
     )
     report = search_report.render(manifest)
 
-    assert "## 웹/EPO 채널 교차 발견" in report
+    assert "<summary><b>웹/EPO 채널 교차 발견 펼치기/접기</b></summary>" in report
     assert "EPO에서만 발견: 1건" in report
     assert "EP2222222B1" in report
     assert "EPO \\| 단독 후보" in report
     assert "특허 패밀리 판정이나 A/B/C 유사도 분류가 아니" in report
     assert "이번 웹 검색 기록에 같은 공개번호가 없었다는 뜻" in report
+    assert "번호로 직접 조회한 EPO 기록은 이 발견 경로 비교에 포함하지" in report
+    assert report.index("## 미확인 검색 단서") < report.index(
+        "<summary><b>웹/EPO 채널 교차 발견"
+    )
+    assert report.count("<details>") == 1
+    assert report.count("</details>") == 1

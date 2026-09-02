@@ -17,7 +17,11 @@ import json
 from pathlib import Path
 
 from app.providers.base import CODEX_WEB_SEARCH, NO_TOOLS, ExecutionRequest
-from app.providers.codex_cli import CodexCliProvider
+from app.providers.codex_cli import (
+    MODEL_DEFAULT_REASONING_EFFORTS,
+    MODEL_REASONING_EFFORTS,
+    CodexCliProvider,
+)
 from app.providers.codex_stream import (
     TOOL_ITEM_TYPES,
     CodexStreamParser,
@@ -513,3 +517,36 @@ def test_unknown_status_is_not_promoted_to_success() -> None:
         {"id": "e6", "type": "command_execution", "command": "x", "status": "completed"},
     )
     assert parser.state.tool_calls[0]["ok"] is True
+
+
+def test_no_reasoning_effort_argument_when_the_user_did_not_choose(tmp_path: Path) -> None:
+    """고르지 않았으면 아무 것도 넘기지 않는다.
+
+    빈 값을 어떤 레벨로 채우는 순간 ARIA 가 고르지도 않은 강도를 대신 정해
+    주는 셈이 된다. 모델 카탈로그의 기본값에 맡겨야 한다.
+    """
+    args = CodexCliProvider().build_args(_request(tmp_path))
+    assert not any("model_reasoning_effort" in arg for arg in args)
+
+
+def test_reasoning_effort_is_passed_only_when_chosen(tmp_path: Path) -> None:
+    args = CodexCliProvider().build_args(
+        _request(tmp_path, reasoning_effort="xhigh")
+    )
+    index = args.index("model_reasoning_effort=xhigh")
+    assert args[index - 1] == "-c"
+    # 모델 인수와 섞이지 않는다.
+    assert "-m" not in args[index - 1 : index + 1]
+
+
+def test_reasoning_effort_catalog_is_model_specific() -> None:
+    assert MODEL_DEFAULT_REASONING_EFFORTS["gpt-5.6-sol"] == "low"
+    assert MODEL_DEFAULT_REASONING_EFFORTS["gpt-5.6-luna"] == "medium"
+    assert "ultra" in MODEL_REASONING_EFFORTS["gpt-5.6-sol"]
+    assert "ultra" not in MODEL_REASONING_EFFORTS["gpt-5.6-luna"]
+    assert MODEL_REASONING_EFFORTS["gpt-5.5"] == (
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    )

@@ -360,6 +360,16 @@ class EpoOpsBackend(PatentSearchBackend):
             self._store = artifacts.ArtifactStore(PATHS.evidence_dir.resolve())
         return self._store
 
+    @property
+    def artifact_store(self) -> artifacts.ArtifactStore:
+        """이 백엔드가 응답 원본을 보존하는 불변 저장소.
+
+        후보 검증 단계는 같은 저장소에서 아티팩트를 다시 읽어 support_text를
+        대조해야 한다. 사설 속성에 기대면 저장소 생성 규칙이 두 군데로 갈리므로
+        지원되는 읽기 전용 진입점을 제공한다.
+        """
+        return self._require_store()
+
     # --- 검색 -----------------------------------------------------------
     def search(self, query: PatentSearchQuery) -> PatentSearchResponse:
         """base 계약의 진입점. 자유 문장을 안전한 검색항 하나로 바꿔 검색한다."""
@@ -392,23 +402,38 @@ class EpoOpsBackend(PatentSearchBackend):
         return self._materialize(call, cql=cql)
 
     def fetch_document(
-        self, doc_key: str, constituent: str = epo_client.CONSTITUENT_CLAIMS
+        self,
+        doc_key: str,
+        constituent: str = epo_client.CONSTITUENT_CLAIMS,
+        *,
+        agent_budget: bool = True,
     ) -> PatentSearchResponse:
         """후보 하나의 상세를 받는다. 검색 스니펫과 증거 범위를 나누는 지점.
 
         검색 응답(biblio)에서 온 값과 여기서 온 값은 서로 다른 아티팩트를
         가리킨다. 그래서 "초록까지만 본 후보"와 "청구항까지 본 후보"가 기록에서
         구분된다 — 두 범위를 한 레코드에 뭉개면 그 구분이 사라진다.
+
+        ``agent_budget`` 이 거짓이면 _max_detail_fetches 상한을 세지 않는다.
+        그 상한은 **LLM 루프의 폭주**를 막으려고 있는 것이다 — 모델이 도구를
+        몇 번 부를지 우리가 모르기 때문에 건 것이지, OPS 를 몇 번 부를 수
+        있는가의 계약이 아니다. 호출 횟수를 ARIA 가 직접 정하는 경로(후보 검증)
+        는 자기 상한을 따로 들고 오므로 이 상한에 걸릴 이유가 없다. 실제로
+        걸리면 EPO 레인이 상한을 다 쓴 실행에서만 검증이 조용히 0건이 된다.
+
+        어느 쪽이든 **OPS 쿼터 원장은 그대로 적용된다.** 여기서 면제되는 것은
+        루프 상한 하나뿐이다.
         """
-        if self._detail_fetches >= self._max_detail_fetches:
-            raise DetailBudgetExceeded(
-                f"상세 조회 상한({self._max_detail_fetches}건)에 도달했습니다."
-            )
+        if agent_budget:
+            if self._detail_fetches >= self._max_detail_fetches:
+                raise DetailBudgetExceeded(
+                    f"상세 조회 상한({self._max_detail_fetches}건)에 도달했습니다."
+                )
+            # 예산은 **시도**에서 깎는다. 성공했을 때만 세면 빠르게 실패하는 상세
+            # 조회가 상한을 소모하지 않아, 12건 상한이 걸린 채로 무한히 시도할 수
+            # 있다. 실패한 호출도 OPS 사용량과 시간을 쓴다.
+            self._detail_fetches += 1
         client = self._require_client()
-        # 예산은 **시도**에서 깎는다. 성공했을 때만 세면 빠르게 실패하는 상세
-        # 조회가 상한을 소모하지 않아, 12건 상한이 걸린 채로 무한히 시도할 수
-        # 있다. 실패한 호출도 OPS 사용량과 시간을 쓴다.
-        self._detail_fetches += 1
         call = client.fetch(doc_key, constituent)
         return self._materialize(call, cql="")
 
@@ -430,6 +455,8 @@ class EpoOpsBackend(PatentSearchBackend):
                 total_found=0,
                 raw_artifact_id=artifact_id,
                 fetched_at=datetime.now(timezone.utc).isoformat(),
+                http_status=int(getattr(call, "status", 0) or 0),
+                request_url=str(getattr(call, "url", "") or ""),
             )
 
         try:
@@ -449,6 +476,8 @@ class EpoOpsBackend(PatentSearchBackend):
             total_found=total,
             raw_artifact_id=artifact_id,
             fetched_at=datetime.now(timezone.utc).isoformat(),
+            http_status=int(getattr(call, "status", 0) or 0),
+            request_url=str(getattr(call, "url", "") or ""),
         )
 
 

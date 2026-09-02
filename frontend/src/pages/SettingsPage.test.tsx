@@ -9,7 +9,7 @@
  *   - 화면이 안내하는 「0 = 사용 안 함」이 실제로 있는 값에만 붙는다
  *   - 두 한도(전송 하드 / 모델 컨텍스트)가 각자 자기 절에서 설명된다
  */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const settingsResponse = {
@@ -26,12 +26,13 @@ const settingsResponse = {
     default_provider: "agy",
     provider_paths: {},
     default_models: {},
+    reasoning_effort: {},
     keep_raw_output: true,
     fail_on_tool_use: true,
     max_search_tool_calls: 40,
     retrieval_mode: "auto",
-    retrieval_max_rounds: 6,
-    retrieval_max_page_reads: 40,
+    retrieval_max_rounds: 10,
+    retrieval_max_page_reads: 80,
     retrieval_evidence_chars: 40000,
     retrieval_hits_per_document: 6,
     retrieval_neighbor_pages: 1,
@@ -59,11 +60,59 @@ const settingsResponse = {
   },
 };
 
+const providersResponse = [
+  {
+    provider: "agy",
+    display_name: "agy",
+    installed: true,
+    executable_path: "agy",
+    executable_kind: "native_exe",
+    executable_ok: true,
+    version: "1",
+    auth_state: "OK",
+    capabilities: { models: ["agy-default"] },
+    notes: [],
+    install_hint: "",
+    execution_supported: true,
+    usable: true,
+    runnable: true,
+  },
+  {
+    provider: "codex",
+    display_name: "Codex",
+    installed: true,
+    executable_path: "codex",
+    executable_kind: "native_exe",
+    executable_ok: true,
+    version: "0.149.0",
+    auth_state: "OK",
+    capabilities: {
+      models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+      reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      reasoning_efforts_by_model: {
+        "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+        "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+        "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+      },
+      reasoning_defaults_by_model: {
+        "gpt-5.6-sol": "low",
+        "gpt-5.6-terra": "medium",
+        "gpt-5.6-luna": "medium",
+      },
+    },
+    notes: [],
+    install_hint: "",
+    execution_supported: true,
+    usable: true,
+    runnable: true,
+  },
+];
+
 vi.mock("../lib/api", () => ({
   api: {
     settings: vi.fn(async () => settingsResponse),
     listPrompts: vi.fn(async () => []),
-    listProviders: vi.fn(async () => []),
+    listProviders: vi.fn(async () => providersResponse),
     updateSettings: vi.fn(async () => settingsResponse),
     probeProviders: vi.fn(async () => []),
   },
@@ -85,6 +134,36 @@ async function renderPage() {
 }
 
 describe("대용량 인용발명 전달 방식", () => {
+  it("Codex 모델별 추론강도를 드롭다운으로 표시한다", async () => {
+    await renderPage();
+    fireEvent.change(screen.getByLabelText("AI 실행 도구 (Provider)"), {
+      target: { value: "codex" },
+    });
+
+    const modelSelect = screen.getByLabelText("모델") as HTMLSelectElement;
+    fireEvent.change(modelSelect, { target: { value: "gpt-5.6-luna" } });
+
+    await waitFor(() => {
+      const effort = screen.getByLabelText("추론강도") as HTMLSelectElement;
+      expect([...effort.options].map((option) => option.value)).toEqual([
+        "",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+    });
+    expect(screen.getByText(/모델 기본값\(medium\)/)).toBeTruthy();
+
+    fireEvent.change(modelSelect, { target: { value: "gpt-5.6-sol" } });
+    await waitFor(() => {
+      const effort = screen.getByLabelText("추론강도") as HTMLSelectElement;
+      expect([...effort.options].map((option) => option.value)).toContain("ultra");
+    });
+    expect(screen.getByText(/모델 기본값\(low\)/)).toBeTruthy();
+  });
+
   it("선택지가 auto / full / retrieval 셋뿐이다", async () => {
     await renderPage();
     const select = screen.getByLabelText("전달 방식") as HTMLSelectElement;

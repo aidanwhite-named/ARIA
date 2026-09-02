@@ -467,6 +467,15 @@ class EvidenceBuilder:
                     "component_id": state.id,
                     "claim_component": state.label,
                     "feature": state.feature,
+                    "declared_importance": state.declared_importance,
+                    "importance_reasons": list(state.importance_reasons),
+                    "depends_on": list(state.depends_on),
+                    "priority": state.current_priority,
+                    "uncertainty": state.uncertainty,
+                    "priority_reasons": list(state.priority_reasons),
+                    "search_completeness": state.search_completeness,
+                    "coverage_ratio": round(state.coverage_ratio, 3),
+                    "stable_rounds": state.stable_rounds,
                     "queries_used": list(state.queries),
                     "search_channels_used": list(state.channels_used),
                     "search_channels_failed": list(state.failed_channels),
@@ -482,6 +491,26 @@ class EvidenceBuilder:
                     "candidate_documents": sorted(
                         {entry["alias"] for entry in state.hit_chunks.values()}
                     ),
+                    "candidate_ledger": [
+                        {
+                            "attachment": entry.get("alias"),
+                            "chunk_id": entry.get("chunk_id"),
+                            "page": entry.get("page_number"),
+                            "paragraph": entry.get("paragraph") or "",
+                            "score": round(float(entry.get("score") or 0), 6),
+                            "channels": list(entry.get("channels") or []),
+                            "snippet": str(entry.get("snippet") or ""),
+                            "seen_count": int(entry.get("seen_count") or 1),
+                            "first_seen_round": entry.get("first_seen_round"),
+                            "last_seen_round": entry.get("last_seen_round"),
+                        }
+                        for entry in state.top_candidates()
+                    ],
+                    "deferred_actions": [
+                        item
+                        for item in self.run.deferred_pending
+                        if item.get("component_id") == state.id
+                    ],
                     "findings": findings,
                     "reviewed_pages": {
                         alias: {"count": len(pages), "ranges": _ranges(pages)}
@@ -543,6 +572,9 @@ class EvidenceBuilder:
             "sqlite": self.capabilities,
             "libraries": self.library_versions,
             "action_errors": list(self.run.action_errors),
+            "deferred_actions": list(self.run.deferred_actions),
+            "deferred_pending": list(self.run.deferred_pending),
+            "deferred_executed": self.run.deferred_executed,
             "notes": list(self.run.notes),
         }
 
@@ -676,6 +708,11 @@ def render(bundle: dict) -> str:
     if bundle.get("coverage_blockers"):
         lines.append("- 검토 범위 제한:")
         lines += [f"  · {reason}" for reason in bundle["coverage_blockers"]]
+    if bundle.get("deferred_pending"):
+        lines.append(
+            f"- 반환 예산으로 이월되어 이번 실행에서 확인하지 못한 action: "
+            f"{len(bundle['deferred_pending'])}건"
+        )
 
     lines += ["", "[청구항 구성별 근거]"]
     for component in bundle.get("components", []):
@@ -683,6 +720,11 @@ def render(bundle: dict) -> str:
             "",
             f"### {component['component_id']} · {component['claim_component']}",
             f"- 구성 내용: {component.get('feature') or '(미기재)'}",
+            f"- 중요도/현재 우선순위: {component.get('declared_importance', 'medium')} / "
+            f"{component.get('priority', 'medium')} · 불확실성: "
+            f"{component.get('uncertainty', 'high')} · 검색 완전성: "
+            f"{component.get('search_completeness', 'unsearched')} "
+            f"({component.get('coverage_ratio', 0):.0%})",
             f"- 사용한 검색어: {', '.join(component.get('queries_used') or []) or '(없음)'}",
             f"- 검색 채널: {', '.join(component.get('search_channels_used') or []) or '(없음)'}",
             f"- ARIA 확정 상태: {component['status']} — {component['status_label']}",
@@ -690,6 +732,9 @@ def render(bundle: dict) -> str:
         if component.get("status_reasons"):
             lines.append("- 확정하지 못한 사유:")
             lines += [f"  · {reason}" for reason in component["status_reasons"]]
+        if component.get("priority_reasons"):
+            lines.append("- 우선순위 재평가 사유:")
+            lines += [f"  · {reason}" for reason in component["priority_reasons"]]
         reviewed = component.get("reviewed_pages") or {}
         if reviewed:
             lines.append(

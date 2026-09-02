@@ -48,6 +48,7 @@ from pathlib import Path
 from ..enums import AuthState
 from ..execution import process as proc
 from .base import (
+    REASONING_EFFORTS,
     CODEX_WEB_SEARCH,
     EmitFn,
     ExecutionOutcome,
@@ -88,6 +89,27 @@ MODELS = (
     "gpt-5.5",
     "gpt-5.4",
 )
+
+# Codex CLI 0.149.0 이 로컬 모델 카탈로그에서 광고하는 모델별 추론강도다.
+# API 의 reasoning.effort 목록과 CLI Agent 의 목록은 같지 않다. 예를 들어
+# Codex Agent 의 ultra 는 자동 작업 분할까지 포함하는 CLI 단계이고, luna 에는
+# 없다. UI 가 전역 합집합만 보여 주면 luna + ultra 같은 실행 불가능한 조합을
+# 저장하게 되므로 모델별 목록을 함께 내린다.
+MODEL_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max", "ultra"),
+    "gpt-5.6-terra": ("low", "medium", "high", "xhigh", "max", "ultra"),
+    "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
+    "gpt-5.5": ("low", "medium", "high", "xhigh"),
+    "gpt-5.4": ("low", "medium", "high", "xhigh"),
+}
+
+MODEL_DEFAULT_REASONING_EFFORTS: dict[str, str] = {
+    "gpt-5.6-sol": "low",
+    "gpt-5.6-terra": "medium",
+    "gpt-5.6-luna": "medium",
+    "gpt-5.5": "medium",
+    "gpt-5.4": "medium",
+}
 
 
 class CodexCliProvider(Provider):
@@ -134,6 +156,17 @@ class CodexCliProvider(Provider):
                 "web_search": True,
                 "search_tool_control": "detect_only",
                 "model_select": True,
+                # 고를 수 있는 레벨. 비워 두면 모델 기본값이며, 그 값이 무엇인지
+                # ARIA 는 알 수 없다 — CLI 가 명령으로 알려주지 않는다.
+                "reasoning_effort_select": True,
+                "reasoning_efforts": list(REASONING_EFFORTS),
+                "reasoning_efforts_by_model": {
+                    model: list(efforts)
+                    for model, efforts in MODEL_REASONING_EFFORTS.items()
+                },
+                "reasoning_defaults_by_model": dict(
+                    MODEL_DEFAULT_REASONING_EFFORTS
+                ),
                 "cancellable": True,
                 "browser_login": True,
                 # 세션 파일을 디스크에 남기지 않고 실행할 수 있다.
@@ -243,6 +276,15 @@ class CodexCliProvider(Provider):
         ]
         if request.model:
             args += ["-m", request.model]
+        # 사용자가 고르지 않았으면 **아무 것도 넘기지 않는다.** 그래야 모델
+        # 카탈로그의 기본값이 그대로 적용된다. 빈 값을 어떤 레벨로 채우는 순간
+        # ARIA 가 고르지도 않은 강도를 대신 정해 주는 셈이 된다.
+        #
+        # --ignore-user-config 때문에 ~/.codex/config.toml 의 값은 무시되지만,
+        # -c 로 준 값은 그대로 적용된다. 모델 카탈로그(models_cache.json)는
+        # config.toml 이 아니라서 --ignore-user-config 의 영향을 받지 않는다.
+        if request.reasoning_effort:
+            args += ["-c", f"model_reasoning_effort={request.reasoning_effort}"]
         # 마지막 인수. 프롬프트를 stdin 에서 읽는다 — Windows 의 명령행 길이
         # 제한(32,767자) 때문에 인수로는 긴 프롬프트를 넘길 수 없다.
         args.append("-")

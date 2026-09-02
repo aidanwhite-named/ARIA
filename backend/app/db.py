@@ -98,6 +98,9 @@ def _add_compatible_columns(engine) -> None:
     깨진다. 지난 실행에 적혀 있던 경고 문구는 이 시점에 사라진다 — 보고서
     본문과 첨부 기록은 건드리지 않는다.
 
+    프롬프트 버전 이력 기능을 제거했으므로 기존 prompt_version 컬럼도 함께
+    정리한다. 실행 시점의 실제 본문은 prompt_snapshot에 계속 보존된다.
+
     후속 분석 계보 컬럼도 같은 방식으로 붙인다. 기존 실행은 독립 실행이므로
     relation_type 이 NULL, 나머지는 빈 문자열이 맞는 기본값이다.
 
@@ -136,6 +139,10 @@ def _add_compatible_columns(engine) -> None:
         if "warnings" in job_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE execution_jobs DROP COLUMN warnings"
+            )
+        if "prompt_version" in job_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE execution_jobs DROP COLUMN prompt_version"
             )
         if "role" not in attachment_columns and attachment_columns:
             connection.exec_driver_sql(

@@ -7,7 +7,6 @@ import type {
   Preflight,
   Prompt,
   PromptCatalogItem,
-  PromptVersion,
   ProviderInfo,
   ProviderLoginSession,
   ProviderLogoutResult,
@@ -82,10 +81,6 @@ export const api = {
     }),
   deletePrompt: (id: string) =>
     request<void>(`/api/prompts/${id}`, { method: "DELETE" }),
-  promptVersions: (id: string) =>
-    request<PromptVersion[]>(`/api/prompts/${id}/versions`),
-  reservedPromptVersions: (id: string) =>
-    request<PromptVersion[]>(`/api/prompts/reserved/${id}/versions`),
   exportPrompts: () =>
     request<{ version: number; prompts: unknown[] }>("/api/prompts/export"),
   importPrompts: (prompts: unknown[], replaceExisting: boolean) =>

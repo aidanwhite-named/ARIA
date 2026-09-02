@@ -213,7 +213,6 @@ export default function HistoryPage() {
                     </td>
                     <td>
                       {item.prompt_name}
-                      {item.prompt_version ? ` (v${item.prompt_version})` : ""}
                     </td>
                     <td>
                       {item.relation_type ? (

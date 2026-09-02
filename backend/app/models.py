@@ -50,7 +50,6 @@ class ExecutionJob(Base):
     # 프롬프트 스냅샷. 원본 템플릿이 수정/삭제돼도 과거 실행을 확인할 수 있어야 한다.
     prompt_id = Column(String(36), nullable=True)
     prompt_name = Column(String(200), nullable=False, default="")
-    prompt_version = Column(Integer, nullable=True)
     prompt_snapshot = Column(Text, nullable=False, default="")
     output_mode = Column(String(20), nullable=False, default="markdown")
     claim_text = Column(Text, nullable=False, default="")

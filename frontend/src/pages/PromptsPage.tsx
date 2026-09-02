@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import type {
-  PromptCatalogItem,
-  PromptKind,
-  PromptVersion,
-} from "../lib/types";
+import type { PromptCatalogItem, PromptKind } from "../lib/types";
 
 const BLANK = {
   name: "",
@@ -21,7 +17,6 @@ export default function PromptsPage() {
   const [prompts, setPrompts] = useState<PromptCatalogItem[]>([]);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [versions, setVersions] = useState<PromptVersion[] | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const importInput = useRef<HTMLInputElement>(null);
@@ -59,7 +54,7 @@ export default function PromptsPage() {
         } else {
           await api.updatePrompt(draft.id, payload);
         }
-        notify("프롬프트를 저장했습니다. 내용이 바뀌었으면 버전이 올라갑니다.");
+        notify("프롬프트를 저장했습니다.");
       } else {
         await api.createPrompt(payload);
         notify("prompt 폴더에 새 프롬프트 파일을 만들었습니다.");
@@ -117,7 +112,7 @@ export default function PromptsPage() {
         <h1>프롬프트를 관리합니다</h1>
         <p>
           분석과 검색이 각자의 전용 프롬프트를 사용합니다. 모든 수정의 맥락과
-          실행 시점의 원문을 보존합니다.
+          실행 시점의 원문은 작업 기록에 보존합니다.
         </p>
       </div>
 
@@ -173,7 +168,6 @@ export default function PromptsPage() {
                 <tr>
                   <th>용도</th>
                   <th>이름</th>
-                  <th>현재 버전</th>
                   <th>결과 형식</th>
                   <th>태그</th>
                   <th>상태</th>
@@ -192,7 +186,6 @@ export default function PromptsPage() {
                       <div style={{ fontWeight: 600 }}>{p.name}</div>
                       <div className="faint">{p.description || "설명 없음"}</div>
                     </td>
-                    <td>v{p.version}</td>
                     <td>{p.output_mode === "markdown" ? "서식 포함" : "일반 텍스트"}</td>
                     <td>
                       {(p.tags ?? []).map((t) => (
@@ -241,19 +234,6 @@ export default function PromptsPage() {
                           }
                         >
                           {p.enabled ? "비활성" : "활성"}
-                        </button>
-                        <button
-                          className="btn small"
-                          onClick={() =>
-                            (p.kind === "search"
-                              ? api.reservedPromptVersions(p.id)
-                              : api.promptVersions(p.id)
-                            )
-                              .then(setVersions)
-                              .catch((e) => setError(e.message))
-                          }
-                        >
-                          버전 이력
                         </button>
                         {p.deletable ? (
                           <button
@@ -368,31 +348,6 @@ export default function PromptsPage() {
                 취소
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {versions && (
-        <div className="modal-backdrop" onClick={() => setVersions(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2 style={{ marginTop: 0 }}>버전 이력</h2>
-            {versions.length === 0 && <div className="empty">이력이 없습니다.</div>}
-            {versions.map((v) => (
-              <details key={v.id} style={{ marginBottom: 10 }}>
-                <summary style={{ cursor: "pointer" }}>
-                  v{v.version} · {v.name} ·{" "}
-                  <span className="faint">
-                    {new Date(v.created_at).toLocaleString()}
-                  </span>
-                </summary>
-                <pre className="result-raw" style={{ marginTop: 8 }}>
-                  {v.body}
-                </pre>
-              </details>
-            ))}
-            <button className="btn" onClick={() => setVersions(null)}>
-              닫기
-            </button>
           </div>
         </div>
       )}

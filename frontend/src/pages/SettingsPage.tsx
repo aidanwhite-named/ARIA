@@ -73,6 +73,10 @@ export default function SettingsPage() {
   const [defaultPromptId, setDefaultPromptId] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("agy");
   const [defaultModels, setDefaultModels] = useState<Record<string, string>>({});
+  // 빈 값 = 모델 기본값. 그때 ARIA 는 CLI 에 추론강도를 넘기지 않는다.
+  const [reasoningEffort, setReasoningEffort] = useState<Record<string, string>>(
+    {},
+  );
   const [loginProvider, setLoginProvider] = useState<ProviderInfo | null>(null);
   const [loginSession, setLoginSession] = useState<ProviderLoginSession | null>(null);
   const [loginStarting, setLoginStarting] = useState(false);
@@ -92,6 +96,7 @@ export default function SettingsPage() {
   // EPO OPS 자격증명 입력 초안. Secret 은 서버가 되돌려주지 않으므로 저장된
   // 값에서 채우지 않고, 저장에 성공하면 비운다.
   const [epoKey, setEpoKey] = useState("");
+  const [literatureEmail, setLiteratureEmail] = useState("");
   const [epoSecret, setEpoSecret] = useState("");
   const [epoChecking, setEpoChecking] = useState(false);
   const [epoCheck, setEpoCheck] = useState<CredentialCheck | null>(null);
@@ -111,7 +116,9 @@ export default function SettingsPage() {
         setDefaultPromptId(configuredPrompt?.id ?? fallbackPrompt?.id ?? "");
         setDefaultProvider(s.values.default_provider ?? "agy");
         setDefaultModels(s.values.default_models ?? {});
+        setReasoningEffort(s.values.reasoning_effort ?? {});
         setEpoKey(s.values.epo_consumer_key ?? "");
+        setLiteratureEmail(s.values.literature_contact_email ?? "");
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -123,6 +130,11 @@ export default function SettingsPage() {
   useEffect(() => {
     if (settings) setEpoKey(settings.values.epo_consumer_key ?? "");
   }, [settings?.values.epo_consumer_key]);
+
+  useEffect(() => {
+    if (settings)
+      setLiteratureEmail(settings.values.literature_contact_email ?? "");
+  }, [settings?.values.literature_contact_email]);
 
   useEffect(() => {
     if (!loginSession || !loginSession.can_cancel) return;
@@ -246,6 +258,7 @@ export default function SettingsPage() {
         default_prompt_id: defaultPromptId,
         default_provider: defaultProvider,
         default_models: defaultModels,
+        reasoning_effort: reasoningEffort,
       });
       setSettings(updated);
       notify("실행 기본 설정을 저장했습니다.");
@@ -399,6 +412,36 @@ export default function SettingsPage() {
   const selectedModel = modelOptions.includes(defaultModels[defaultProvider])
     ? defaultModels[defaultProvider]
     : "";
+  const providerEffortOptions = Array.isArray(
+    selectedProvider?.capabilities.reasoning_efforts,
+  )
+    ? (selectedProvider.capabilities.reasoning_efforts as string[])
+    : [];
+  const effortsByModelValue =
+    selectedProvider?.capabilities.reasoning_efforts_by_model;
+  const effortsByModel =
+    effortsByModelValue &&
+    typeof effortsByModelValue === "object" &&
+    !Array.isArray(effortsByModelValue)
+      ? (effortsByModelValue as Record<string, string[]>)
+      : {};
+  const defaultsByModelValue =
+    selectedProvider?.capabilities.reasoning_defaults_by_model;
+  const defaultsByModel =
+    defaultsByModelValue &&
+    typeof defaultsByModelValue === "object" &&
+    !Array.isArray(defaultsByModelValue)
+      ? (defaultsByModelValue as Record<string, string>)
+      : {};
+  const effortOptionsForModel = (model: string) => {
+    const modelOptions = effortsByModel[model];
+    return Array.isArray(modelOptions) ? modelOptions : providerEffortOptions;
+  };
+  const effortOptions = effortOptionsForModel(selectedModel);
+  const selectedEffort = effortOptions.includes(reasoningEffort[defaultProvider])
+    ? reasoningEffort[defaultProvider]
+    : "";
+  const modelDefaultEffort = defaultsByModel[selectedModel] ?? "";
 
   return (
     <div className="page page-settings">
@@ -434,7 +477,7 @@ export default function SettingsPage() {
                 <option value="">최근 활성 분석 프롬프트 자동 선택</option>
               {prompts.map((prompt) => (
                 <option key={prompt.id} value={prompt.id} disabled={!prompt.enabled}>
-                  {prompt.name} (v{prompt.version}){prompt.enabled ? "" : " · 비활성"}
+                  {prompt.name}{prompt.enabled ? "" : " · 비활성"}
                 </option>
               ))}
             </select>
@@ -471,14 +514,23 @@ export default function SettingsPage() {
             <select
               id="default-model"
               value={selectedModel}
-              onChange={(e) =>
+              onChange={(e) => {
+                const nextModel = e.target.value;
                 setDefaultModels((current) => {
                   const next = { ...current };
-                  if (e.target.value) next[defaultProvider] = e.target.value;
+                  if (nextModel) next[defaultProvider] = nextModel;
                   else delete next[defaultProvider];
                   return next;
-                })
-              }
+                });
+                const supportedEfforts = effortOptionsForModel(nextModel);
+                setReasoningEffort((current) => {
+                  const saved = current[defaultProvider];
+                  if (!saved || supportedEfforts.includes(saved)) return current;
+                  const next = { ...current };
+                  delete next[defaultProvider];
+                  return next;
+                });
+              }}
             >
               <option value="">CLI 기본 모델</option>
               {modelOptions.map((model) => (
@@ -491,6 +543,34 @@ export default function SettingsPage() {
                 : "모델 목록을 확인할 수 없습니다."}
             </span>
           </div>
+          {effortOptions.length > 0 && (
+            <div className="field">
+              <label htmlFor="reasoning-effort">추론강도</label>
+              <select
+                id="reasoning-effort"
+                value={selectedEffort}
+                onChange={(e) =>
+                  setReasoningEffort((current) => {
+                    const next = { ...current };
+                    if (e.target.value) next[defaultProvider] = e.target.value;
+                    else delete next[defaultProvider];
+                    return next;
+                  })
+                }
+              >
+                <option value="">모델 기본값</option>
+                {effortOptions.map((level) => (
+                  <option key={level} value={level}>{level}</option>
+                ))}
+              </select>
+              <span className="hint">
+                비워 두면 ARIA 가 아무 것도 넘기지 않고 모델 기본값
+                {modelDefaultEffort ? `(${modelDefaultEffort})` : ""}을 씁니다.
+                선택값은 Codex CLI의 model_reasoning_effort로 전달됩니다. 모델을
+                바꾸면 지원하지 않는 기존 단계는 자동으로 해제됩니다.
+              </span>
+            </div>
+          )}
         </div>
         <button className="btn primary" onClick={saveExecutionDefaults}>
           실행 기본 설정 저장
@@ -676,7 +756,7 @@ export default function SettingsPage() {
                   </td>
                 </tr>
                 <tr>
-                  <th>OPS 부하 상태</th>
+                  <th>마지막 OPS 부하 상태</th>
                   <td>
                     <span
                       className={`pill ${
@@ -713,12 +793,108 @@ export default function SettingsPage() {
                 onSave={(n) => saveValue("epo_max_detail_fetches", n)}
               />
               <NumberField
+                label="검색 결과 상한 (질의 1건당)"
+                value={v.epo_max_results_per_query}
+                hint="1–20. OPS 가 한 질의로 돌려주는 최대 건수입니다."
+                onSave={(n) => saveValue("epo_max_results_per_query", n)}
+              />
+              <NumberField
+                label="EPO 유망 후보(shortlist) 상한"
+                value={v.epo_shortlist_limit}
+                hint="EPO 독립 검색에서 최종 A/B/C 대응표까지 올릴 후보 수입니다. 넘긴 후보는 사유와 함께 기록에 남습니다."
+                onSave={(n) => saveValue("epo_shortlist_limit", n)}
+              />
+              <NumberField
+                label="공식 검증 후보 수 상한"
+                value={v.epo_verification_targets}
+                hint="공식 문헌을 받아 대조할 후보 수입니다. 상세 조회 예산과 다른 축입니다."
+                onSave={(n) => saveValue("epo_verification_targets", n)}
+              />
+              <NumberField
                 label="시간당 사용량 상한 (bytes, 0 = 관측만)"
                 value={v.epo_hourly_quota_bytes}
                 hint={
                   "주간 4GB 한도는 항상 적용됩니다. 값을 입력하면 시간당 한도도 추가로 적용합니다."
                 }
                 onSave={(n) => saveValue("epo_hourly_quota_bytes", n)}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="card settings-literature">
+        <h2>비특허문헌 검색 연동 (Crossref · Europe PMC)</h2>
+        <p className="muted settings-integration-copy">
+          모델이 실제로 사용한 검색어로 ARIA가 Crossref와 Europe PMC에 직접
+          질의해, <b>제목과 DOI가 확인된</b> 논문 후보를 만듭니다. 웹 검색은
+          결과를 요약문과 익명 링크로만 돌려주어 논문을 식별하지 못하는 경우가
+          많습니다. 후보의 초록은 발행사 사이트를 열지 않고 등록 서지에서 받으므로
+          접근이 막힌 저널에서도 확보됩니다. 자격증명은 필요하지 않습니다.
+        </p>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={v.literature_integration_enabled}
+            onChange={(e) =>
+              saveValue("literature_integration_enabled", e.target.checked)
+            }
+          />
+          비특허문헌 검색 사용
+        </label>
+
+        {v.literature_integration_enabled && (
+          <div style={{ marginTop: 14 }}>
+            <div className="field">
+              <label>연락처 이메일 (선택)</label>
+              <input
+                value={literatureEmail}
+                onChange={(e) => setLiteratureEmail(e.target.value)}
+                placeholder="Crossref 예의 풀 표시용. 비워 두어도 동작합니다."
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <div className="hint">
+                Crossref가 권장하는 표시입니다. 넣으면 더 안정적인 큐로
+                들어갑니다. 다른 용도로 쓰이지 않습니다.
+              </div>
+              <button
+                className="btn"
+                onClick={() =>
+                  saveValue("literature_contact_email", literatureEmail.trim())
+                }
+              >
+                연락처 저장
+              </button>
+            </div>
+            <div className="settings-limit-options">
+              <NumberField
+                label="ARIA가 보낼 질의 수 상한"
+                value={v.literature_max_queries}
+                hint="모델이 실행한 검색어 중 앞에서부터 이 수만큼만 다시 묻습니다. 문헌번호 확인용 질의는 제외합니다."
+                onSave={(n) => saveValue("literature_max_queries", n)}
+              />
+              <NumberField
+                label="질의당 결과 건수 상한"
+                value={v.literature_max_results_per_query}
+                hint="1–20. Crossref와 Europe PMC 각각에 적용됩니다."
+                onSave={(n) =>
+                  saveValue("literature_max_results_per_query", n)
+                }
+              />
+              <NumberField
+                label="서지 API 네트워크 시간 예산(초)"
+                value={v.literature_http_budget_seconds}
+                hint="HTTP 대기 시간의 총합입니다. 넘으면 남은 질의를 보내지 않고 사유를 기록합니다."
+                onSave={(n) => saveValue("literature_http_budget_seconds", n)}
+              />
+              <NumberField
+                label="논문 공식 검증 후보 수 상한"
+                value={v.literature_verification_targets}
+                hint="초록을 받아 대조할 논문 후보 수입니다. EPO 공식 검증 상한과 다른 축이라 서로 예산을 빼앗지 않습니다."
+                onSave={(n) =>
+                  saveValue("literature_verification_targets", n)
+                }
               />
             </div>
           </div>

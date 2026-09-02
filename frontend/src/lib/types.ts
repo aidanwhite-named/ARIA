@@ -267,7 +267,15 @@ export interface GapSearchFocus {
 export type SearchProvenance =
   | "search_snippet"
   | "webfetch_summary"
-  | "raw_original_verified";
+  | "raw_original_verified"
+  /** ARIA 가 EPO OPS 를 직접 불러 받은 응답에서 후보를 만들었다. 모델이 주장할
+   *  수 없는 값이며, "원문 대조 완료"와 다르다 — 응답을 받아 보존했다는 뜻이지
+   *  그 문장이 특허 원문의 직접 인용이라는 뜻이 아니다. */
+  | "official_record_response";
+
+/** 이 후보를 데려온 검색 경로. search_origins(무엇을 입력으로 검색했나)와
+ *  다른 축이다. 값이 없는 옛 기록은 web 하나로 읽는다. */
+export type SearchDiscoveryOrigin = "web" | "epo";
 
 /** 청구항 구성 대응표 한 줄.
  *
@@ -285,11 +293,15 @@ export interface SearchMappingRow {
    *  그래서 그것만으로는 근거 있는 행과 지어낸 행이 화면에서 구분되지 않았다.
    *  none 인 행은 degree 가 "확인되지 않음" 이고 서술 칸이 비어 있다.
    */
-  support_source?: "page_text" | "snippet" | "none";
+  support_source?: "page_text" | "snippet" | "official_record" | "none";
   support_text?: string;
   support_scope?: "claims" | "full_text" | "abstract" | "unknown";
   support_url?: string;
   page_supported?: boolean;
+  official_supported?: boolean;
+  support_match_kind?: string;
+  support_field?: string;
+  support_artifact_id?: string;
   source_location: string;
   verbatim_excerpt: string;
   translation: string;
@@ -301,6 +313,16 @@ export interface SearchCandidate {
   index: number;
   /** 그룹 자격을 얻지 못한 후보(미확인 검색 단서)는 null 이다. */
   group: "A" | "B" | "C" | null;
+  /** 검색 결과 기반 AI 제안. 정식 group 과 동시에 값이 있으면 안 된다. */
+  provisional_group?: "A" | "B" | "C" | null;
+  /** ARIA가 저장된 관측/공식 근거로 계산한 분류 근거 등급. */
+  classification_basis?:
+    | "none"
+    | "legacy_unknown"
+    | "search_result"
+    | "page_observed"
+    | "official_record"
+    | "original_text";
   provisional: boolean;
   /** 검색 경로. 현재는 web 뿐이고 향후 epo 등이 추가된다. */
   channel: string;
@@ -314,13 +336,16 @@ export interface SearchCandidate {
   canonical_url: string;
   family: string;
   provenance: SearchProvenance;
-  evidence_status: "candidate_only" | "source_page_reviewed";
+  evidence_status:
+    | "candidate_only"
+    | "source_page_reviewed"
+    | "official_record_verified";
   original_verified: boolean;
   /** ARIA 가 관측한 사실. 이 URL 로 성공한 WebFetch 호출이 있었는가. */
   page_fetch_succeeded: boolean;
   /** 후보 식별 게이트의 결과. 모두 ARIA 가 계산하며 모델이 정하지 않는다.
    *
-   *  옛 매니페스트에는 없다. 없으면 격리 이전의 기록이므로 그대로 그룹에 둔다.
+   *  옛 매니페스트에는 없다. 없으면 저장된 다른 검증 근거가 없는 한 잠정이다.
    */
   url_is_document?: boolean;
   identifier_url_matched?: boolean;
@@ -328,14 +353,68 @@ export interface SearchCandidate {
   quarantine_reason?: string;
   group_eligible?: boolean;
   page_supported_rows?: number;
+  official_supported_rows?: number;
+  matched_feature_rows?: number;
+  official_identity_matched?: boolean;
+  official_evidence?: {
+    status?: string;
+    reason?: string;
+    backend_id?: string;
+    artifact_ids?: string[];
+    fields?: string[];
+  };
+  verification?: {
+    status:
+      | "not_attempted"
+      | "fetch_failed"
+      | "record_fetched"
+      | "classification_failed"
+      | "evidence_mismatch"
+      | "promoted";
+    reason_code: string;
+    detail: string;
+    backend_id: string;
+    artifact_ids: string[];
+  };
   verbatim_excerpt: string;
   source_location: string;
   mapping: SearchMappingRow[];
   note: string;
+  /** 공식 대조로 덮이기 전의 1차(페이지 관측) 분류. 이 후보의 분류가 아니라
+   *  대체되기 전의 기록이다. 두 값을 같은 칸에 두면 위계가 사라진다. */
+  page_classification?: {
+    group: "A" | "B" | "C";
+    classification_basis: string;
+    page_supported_rows?: number;
+    evidence_status?: string;
+    url?: string;
+    mapping?: SearchMappingRow[];
+  };
+  /** 이 후보를 데려온 검색 경로. 없으면 web 하나로 읽는다. */
+  discovery_origins?: SearchDiscoveryOrigin[];
+  /** EPO 독립 검색이 이 문헌을 찾았을 때의 기록. 비어 있으면 나오지 않았다. */
+  epo_discovery?: {
+    lanes?: string[];
+    doc_number?: string;
+    first_seen_round?: number;
+    artifact_ids?: string[];
+    evidence_fields?: string[];
+    shortlist?: {
+      lane?: string;
+      round?: number;
+      reason?: string;
+      matched_elements?: string[];
+    }[];
+  };
+  /** EPO 후보의 백엔드 id. 웹 후보에는 없다. */
+  backend_id?: string;
   /** ARIA가 붙인 독립 검색 출처. 모델이 정하는 값이 아니다. */
   search_origins?: ("claim_only" | "spec_assisted")[];
   /** 같은 문헌을 각 경로가 어느 그룹으로 분류했는지. */
   origin_groups?: Partial<
+    Record<"claim_only" | "spec_assisted", "A" | "B" | "C" | null>
+  >;
+  origin_provisional_groups?: Partial<
     Record<"claim_only" | "spec_assisted", "A" | "B" | "C" | null>
   >;
 }
@@ -372,6 +451,85 @@ export interface SearchSpecDocument {
   char_count: number;
 }
 
+/** EPO 검색 레인 하나의 기록. 후보를 다른 레인과 합치지 않는다. */
+export interface EpoLaneRecord {
+  id: string;
+  channel?: string;
+  origin?: "claim_only" | "spec_assisted";
+  status: string;
+  error?: string;
+  termination_reason?: string;
+  termination_detail?: string;
+  search_calls?: number;
+  detail_fetches?: number;
+  /** 검색 전에 청구항을 어떻게 나눠 읽었는가. 모델의 판단이다. */
+  claim_analysis?: {
+    round?: number;
+    notes?: string;
+    elements?: {
+      id: string;
+      text: string;
+      /** 세 상태다. null 은 "판단 없음"이며 "필수 아님"이 아니다. */
+      essential?: boolean | null;
+      synonyms?: string[];
+    }[];
+    relations?: {
+      source?: string;
+      target?: string;
+      kind?: string;
+      description?: string;
+    }[];
+    concept_combinations?: {
+      elements?: string[];
+      terms?: string[];
+      reason?: string;
+    }[];
+    search_conditions?: { kind?: string; value?: string; reason?: string }[];
+  };
+  /** 최종 대응표로 넘긴 유망 후보. */
+  shortlist?: {
+    doc_number: string;
+    reason?: string;
+    matched_elements?: string[];
+    round?: number;
+  }[];
+  /** 상한·대조 실패로 넘기지 않은 것과 그 사유. */
+  excluded?: {
+    kind: string;
+    value?: string;
+    reason_code: string;
+    detail: string;
+  }[];
+  /** NO_TOOLS 계획 턴에서 감지된 도구 호출. 비어 있어야 정상이다. */
+  tool_violations?: {
+    provider?: string;
+    lane?: string;
+    tools?: string[];
+    /** post_hoc_detection 은 차단이 아니다. 외부 호출은 이미 나갔다. */
+    isolation?: "provider_enforced" | "post_hoc_detection" | "unknown";
+    /** 어느 턴에서 감지됐는가. 없으면 검색 라운드다. */
+    phase?: string;
+    detail?: string;
+  }[];
+  tool_isolation?: string;
+  /** 검색하지 않는 최종 선택 턴. 돌리지 않았으면 빈 객체다. */
+  selection?: {
+    attempted?: boolean;
+    status?: string;
+    reason?: string;
+    candidates_reviewed?: number;
+    shortlist_added?: number;
+    /** 이 턴에서 모델이 보냈지만 실행하지 않은 검색·조회 action 수. */
+    rejected_actions?: number;
+    /** Provider 가 알려준 이 턴의 사용량. 알려주지 않으면 빈 객체다 —
+     *  0 으로 적으면 "안 썼다"로 읽힌다. */
+    provider_usage?: Record<
+      string,
+      number | string | boolean | Record<string, number>
+    >;
+  };
+}
+
 export interface SearchManifest {
   version: number;
   generated_at: string;
@@ -391,7 +549,6 @@ export interface SearchManifest {
   };
   prompt: {
     id: string;
-    version: number | null;
     /** 템플릿 파일의 해시. 모델에게 실제로 간 프롬프트가 아니다(호환용 별칭). */
     sha256: string;
     /** 위와 같은 값. 이름으로 무엇의 해시인지 알 수 있게 둔 것. */
@@ -401,6 +558,8 @@ export interface SearchManifest {
     /** 레인별로 모델에게 실제로 간 프롬프트의 해시. */
     effective_prompt_sha256?: Record<string, string>;
   };
+  /** 요청한 추론강도. 실제 적용값은 CLI 가 알려주지 않아 기록하지 않는다. */
+  reasoning_effort?: { requested: string; model_default: boolean };
   policy: {
     name: string;
     allowed_tools: string[];
@@ -416,6 +575,81 @@ export interface SearchManifest {
     lane_budgets?: Partial<Record<"claim_only" | "spec_assisted", number>>;
   };
   timing: { started_at: string | null; completed_at: string | null };
+  verification?: {
+    attempted?: boolean;
+    reason?: string;
+    backend_id?: string;
+    classification_error?: string;
+    counts?: {
+      targets: number;
+      verified: number;
+      fetch_failed: number;
+      not_attempted: number;
+    };
+    promotion_policy?: {
+      minimum_official_supported_rows: number;
+      coverage_ratio_threshold: number | null;
+      group_assignment: string;
+    };
+    /** 상한 때문에 공식 대조를 시도하지 않은 후보. 조용히 누락하지 않는다. */
+    excluded_candidates?: {
+      index: number;
+      doc_number: string;
+      reason_code: string;
+      detail: string;
+    }[];
+    limits?: Record<string, number>;
+    /** 무엇을 어떤 순서로 왜 골랐는가. 상한이 무엇을 잘랐는지와 함께 읽는다. */
+    selection_order?: {
+      position: number;
+      index: number;
+      doc_number: string;
+      selection_reason: string;
+      detail: string;
+      /** 이 후보를 확인하려고 OPS 를 몇 번 더 부를 것인가. null 이면 세어 보지
+       *  않았다는 뜻이고 0 과 다르다. */
+      expected_fetches?: number | null;
+      /** 아직 손에 없는 구성요소. 위 횟수의 근거다. */
+      missing_constituents?: string[];
+    }[];
+    selection_policy?: {
+      ranking?: string[];
+      labels?: Record<string, string>;
+      /** 후보 하나를 확인하는 데 필요한 구성요소. */
+      constituents?: string[];
+      /** 고르는 시점에 예상한 추가 조회 횟수의 합. */
+      planned_fetch_calls?: number;
+      unknown_fetch_plans?: number;
+    };
+    usage?: {
+      official_fetch_calls?: number;
+      /** 이번 단계가 다시 받지 않고 재사용한 EPO 검색 응답 수. */
+      reused_artifact_calls?: number;
+      /** 선택 시점 계획에서 필요한 구성요소가 모두 있었던 문헌. */
+      fully_reused_documents?: number;
+      /** 선택 시점 계획에서 일부 구성요소가 부족했던 문헌. */
+      partially_reused_documents?: number;
+      /** 재사용 계획을 계산하지 못한 문헌. 0회와 구분한다. */
+      reuse_plan_unknown_documents?: number;
+      /** 재사용 문헌 중 이번 검증 단계에서 실제 추가 호출이 없었던 문헌. */
+      reused_without_fresh_fetch_documents?: number;
+      /** 재사용 문헌 중 이번 검증 단계에서 실제 추가 호출이 발생한 문헌. */
+      reused_with_fresh_fetch_documents?: number;
+      /** 선택 시점의 예상 추가 조회 횟수. 실제와 어긋나면 상한·취소·실패다. */
+      planned_fetch_calls?: number;
+      classification_runs?: number;
+    };
+  };
+  /** EPO 채널 기록. 웹과 섞지 않는다. */
+  epo?: {
+    enabled?: boolean;
+    backend_id?: string;
+    reason?: string;
+    error?: string;
+    channel_budget?: Record<string, unknown>;
+    lane_budget?: Record<string, number>;
+    lanes?: EpoLaneRecord[];
+  };
   search_lanes?: {
     id: "claim_only" | "spec_assisted";
     spec_in_context: boolean;
@@ -474,6 +708,9 @@ export interface SearchManifest {
       note: string;
       search_origin?: "claim_only" | "spec_assisted";
     }[];
+    /** 웹 채널의 구조화 결과를 읽지 못한 사유. 비어 있지 않으면 이 후보
+     *  목록은 EPO 독립 검색만으로 만들어졌다는 뜻이다. */
+    web_report_error?: string;
     term_expansions?: SearchTermExpansion[];
     /** v1 저장 기록을 여는 동안만 사용하는 이전 필드. */
     claim_interpretation?: ClaimInterpretation[];
@@ -517,7 +754,6 @@ export interface Prompt {
   name: string;
   description: string;
   body: string;
-  version: number;
   enabled: boolean;
   output_mode: "markdown" | "text";
   tags: string[];
@@ -536,16 +772,6 @@ export interface PromptCatalogItem extends Prompt {
   deletable: boolean;
 }
 
-export interface PromptVersion {
-  id: string;
-  version: number;
-  name: string;
-  description: string;
-  body: string;
-  output_mode: string;
-  created_at: string;
-}
-
 export interface ProviderInfo {
   provider: string;
   display_name: string;
@@ -555,7 +781,15 @@ export interface ProviderInfo {
   executable_ok: boolean;
   version: string | null;
   auth_state: "OK" | "NOT_LOGGED_IN" | "UNKNOWN" | "NOT_APPLICABLE";
-  capabilities: Record<string, boolean | string | string[] | null>;
+  capabilities: Record<
+    string,
+    | boolean
+    | string
+    | string[]
+    | Record<string, string>
+    | Record<string, string[]>
+    | null
+  >;
   notes: string[];
   install_hint: string;
   /** ARIA에 실제 분석 실행 Adapter가 구현되어 있는가. */
@@ -653,7 +887,6 @@ export interface Job {
   job_kind: JobKind;
   prompt_id: string | null;
   prompt_name: string;
-  prompt_version: number | null;
   prompt_snapshot: string;
   output_mode: "markdown" | "text";
   claim_text: string;
@@ -713,7 +946,6 @@ export interface HistoryItem {
   error_code: string | null;
   job_kind: JobKind;
   prompt_name: string;
-  prompt_version: number | null;
   provider: string;
   model: string | null;
   created_at: string;
@@ -746,6 +978,8 @@ export interface AppSettings {
     default_provider: string;
     provider_paths: Record<string, string>;
     default_models: Record<string, string>;
+    /** provider -> 추론강도. 키가 없으면 모델 기본값이다. */
+    reasoning_effort?: Record<string, string>;
     keep_raw_output: boolean;
     fail_on_tool_use: boolean;
     max_search_tool_calls: number;
@@ -789,8 +1023,29 @@ export interface AppSettings {
     /** 0 = 시간당 사용량을 관측·표시만 하고 차단하지 않음. 주간 한도는 계약값이라 별도. */
     epo_hourly_quota_bytes: number;
     epo_max_detail_fetches: number;
+    /** 질의 하나가 받아 오는 결과 건수 상한. OPS 자체 상한은 20건이다. */
+    epo_max_results_per_query: number;
+    /** 최종 A/B/C 대응표까지 끌고 갈 EPO 유망 후보 수 상한. */
+    epo_shortlist_limit: number;
+    /** 공식 문헌 대조를 시도할 후보 수 상한. 조회 예산과 다른 축이다. */
+    epo_verification_targets: number;
     /** ARIA 가 관측해 적는 값. 사용자가 PUT 으로 못 고친다(사용량 되돌리기 방지). */
     epo_quota_state: Record<string, unknown>;
+    /**
+     * 비특허문헌(Crossref·Europe PMC) 연동. 자격증명이 필요 없어 켜기만 하면
+     * 동작한다. 웹 검색이 식별하지 못한 논문을 ARIA 가 직접 찾아 온다.
+     */
+    literature_integration_enabled: boolean;
+    /** Crossref 예의 풀 표시용 연락처. 비워 둬도 동작한다. */
+    literature_contact_email: string;
+    /** 한 실행에서 ARIA 가 직접 보낼 서지 질의 수 상한. */
+    literature_max_queries: number;
+    /** 질의 하나가 받아 오는 결과 건수 상한. 두 DB 각각에 적용된다. */
+    literature_max_results_per_query: number;
+    /** 서지 API HTTP 대기 시간의 총합(초). */
+    literature_http_budget_seconds: number;
+    /** 공식 서지 대조를 시도할 논문 후보 수 상한. EPO 예산과 다른 축이다. */
+    literature_verification_targets: number;
   };
   warnings: string[];
   data_dir: string;

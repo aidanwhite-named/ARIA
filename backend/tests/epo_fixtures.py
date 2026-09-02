@@ -158,8 +158,26 @@ HEADERS_OK = {
 HEADERS_OVERLOADED = {
     "Content-Type": "application/xml",
     "X-Throttling-Control": (
-        "overloaded (images=black:0, inpadoc=red:5, other=green:1000, "
-        "retrieval=red:10, search=red:2)"
+        "overloaded (images=green:50, inpadoc=green:30, other=green:1000, "
+        "retrieval=green:50, search=green:5)"
+    ),
+    "X-RegisteredQuotaPerWeek-Used": "104857600",
+}
+
+HEADERS_RED = {
+    "Content-Type": "application/xml",
+    "X-Throttling-Control": (
+        "overloaded (images=green:50, inpadoc=green:30, other=green:1000, "
+        "retrieval=red:50, search=red:5)"
+    ),
+    "X-RegisteredQuotaPerWeek-Used": "104857600",
+}
+
+HEADERS_BLACK = {
+    "Content-Type": "application/xml",
+    "X-Throttling-Control": (
+        "overloaded (images=green:50, inpadoc=green:30, other=green:1000, "
+        "retrieval=green:50, search=black:0)"
     ),
     "X-RegisteredQuotaPerWeek-Used": "104857600",
 }

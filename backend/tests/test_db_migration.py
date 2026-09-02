@@ -11,7 +11,8 @@ def test_adds_claim_text_and_attachment_role_to_existing_database(tmp_path) -> N
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with engine.begin() as connection:
         connection.exec_driver_sql(
-            "CREATE TABLE execution_jobs (id VARCHAR(36) PRIMARY KEY)"
+            "CREATE TABLE execution_jobs ("
+            "id VARCHAR(36) PRIMARY KEY, prompt_version INTEGER)"
         )
         connection.exec_driver_sql(
             "CREATE TABLE attachments (id VARCHAR(36) PRIMARY KEY)"
@@ -23,6 +24,9 @@ def test_adds_claim_text_and_attachment_role_to_existing_database(tmp_path) -> N
 
     inspector = inspect(engine)
     assert "claim_text" in {
+        column["name"] for column in inspector.get_columns("execution_jobs")
+    }
+    assert "prompt_version" not in {
         column["name"] for column in inspector.get_columns("execution_jobs")
     }
     assert "role" in {

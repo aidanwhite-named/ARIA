@@ -94,6 +94,25 @@ from .epo_quota import (
     Throttled,
 )
 from .kiwee_backend import KiweePatentSearchBackend
+from .literature_backend import (
+    BACKEND_ID as LITERATURE_BACKEND_ID,
+    CONSTITUENTS as LITERATURE_CONSTITUENTS,
+    SETTING_ENABLED as LITERATURE_SETTING_ENABLED,
+    SETTING_MAILTO as LITERATURE_SETTING_MAILTO,
+    SETTING_MAX_QUERIES as LITERATURE_SETTING_MAX_QUERIES,
+    LiteratureBackend,
+)
+from .literature_client import (
+    LiteratureBudgetExceeded,
+    LiteratureError,
+    looks_like_doi,
+    normalize_doi,
+    plain_query,
+)
+from .literature_parser import (
+    PROFILE_CROSSREF_JSON,
+    PROFILE_EUROPEPMC_JSON,
+)
 from .parsers import (
     PROFILE_GENERIC_JSON,
     ExtractedField,
@@ -117,6 +136,7 @@ from .provenance import (
 _ENABLE_KEYS: dict[str, str] = {
     "kiwee": "kiwee_integration_enabled",
     "epo": EPO_SETTING_ENABLED,
+    "literature": LITERATURE_SETTING_ENABLED,
 }
 
 # 설정 키. 이름의 단일 출처. 백엔드가 하나뿐이던 시절의 이름이라 Kiwee 를
@@ -127,11 +147,12 @@ SETTING_KEY = _ENABLE_KEYS["kiwee"]
 DEFAULT_BACKEND_ID = "kiwee"
 
 # 화면이 상태를 보여 줄 백엔드 전체. 등록 순서가 표시 순서다.
-BACKEND_IDS = ("kiwee", "epo")
+BACKEND_IDS = ("kiwee", "epo", "literature")
 
 _REGISTRY: dict[str, Callable[[], PatentSearchBackend]] = {
     "kiwee": KiweePatentSearchBackend,
     "epo": EpoOpsBackend,
+    "literature": LiteratureBackend,
 }
 
 __all__ = [
@@ -143,6 +164,19 @@ __all__ = [
     "EPO_SETTING_CONSUMER_SECRET",
     "EPO_SETTING_QUOTA_STATE",
     "EPO_MAX_RESULTS_PER_QUERY",
+    "LITERATURE_BACKEND_ID",
+    "LITERATURE_CONSTITUENTS",
+    "LITERATURE_SETTING_ENABLED",
+    "LITERATURE_SETTING_MAILTO",
+    "LITERATURE_SETTING_MAX_QUERIES",
+    "LiteratureBackend",
+    "LiteratureBudgetExceeded",
+    "LiteratureError",
+    "PROFILE_CROSSREF_JSON",
+    "PROFILE_EUROPEPMC_JSON",
+    "looks_like_doi",
+    "normalize_doi",
+    "plain_query",
     "CredentialCheck",
     "DetailBudgetExceeded",
     "EpoCqlError",

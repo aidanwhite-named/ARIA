@@ -199,11 +199,49 @@ def test_reviewed_claim_on_never_fetched_url_is_downgraded(client) -> None:
         "대조되지 않아" in note
         for note in job["search_manifest"]["normalization_notes"]
     )
-    # 열람 기록이 없는 후보는 그룹이 아니라 미확인 단서로 간다.
+    # 열람 기록이 없는 후보의 A/B/C 제안은 숨기지 않고 잠정 그룹으로 간다.
     report = job["result_text"] or ""
-    assert "## 미확인 검색 단서" in report
-    assert "성공한 페이지 열람 기록이 없습니다" in report
+    assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
+    assert "### 잠정 분류" in report
+    assert "### 정식 분류" not in report
     assert "테스트 특허" not in report
+
+
+def test_similarity_runner_calls_the_candidate_verification_stage(
+    client, monkeypatch
+) -> None:
+    """정의만 있고 죽어 있는 검증 함수로 다시 퇴행하지 않게 실행 연결을 고정한다.
+
+    test-search Provider 는 WEB_SEARCH 정책이다. 예전에는 Codex 실행이 아니라는
+    이유로 이 단계가 건너뛰어졌다. 이제는 Provider 를 가리지 않으므로, 시도하지
+    않는 사유는 EPO 연동 상태여야 한다.
+    """
+    from app.db import session_scope
+    from app.execution.runner import JobRunner
+    from app import settings_service
+
+    # 앞선 테스트가 켜 둔 EPO 설정이 남아 있으면 사유가 달라진다. 이 테스트가
+    # 보려는 것은 Provider 분기가 사라졌다는 사실이므로 상태를 고정한다.
+    with session_scope() as session:
+        settings_service.update(session, {"epo_integration_enabled": False})
+
+    calls: list[str] = []
+    original = JobRunner._run_official_verification
+
+    async def traced(self, **kwargs):
+        calls.append(kwargs["job_id"])
+        return await original(self, **kwargs)
+
+    monkeypatch.setattr(JobRunner, "_run_official_verification", traced)
+    job = wait_for_job(client, _start(client)["id"])
+
+    assert calls == [job["id"]]
+    # Provider 이름으로 갈라지지 않는다. 이 실행에서 검증이 시도되지 않은 것은
+    # EPO 연동이 꺼져 있기 때문이며, 사유도 그렇게 적혀야 한다.
+    assert job["search_manifest"]["verification"]["attempted"] is False
+    reason = job["search_manifest"]["verification"]["reason"]
+    assert "EPO" in reason
+    assert "Codex" not in reason
 
 
 def test_reviewed_claim_on_failed_fetch_is_downgraded(client) -> None:

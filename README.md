@@ -10,7 +10,7 @@ ARIA 는 분석 방법을 가진 프로그램이 아닙니다. 특허 분석, �
 
 ARIA 가 하는 일은 이것뿐입니다.
 
-- 프롬프트 관리와 버전 보존
+- 프롬프트 관리
 - 사용자 입력과 첨부 파일 관리
 - AI Provider 선택
 - CLI 프로세스의 안전한 실행
@@ -184,7 +184,6 @@ npm run dev
 | 항목 | 경로 |
 |---|---|
 | Master Prompt 원본 | 프로젝트의 `prompt\*.md`, `prompt\*.txt` |
-| 프롬프트 버전 이력 | 프로젝트의 `prompt\.history\` |
 | 데이터 폴더 | `%LOCALAPPDATA%\ARIA` |
 | 데이터베이스 | `%LOCALAPPDATA%\ARIA\aria.db` |
 | 실행별 작업 폴더 | `%LOCALAPPDATA%\ARIA\runs\<job-id>\` |
@@ -263,6 +262,8 @@ codex exec --json --color never --sandbox read-only --skip-git-repo-check
   execpolicy 규칙이 실행에 섞이지 않게 합니다. 인증은 그대로 `CODEX_HOME` 에서
   읽습니다.
 * `--ephemeral` 로 실행 대화를 디스크에 남기지 않습니다.
+* Settings에서 추론강도를 고르면 `-c model_reasoning_effort=<단계>`로 전달합니다.
+  비워 두면 모델 기본값을 사용하며, 모델별로 지원하는 단계만 표시합니다.
 * 프롬프트는 마지막 인수 `-` 를 통해 stdin 으로 넣습니다. Windows 명령행 길이
   제한(32,767자) 때문에 인수로는 긴 프롬프트를 넘길 수 없습니다.
 * 설정의 `[tools]` 표에는 `web_search`, `experimental_request_user_input`,
@@ -445,7 +446,7 @@ ARIA 는 항상 `--disable-slash-commands` 로 실행하므로 plan 모드는 �
 
 #### 구성대비의 미대응 구성 보완 검색
 
-구성대비 분석 프롬프트 v7부터 보고서와 별도로 구성별 유사도·미발견·판독 제한을
+구성대비 분석 프롬프트는 보고서와 별도로 구성별 유사도·미발견·판독 제한을
 기계 판독용 기록에 남깁니다. 분석 결과의 **미대응 구성 검색**에서 유사도 80%
 미만인 구성과 대응 문헌을 찾지 못한 구성만 선택해 기존 웹 검색 경로로 보낼 수
 있습니다. 판독 제한 때문에 확인하지 못한 구성은 자동 검색 대상에서 제외합니다.
@@ -935,7 +936,7 @@ full 조립본의 실제 stream-json 직렬화 바이트 ≤ 180,000  → full_i
 
 agy 라이브 재검증을 할 때는 **작업 수와 실제 Provider 호출 수를 구분**한다. 로컬
 검색 작업 하나는 검색 라운드마다 모델을 한 번 호출하고 마지막 분석도 한 번
-호출하므로, 기본 `retrieval_max_rounds=6`에서는 조기 종료하지 않을 경우 최대 7회다.
+호출하므로, 기본 `retrieval_max_rounds=10`에서는 조기 종료하지 않을 경우 최대 11회다.
 
 | 검증 | 모드·입력 | 기대 | 최대 agy 호출 |
 |---|---|---|---:|
@@ -1023,8 +1024,8 @@ CLI 로만 대화하므로 얻을 수 없습니다. 이 추정이라는 사실�
 
 | 설정 | 기본값 | 무엇을 막는가 |
 |---|---|---|
-| `retrieval_max_rounds` | 6 | AI 가 검색어를 바꿔 다시 찾는 횟수 |
-| `retrieval_max_page_reads` | 40 | 앞뒤 문맥 확인으로 여는 페이지 총합 |
+| `retrieval_max_rounds` | 10 | AI 가 검색어를 바꿔 다시 찾는 횟수 |
+| `retrieval_max_page_reads` | 80 | 앞뒤 문맥 확인으로 여는 페이지 총합 |
 | `retrieval_evidence_chars` | 40,000 | **렌더링된 근거 패키지 전체**의 크기 |
 | `retrieval_hits_per_document` | 6 | 구성 × 문헌당 후보 수 |
 | `retrieval_neighbor_pages` | 1 | 근거 페이지 앞뒤로 더 담을 페이지 수 |
@@ -1300,8 +1301,7 @@ Code 세션 안에서 실행하면 부모가 `ANTHROPIC_BASE_URL`, `CLAUDECODE`,
 
 Prompt Library의 현재 원본은 SQLite가 아니라 프로젝트의 `prompt` 폴더에 있는
 Markdown 또는 텍스트 파일입니다. 화면에서 편집하거나 JSON을 가져오면 해당 파일을
-직접 갱신하며, 버전 이력은 `prompt\.history\`에 파일로 저장합니다. JSON 내보내기와
-가져오기는 계속 지원합니다.
+직접 갱신합니다. JSON 내보내기와 가져오기는 계속 지원합니다.
 
 ```json
 {
@@ -1320,8 +1320,7 @@ Markdown 또는 텍스트 파일입니다. 화면에서 편집하거나 JSON을 
 ```
 
 - 같은 이름이 있으면 기본적으로 건너뜁니다.
-- 본문·이름·출력형식이 바뀌면 자동으로 새 버전이 기록됩니다.
-- 실행 시점의 원문과 버전은 스냅샷으로 저장되므로, 나중에 프롬프트를 수정하거나
+- 실행 시점의 원문은 작업 스냅샷으로 저장되므로, 나중에 프롬프트를 수정하거나
   삭제해도 과거 실행에서 사용한 프롬프트를 History 에서 확인할 수 있습니다.
 
 ---
@@ -1464,7 +1463,6 @@ claude --help
   없습니다.
 - **병렬 실행** — Provider 당 동시 실행 기본 1. Settings 에서 올릴 수 있으나
   경고가 표시됩니다.
-- **프롬프트 버전 비교 UI** — 버전 목록과 본문 보기는 되지만 diff 는 없습니다.
 
 ### 알아두어야 할 것
 

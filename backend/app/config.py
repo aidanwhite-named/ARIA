@@ -434,7 +434,9 @@ AGY_SEARCH_RUNTIME_CONTEXT = _agy_search_context()
 # 그래서 아래 치환은 "도구가 없다"가 아니라 "확인할 수 없다"로 말한다. 없는
 # 능력을 전제하면 모델이 열 수 있는 문헌을 열지 않고, 확인할 수 없는 것을
 # 확인했다고 전제하면 열어 보지도 않은 페이지에 source_page_reviewed 가
-# 붙는다. 증거 게이트는 어느 쪽으로도 완화하지 않는다.
+# 붙는다. 1차 턴의 분류는 provisional_group 으로만 보존하고, ARIA 가 공식
+# 문헌을 확보한 뒤 돌리는 2차 턴만 검증된 group 으로 승격한다. 증거 게이트를
+# 낮추는 대신 통과할 수 있는 관측 경로를 따로 만든 것이다.
 #
 # 치환이 하나라도 빗나가면 조용히 틀린 계약이 나가므로 import 시점에 터뜨린다.
 # 원문이 바뀌었는데 파생본만 옛 문장을 들고 도는 것이 가장 나쁘다.
@@ -464,8 +466,11 @@ ARIA 는 그 호출이 성공했는지, 어떤 내용이 돌아왔는지, 잘리
    탐색 자료로만 사용합니다.
 2. 그 문장들을 특허·논문의 직접 인용문처럼 표시하지 마십시오. 따옴표로 묶어
    원문 인용처럼 제시하는 것도 안 됩니다.
-3. 주소로 조회했다는 사실은 페이지 열람 근거가 되지 않습니다. 이 실행의 모든
-   후보는 evidence_status 가 "candidate_only" 이고 group 은 null 입니다.""",
+3. 주소로 조회했다는 사실은 페이지 열람 근거가 되지 않습니다. 이 1차 탐색에서
+   evidence_status 는 항상 "candidate_only" 입니다. 그래도 검색 결과에 근거한
+   잠정 A/B/C 판단은 group 에 적고 provisional 을 true 로 두십시오. ARIA 가 그
+   값을 provisional_group 으로 격리한 뒤, 공식 문헌을 직접 확보해 별도의 2차
+   분류를 수행합니다. 이 단계의 mapping 은 빈 배열로 두십시오.""",
     ),
     (
         "3. 관련성이 높은 후보의 실제 페이지를 WebFetch 로 확인 시도",
@@ -494,10 +499,57 @@ ARIA 는 그 호출이 성공했는지, 어떤 내용이 돌아왔는지, 잘리
     ),
     (
         '- evidence_status 는 "candidate_only" 또는 "source_page_reviewed" 입니다.',
-        """- evidence_status 는 이 실행에서 항상 "candidate_only" 이고, group 은 항상
-  null 입니다. 주소로 조회한 후보도 마찬가지입니다. 그렇다고 후보를 빼거나
-  access_failures 로 옮기지 마십시오 — 문헌번호는 candidates 에 남겨야 미확인
-  검색 단서로 보고서에 실립니다.""",
+        """- evidence_status 는 이 1차 탐색에서 항상 "candidate_only" 입니다. group 은
+  검색 결과에 근거한 잠정 A/B/C를 적고 provisional 은 true 로 두십시오. 주소로
+  조회했더라도 검증된 열람으로 주장하지 말고 mapping 은 빈 배열로 두십시오.
+  그렇다고 후보를 빼거나 access_failures 로 옮기지 마십시오 — ARIA 가 공식
+  문헌을 확보한 후보는 2차 분류하고, 나머지는 provisional_group 으로 남깁니다.""",
+    ),
+    (
+        """- group 은 "A", "B", "C" 또는 null 입니다. 페이지를 열어 확인하지 못한 후보는
+  null 로 두십시오. 후보 목록에서 빼라는 뜻이 아닙니다 — ARIA 가 그런 후보를
+  "미확인 검색 단서" 로 따로 기록하며, 문헌번호 자체가 다시 확인해 볼 단서로
+  남습니다.""",
+        """- group 은 "A", "B", "C" 또는 null 입니다. 이 1차 탐색에서는 검색 결과에
+  근거한 잠정 분류를 A/B/C로 적고 provisional 을 true 로 두십시오. 관련성을
+  판단할 단서조차 없을 때만 null 로 두십시오. ARIA 는 이 값을 검증된 group 과
+  섞지 않고 provisional_group 으로 보존합니다.""",
+    ),
+    (
+        """- access_failures 는 열려고 시도했으나 실패한 주소의 기록입니다. 문헌 후보를
+  여기에 넣지 마십시오. 검색으로 알게 된 문헌은 페이지를 열지 못했더라도
+  candidates 에 group=null 로 남기고, access_failures 에는 그 접근 실패 사실만
+  적으십시오. 후보를 이리로 옮기면 문헌번호와 명칭이 보고서의 후보 목록에서
+  통째로 사라집니다.""",
+        """- access_failures 는 열려고 시도했으나 실패한 주소의 기록입니다. 문헌 후보를
+  여기에 넣지 마십시오. 검색으로 알게 된 문헌은 페이지를 열지 못했더라도
+  candidates 에 잠정 group 과 함께 남기고, access_failures 에는 그 접근 실패
+  사실만 적으십시오. 후보를 이리로 옮기면 문헌번호가 보고서에서 사라집니다.""",
+    ),
+    (
+        "7. 페이지를 확인한 후보만 A/B/C 그룹과 청구항 구성 대응표 작성",
+        """7. 1차 탐색의 모든 유력 후보에 잠정 A/B/C를 부여하되 mapping 은 비움.
+   ARIA 가 공식 문헌을 확보한 후보의 구성 대응표와 검증된 A/B/C는 별도의 2차
+   분류 턴에서 작성합니다""",
+    ),
+    (
+        """- url 에는 그 후보 하나를 가리키는 전용 페이지 주소를 적으십시오. 포털 첫
+  화면(예: http://www.kipris.or.kr), 검색 결과 목록 주소, "확인 필요" 는 후보
+  전용 주소가 아닙니다. 전용 주소를 열지 못한 후보는 A/B/C 분류와 구성
+  대응표에서 제외되어 "미확인 검색 단서" 로만 기록됩니다.""",
+        """- url 에는 그 후보 하나를 가리키는 전용 페이지 주소를 적으십시오. 포털 첫
+  화면(예: http://www.kipris.or.kr), 검색 결과 목록 주소, "확인 필요" 는 후보
+  전용 주소가 아닙니다. 전용 주소를 열지 못했어도 잠정 A/B/C는 적을 수 있지만,
+  검증된 구성 대응표를 주장할 수는 없습니다.""",
+    ),
+    (
+        """- A/B/C 분류에는 support_source 가 page_text 인 행이 최소 하나 필요합니다.
+  페이지를 열지 못한 후보는 그룹에 넣지 말고, candidates 안에 group 을 null 로
+  두어 남기십시오. 후보 자체를 빼거나 access_failures 로 옮기지 마십시오.""",
+        """- 이 1차 탐색의 A/B/C는 잠정 판단입니다. mapping 을 빈 배열로 두고 group 에
+  잠정 A/B/C를 적으십시오. ARIA 는 이를 provisional_group 으로 격리합니다.
+  공식 문헌에 대조된 대응표 행이 있는 경우에만 2차 단계가 검증된 group 으로
+  승격합니다. 후보 자체를 빼거나 access_failures 로 옮기지 마십시오.""",
     ),
 )
 
@@ -543,6 +595,11 @@ DEFAULTS: dict[str, object] = {
     "default_provider": "",
     "provider_paths": {},
     "default_models": {},
+    # provider -> 추론강도. 값이 없으면 **모델 기본값**이며, 그때 ARIA 는
+    # CLI 에 아무 것도 넘기지 않는다. 여기에 기본 레벨을 적어 두지 않는 이유는
+    # 그 순간 ARIA 가 모델 카탈로그의 기본값을 덮어쓰기 때문이다 — 사용자가
+    # 고르지 않았는데 강도를 정해 주는 셈이 된다.
+    "reasoning_effort": {},
     "keep_raw_output": True,
     # 도구를 끌 수 없는 Provider 라도, 실제 도구 호출이 발생하면 실패로 본다.
     "fail_on_tool_use": True,
@@ -563,8 +620,8 @@ DEFAULTS: dict[str, object] = {
     "retrieval_mode": "auto",
     # 로컬 검색 예산. preflight 와 실행이 같은 값을 쓴다
     # (retrieval.budget_from_settings).
-    "retrieval_max_rounds": 6,
-    "retrieval_max_page_reads": 40,
+    "retrieval_max_rounds": 10,
+    "retrieval_max_page_reads": 80,
     # 근거 패키지에 담을 수 있는 원문 문자 수의 상한. preflight 는 이 값으로
     # 최대 크기를 계산하고, 실행은 같은 값을 넘지 못한다. 한글 1자는 UTF-8
     # 3 bytes 이므로 40,000자는 최악의 경우 120,000 bytes 다 — agy 의 전송 한도
@@ -643,6 +700,18 @@ DEFAULTS: dict[str, object] = {
     "epo_hourly_quota_bytes": 0,
     # 한 실행에서 상세 조회(청구항·설명)할 후보 수 상한.
     "epo_max_detail_fetches": 12,
+    # 질의 하나가 받아 오는 결과 건수 상한. OPS 자체 상한(20건)보다 크게 잡아도
+    # 그쪽이 먼저 막는다. 검색 호출 수와 다른 축이다 — 한 번 부르고 20건을
+    # 받는 것과 스무 번 부르는 것은 비용도 결과도 다르다.
+    "epo_max_results_per_query": 20,
+    # EPO 독립 검색에서 최종 A/B/C 대응표까지 끌고 갈 유망 후보 수 상한.
+    # 검색 결과 상한과 다른 축이다 — 받아 보는 것과 공식 검증까지 하는 것은
+    # 비용이 다르다. 넘긴 후보는 조용히 사라지지 않고 사유와 함께 기록된다.
+    "epo_shortlist_limit": 5,
+    # 공식 문헌 대조를 시도할 후보 수 상한. 상세 조회 예산(epo_max_detail_fetches)
+    # 과 다른 축이다 — 후보 하나에 청구항·초록·서지 세 번을 부를 수 있으므로,
+    # 조회 예산만으로는 "몇 명을 검증할 것인가"를 정하지 못한다.
+    "epo_verification_targets": 8,
     # 아래 둘은 **작업당**(채널 전체) 예산이다. 레인당이 아니다 — 명세가
     # "작업당 OPS 검색 요청 최대 6회", "EPO 채널 전체 제한시간 180초"라고
     # 못 박았다. 레인마다 주면 EPO 레인 둘에서 예산이 두 배가 된다.
@@ -653,4 +722,27 @@ DEFAULTS: dict[str, object] = {
     # ARIA 가 관측해 적는 사용량 상태. 사용자가 편집하는 값이 아니므로
     # settings_service.EDITABLE_KEYS 에 없다. 화면에는 보여 준다.
     "epo_quota_state": {},
+    # 비특허문헌(Crossref·Europe PMC) 연동. 기본 꺼짐. 키 이름은
+    # app.patent_search.literature_backend 에도 적혀 있다(순환 import 회피).
+    #
+    # EPO 와 달리 자격증명이 없다. 켜기만 하면 동작하므로, 기본을 꺼짐으로 두는
+    # 이유는 자격이 아니라 **외부 호출은 사용자가 켠 뒤에만 나간다**는 이 모듈의
+    # 원칙 때문이다.
+    "literature_integration_enabled": False,
+    # Crossref 예의 풀(polite pool) 표시용 연락처. 비워 둬도 동작한다.
+    "literature_contact_email": "",
+    # 한 실행에서 ARIA 가 직접 보낼 서지 질의 수 상한. 모델의 검색어를 그대로
+    # 쓰므로 검색어가 많은 실행에서 폭주하지 않도록 여기서 자른다.
+    "literature_max_queries": 6,
+    # 질의 하나가 받아 오는 결과 건수 상한. 두 DB 각각에 적용된다.
+    "literature_max_results_per_query": 10,
+    # 서지 검색 결과 중 최종 후보표까지 올릴 문헌 수 상한. 받은 것 전부를 올리면
+    # (실측 62건) 모델이 검토한 후보와 검색 결과 목록이 같은 위계로 읽힌다.
+    # 올리지 못한 문헌도 기록에는 전부 남는다.
+    "literature_shortlist_limit": 10,
+    # 서지 API 네트워크 시간 예산(초). EPO 와 같은 이유로 호출 수와 다른 축이다.
+    "literature_http_budget_seconds": 60,
+    # 공식 서지 대조를 시도할 논문 후보 수 상한. epo_verification_targets 와
+    # 다른 축이다 — 특허 예산을 논문이 먹으면 EPO 검증이 조용히 0건이 된다.
+    "literature_verification_targets": 8,
 }

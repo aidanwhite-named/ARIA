@@ -3,7 +3,7 @@
   "name": "검색 프롬프트",
   "description": "청구항과 기술적으로 유사한 특허·논문을 웹에서 탐색하고 검토 후보를 정리하는 검색 전용 프롬프트입니다. 선행기술조사 보고서가 아닙니다.",
   "output_mode": "markdown",
-  "version": 6,
+  "version": 1,
   "capabilities": ["similarity_search_v1"],
   "tags": ["특허", "논문", "유사검색", "검토후보"],
   "accepted_file_types": [],

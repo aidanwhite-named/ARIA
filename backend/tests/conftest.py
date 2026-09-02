@@ -118,3 +118,22 @@ def block_epo_network(monkeypatch):
         )
 
     monkeypatch.setattr(epo_client, "_live_transport", refuse)
+
+
+@pytest.fixture(autouse=True)
+def block_literature_network(monkeypatch):
+    """Crossref·Europe PMC 로 나가는 실제 요청을 막는다.
+
+    block_epo_network 와 같은 이유이고 같은 방식이다. 이쪽은 자격증명이 없어
+    조용히 200 을 받아 오므로 오히려 더 위험하다 — 테스트가 통과해 버리고,
+    통과한 이유가 네트워크였다는 사실을 아무도 모른다.
+    """
+    from app.patent_search import literature_client
+
+    def refuse(request, timeout):
+        raise AssertionError(
+            "테스트가 서지 API 로 실제 요청을 보내려 했습니다: "
+            f"{request.full_url} — transport 를 주입하십시오."
+        )
+
+    monkeypatch.setattr(literature_client, "_live_transport", refuse)

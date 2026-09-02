@@ -58,8 +58,7 @@ const RELATION_TITLE: Record<RelationType, string> = {
 
 function jobLabel(job: Job): string {
   const stamp = new Date(job.created_at).toLocaleString();
-  const version = job.prompt_version ? ` v${job.prompt_version}` : "";
-  return `${stamp} · ${job.prompt_name}${version}`;
+  return `${stamp} · ${job.prompt_name}`;
 }
 
 function formatBytes(bytes: number): string {
@@ -815,7 +814,7 @@ export default function RunPage() {
             {searching
               ? "검색 프롬프트 (search_prompt.md)"
               : selectedPrompt
-                ? `${selectedPrompt.name} (v${selectedPrompt.version})`
+                ? selectedPrompt.name
                 : "설정 필요"}
           </span>
           <span>
@@ -1577,9 +1576,7 @@ export default function RunPage() {
                 <tbody>
                   <tr>
                     <th>프롬프트</th>
-                    <td>
-                      {job.prompt_name} (v{job.prompt_version})
-                    </td>
+                    <td>{job.prompt_name}</td>
                   </tr>
                   <tr>
                     <th>실행 도구 / 모델</th>

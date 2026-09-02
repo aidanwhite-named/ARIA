@@ -53,7 +53,6 @@ class PromptUpdate(BaseModel):
 
 class PromptOut(PromptBase):
     id: str
-    version: int
     enabled: bool
     # 프롬프트 파일 메타데이터에서만 정한다. 본문과 출력 계약이 함께 움직여야
     # 해서 API 로는 바꿀 수 없다.
@@ -70,18 +69,6 @@ class PromptCatalogOut(PromptOut):
     kind: str
     editable: bool = True
     deletable: bool = True
-
-
-class PromptVersionOut(BaseModel):
-    id: str
-    version: int
-    name: str
-    description: str = ""
-    body: str
-    output_mode: str
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 class PromptImportItem(PromptBase):
@@ -252,7 +239,6 @@ class JobOut(BaseModel):
     job_kind: str = JobKind.PATENT_ANALYSIS
     prompt_id: str | None = None
     prompt_name: str
-    prompt_version: int | None = None
     prompt_snapshot: str
     output_mode: str
     claim_text: str = ""
@@ -307,7 +293,6 @@ class HistoryItem(BaseModel):
     error_code: str | None = None
     job_kind: str = JobKind.PATENT_ANALYSIS
     prompt_name: str
-    prompt_version: int | None = None
     provider: str
     model: str | None = None
     created_at: datetime

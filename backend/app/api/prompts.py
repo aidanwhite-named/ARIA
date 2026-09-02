@@ -14,7 +14,6 @@ from ..prompt_store import (
     RESERVED_PROMPT_IDS,
     InvalidPromptFile,
     PromptFile,
-    PromptFileVersion,
     PromptNotFound,
     PromptStoreError,
 )
@@ -25,7 +24,6 @@ from ..schemas import (
     PromptImportRequest,
     PromptOut,
     PromptUpdate,
-    PromptVersionOut,
 )
 
 router = APIRouter(prefix="/api/prompts", tags=["prompts"])
@@ -175,25 +173,5 @@ def update_reserved_prompt(
 def delete_prompt(prompt_id: str) -> None:
     try:
         PROMPT_STORE.delete(prompt_id)
-    except PromptStoreError as exc:
-        _raise_http(exc)
-
-
-@router.get("/{prompt_id}/versions", response_model=list[PromptVersionOut])
-def list_versions(prompt_id: str) -> list[PromptFileVersion]:
-    try:
-        return PROMPT_STORE.versions(prompt_id)
-    except PromptStoreError as exc:
-        _raise_http(exc)
-
-
-@router.get(
-    "/reserved/{prompt_id}/versions", response_model=list[PromptVersionOut]
-)
-def list_reserved_versions(prompt_id: str) -> list[PromptFileVersion]:
-    if prompt_id != SEARCH_PROMPT_ID:
-        raise HTTPException(404, "예약된 프롬프트를 찾을 수 없습니다.")
-    try:
-        return PROMPT_STORE.versions_reserved(prompt_id)
     except PromptStoreError as exc:
         _raise_http(exc)

@@ -74,6 +74,10 @@ class SearchDocument(_Base):
     attachment: str = ALL_DOCUMENTS
     queries: list[str] = Field(default_factory=list)
     limit: int = 8
+    # ARIA 내부 이월 검색용. 이미 모델에게 보여준 후보를 제외하고 다음 후보를
+    # 가져온다. 모델이 보내도 결과의 정확성에는 영향을 주지 않지만, 공개 action
+    # 스키마에는 노출하지 않는다.
+    exclude_chunk_ids: list[str] = Field(default_factory=list)
 
     @field_validator("queries")
     @classmethod
@@ -88,6 +92,11 @@ class SearchDocument(_Base):
     def _check_limit(cls, value: int) -> int:
         return max(1, min(20, int(value)))
 
+    @field_validator("exclude_chunk_ids")
+    @classmethod
+    def _check_excludes(cls, value: list) -> list[str]:
+        return _strings(value, 200)
+
 
 class SearchExact(_Base):
     """정확 문구 검색. 문구를 통째로 하나의 phrase 로 넣는다."""
@@ -97,6 +106,7 @@ class SearchExact(_Base):
     attachment: str = ALL_DOCUMENTS
     phrases: list[str] = Field(default_factory=list)
     limit: int = 8
+    exclude_chunk_ids: list[str] = Field(default_factory=list)
 
     @field_validator("phrases")
     @classmethod
@@ -111,6 +121,11 @@ class SearchExact(_Base):
     def _check_limit(cls, value: int) -> int:
         return max(1, min(20, int(value)))
 
+    @field_validator("exclude_chunk_ids")
+    @classmethod
+    def _check_excludes(cls, value: list) -> list[str]:
+        return _strings(value, 200)
+
 
 class SearchNumbersAndSymbols(_Base):
     """숫자·범위·단위·도면부호 검색."""
@@ -120,6 +135,7 @@ class SearchNumbersAndSymbols(_Base):
     attachment: str = ALL_DOCUMENTS
     terms: list[str] = Field(default_factory=list)
     limit: int = 8
+    exclude_chunk_ids: list[str] = Field(default_factory=list)
 
     @field_validator("terms")
     @classmethod
@@ -133,6 +149,11 @@ class SearchNumbersAndSymbols(_Base):
     @classmethod
     def _check_limit(cls, value: int) -> int:
         return max(1, min(20, int(value)))
+
+    @field_validator("exclude_chunk_ids")
+    @classmethod
+    def _check_excludes(cls, value: list) -> list[str]:
+        return _strings(value, 200)
 
 
 class ReadPage(_Base):
@@ -256,11 +277,19 @@ class ComponentDeclaration(_Base):
 
     label: str = ""
     feature: str = ""
+    importance: Literal["high", "medium", "low"] = "medium"
+    importance_reasons: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
 
     @field_validator("label", "feature")
     @classmethod
     def _trim(cls, value: str) -> str:
         return str(value).strip()[:1000]
+
+    @field_validator("importance_reasons", "depends_on")
+    @classmethod
+    def _trim_lists(cls, value: list) -> list[str]:
+        return _strings(value, 12)
 
 
 class AgentResponse(_Base):
@@ -351,10 +380,13 @@ def schema_summary() -> str:
         f'"attachment":"ATT-01|{ALL_DOCUMENTS}","phrases":["정확히 이 문구"]}}',
         f'- {{"action":"{ACTION_NUMBERS}","component_id":"R001",'
         f'"attachment":"ATT-01|{ALL_DOCUMENTS}","terms":["110","5V","0.5mm"]}}',
-        f'- {{"action":"{ACTION_READ_PAGE}","attachment":"ATT-01","page":12}}',
-        f'- {{"action":"{ACTION_READ_PAGES}","attachment":"ATT-01",'
+        f'- {{"action":"{ACTION_READ_PAGE}","component_id":"R001",'
+        '"attachment":"ATT-01","page":12}',
+        f'- {{"action":"{ACTION_READ_PAGES}","component_id":"R001",'
+        '"attachment":"ATT-01",'
         '"pages":[11,12,13]}',
-        f'- {{"action":"{ACTION_READ_PARAGRAPH}","attachment":"ATT-01",'
+        f'- {{"action":"{ACTION_READ_PARAGRAPH}","component_id":"R001",'
+        '"attachment":"ATT-01",'
         '"paragraph":"[0032]"}',
         f'- {{"action":"{ACTION_STATUS}","attachment":"ATT-01|{ALL_DOCUMENTS}"}}',
         f'- {{"action":"{ACTION_FINALIZE}","components":[{{"component_id":"R001",'

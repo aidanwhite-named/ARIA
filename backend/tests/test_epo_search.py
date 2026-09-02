@@ -699,7 +699,7 @@ def test_hourly_limit_is_observe_only_by_default(store) -> None:
         ledger.check()
 
 
-def test_dangerous_throttling_stops_the_channel(store) -> None:
+def test_overloaded_with_green_services_does_not_stop_the_channel(store) -> None:
     transport = FakeTransport(
         token_response(),
         ok(fx.SEARCH_BIBLIO, headers=fx.HEADERS_OVERLOADED),
@@ -707,9 +707,59 @@ def test_dangerous_throttling_stops_the_channel(store) -> None:
     )
     backend = make_backend(transport, store)
     backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
-    # 다음 호출은 시작되지 않는다.
-    with pytest.raises(epo_quota.Throttled, match="과부하"):
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "gripper"))
+    assert len(transport.requests) == 3  # 토큰 1 + 검색 2
+
+
+def test_red_service_is_a_warning_not_a_suspension(store) -> None:
+    transport = FakeTransport(
+        token_response(),
+        ok(fx.SEARCH_BIBLIO, headers=fx.HEADERS_RED),
+        ok(fx.SEARCH_BIBLIO),
+    )
+    backend = make_backend(transport, store)
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "gripper"))
+    assert len(transport.requests) == 3
+
+
+def test_black_service_stops_only_the_current_clients_sixty_second_window(
+    store,
+) -> None:
+    now = [100.0]
+    transport = FakeTransport(
+        token_response(),
+        ok(fx.SEARCH_BIBLIO, headers=fx.HEADERS_BLACK),
+        ok(fx.SEARCH_BIBLIO),
+    )
+    backend = make_backend(transport, store)
+    backend._client.clock = lambda: now[0]
+
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+    with pytest.raises(epo_quota.Throttled, match=r"일시정지\(black\)"):
         backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "gripper"))
+    assert len(transport.requests) == 2  # 토큰 1 + 첫 검색 1
+
+    now[0] += epo_quota.THROTTLE_WINDOW_SECONDS + 1
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "gripper"))
+    assert len(transport.requests) == 3
+
+
+def test_persisted_black_observation_does_not_block_a_new_client(store) -> None:
+    transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
+    backend = make_backend(
+        transport,
+        store,
+        epo_quota_state={
+            "week": epo_quota.week_key(),
+            "throttle": epo_quota.parse_throttle(
+                fx.HEADERS_BLACK["X-Throttling-Control"]
+            ).to_dict(),
+            "observed_at": "2026-09-01T00:00:00+00:00",
+        },
+    )
+    backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+    assert len(transport.requests) == 2
 
 
 def test_throttle_parser_keeps_raw_when_format_changes() -> None:
@@ -717,6 +767,18 @@ def test_throttle_parser_keeps_raw_when_format_changes() -> None:
     assert reading.raw == "something-new (search=unknown-value)"
     assert reading.services["search"] == "unknown-value"
     assert reading.dangerous is False
+
+
+def test_only_black_on_a_watched_service_is_dangerous() -> None:
+    assert epo_quota.parse_throttle(
+        fx.HEADERS_OVERLOADED["X-Throttling-Control"]
+    ).dangerous is False
+    assert epo_quota.parse_throttle(
+        fx.HEADERS_RED["X-Throttling-Control"]
+    ).dangerous is False
+    assert epo_quota.parse_throttle(
+        fx.HEADERS_BLACK["X-Throttling-Control"]
+    ).dangerous is True
 
 
 def test_quota_state_resets_on_new_week() -> None:

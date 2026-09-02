@@ -179,9 +179,9 @@ def test_epo_lane_is_recorded_with_a_fixed_id(client, epo_on) -> None:
         assert lane["origin"] in ("claim_only", "spec_assisted")
 
 
-def test_manifest_version_is_six(client, epo_on) -> None:
+def test_manifest_version_matches_the_schema(client, epo_on) -> None:
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 7
+    assert manifest["version"] == search_manifest.MANIFEST_VERSION
 
 
 # ---------------------------------------------------------------- 격리
@@ -328,7 +328,7 @@ def test_attached_spec_runs_all_four_lanes(client, epo_on) -> None:
         comparison["epo"]["unique_identified"]
     )
     detail = client.get(f"/api/jobs/{job['id']}").json()
-    assert "## 웹/EPO 채널 교차 발견" in detail["result_text"]
+    assert "웹/EPO 채널 교차 발견 펼치기/접기" in detail["result_text"]
 
 
 def test_only_the_spec_assisted_epo_lane_gets_the_spec_body(client, epo_on) -> None:
@@ -469,7 +469,7 @@ def test_cancel_inside_a_running_epo_lane_stops_the_next_one(client, epo_on) -> 
 def test_manifest_exists_when_the_epo_lane_fails(client, epo_on) -> None:
     fake_provider.EPO_SCRIPT["epo:claim_only"] = ["깨진 응답"] * 5
     manifest = manifest_of(client, start_search(client))
-    assert manifest["version"] == 7
+    assert manifest["version"] == search_manifest.MANIFEST_VERSION
     assert manifest["epo"]["lanes"], "실패한 레인의 기록이 없습니다."
     assert manifest["timing"]["completed_at"]
 
@@ -481,3 +481,417 @@ def test_usage_is_recorded_per_lane(client, epo_on) -> None:
     assert lane["usage"]["max_rounds"] == 2
     assert "channel_budget" in lane["usage"]
     assert manifest["epo"]["usage"]["calls_by_kind"]["search"]["count"] >= 1
+
+
+# ------------------------------- 웹 후보의 공식 문헌 2차 검증 (Provider 무관)
+#
+# EPO **검색 채널**과 다른 단계다. 저쪽은 ARIA 가 OPS 로 직접 검색해 후보를
+# 찾는 경로이고, 이쪽은 웹에서 찾은 후보의 번호로 공식 문헌을 받아 대조하는
+# 단계다. 예전에는 Codex 실행에서만 돌았고, 그 분기는 제거됐다.
+
+
+def test_official_verification_is_not_gated_by_provider(client, epo_on) -> None:
+    """test-search 는 WEB_SEARCH 정책이다. 그래도 2차 검증이 시도돼야 한다."""
+    verification = manifest_of(client, start_search(client))["verification"]
+
+    assert verification["attempted"] is True
+    assert verification["counts"]["targets"] >= 1
+    assert "Codex" not in verification["reason"]
+
+
+def test_failed_official_fetch_keeps_the_page_backed_group(client, epo_on) -> None:
+    """OPS 에 없는 문헌이라고 페이지 관측 분류를 강등하지 않는다(규칙 4).
+
+    이 픽스처의 OPS 응답에는 후보 번호가 없어 확보가 실패한다. 그것은 "그
+    문헌이 없다"가 아니라 "이 채널로 받지 못했다"이므로, 1차에서 페이지 관측
+    근거로 받은 정식 분류는 그대로 남아야 한다.
+    """
+    manifest = manifest_of(client, start_search(client))
+    candidate = manifest["reported"]["candidates"][0]
+
+    assert manifest["verification"]["counts"]["fetch_failed"] >= 1
+    assert candidate["group"] == "A"
+    assert candidate["provisional_group"] is None
+    assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_PAGE
+    assert candidate["verification"]["status"] == search_manifest.VERIFY_FETCH_FAILED
+    # 공식 근거로 승격된 것이 아니라는 사실은 그대로 남는다.
+    assert candidate.get("official_supported_rows", 0) == 0
+
+
+# ------------------------- EPO 독립 검색 후보를 최종 대응표까지 (전 구간)
+#
+# 여기서부터는 러너·매니페스트·검증을 한 줄로 꿴다. 단위 테스트가 각 조각을
+# 이미 보고 있으므로, 이 절이 보는 것은 "조각들이 실제로 이어져 있는가"다.
+
+
+def epo_reply(*, shortlist=(), analysis=True) -> str:
+    """EPO 레인이 돌려줄 응답. 검색 → 청구항 조회 → 마무리를 한 번에 한다."""
+    payload = {
+        "strategy": "테스트",
+        "actions": [
+            {
+                "action": "epo_search",
+                "query": {"kind": "term", "field": "ta", "value": "robot arm"},
+            },
+            {
+                "action": "epo_fetch_document",
+                "doc_number": "EP1000000A1",
+                "constituent": "claims",
+            },
+            {"action": "finish", "notes": "끝"},
+        ],
+    }
+    if analysis:
+        payload["claim_analysis"] = {
+            "elements": [
+                {
+                    "id": "E1",
+                    "text": "로봇 팔",
+                    "essential": True,
+                    "synonyms": ["robot arm"],
+                },
+                {"id": "E2", "text": "힘 센서", "synonyms": ["force sensor"]},
+            ],
+            "relations": [
+                {
+                    "source": "E2",
+                    "target": "E1",
+                    "kind": "배치",
+                    "description": "힘 센서가 로봇 팔 끝단에 배치된다",
+                }
+            ],
+            "concept_combinations": [
+                {
+                    "elements": ["E1", "E2"],
+                    "terms": ["robot arm", "force sensor"],
+                    "reason": "핵심 조합",
+                }
+            ],
+            "search_conditions": [
+                {"kind": "ipc", "value": "B25J 9/16", "reason": "로봇 제어 분류"}
+            ],
+        }
+    if shortlist:
+        payload["shortlist"] = list(shortlist)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.fixture()
+def shortlisted(epo_on):
+    """EPO 레인이 EP1000000A1 을 유망 후보로 올린 실행."""
+    reply = epo_reply(
+        shortlist=[{"doc_number": "EP1000000A1", "reason": "힘 센서가 개시됨"}]
+    )
+    fake_provider.EPO_SCRIPT["epo:claim_only"] = [reply]
+    fake_provider.CLASSIFY_REQUESTS.clear()
+    fake_provider.CLASSIFY_FABRICATE = False
+    try:
+        yield epo_on
+    finally:
+        fake_provider.CLASSIFY_REQUESTS.clear()
+        fake_provider.CLASSIFY_FABRICATE = False
+
+
+def _epo_only(manifest: dict) -> dict:
+    """EPO 독립 검색만 데려온 후보 하나."""
+    rows = [
+        item
+        for item in manifest["reported"]["candidates"]
+        if search_manifest.discovery_origins(item) == [search_manifest.DISCOVERY_EPO]
+    ]
+    assert rows, "EPO 독립 검색 후보가 대응표에 없습니다."
+    return rows[0]
+
+
+def test_claim_analysis_reaches_the_manifest(client, shortlisted) -> None:
+    """추가 모델 턴 없이 첫 EPO 응답의 검색 전략이 기록에 남는다."""
+    manifest = manifest_of(client, start_search(client))
+    lane = next(
+        lane for lane in manifest["epo"]["lanes"] if lane["id"] == "epo:claim_only"
+    )
+
+    analysis = lane["claim_analysis"]
+    assert [item["id"] for item in analysis["elements"]] == ["E1", "E2"]
+    assert analysis["elements"][0]["synonyms"] == ["robot arm"]
+    # 필수 여부를 적지 않은 구성은 '판단 없음'으로 남는다.
+    assert analysis["elements"][1]["essential"] is None
+    assert analysis["relations"][0]["description"]
+    assert analysis["search_conditions"][0]["value"] == "B25J 9/16"
+    # 이 레인의 모델 호출은 검색 라운드 한 번뿐이다.
+    assert len(epo_messages("epo:claim_only")) == 1
+
+
+def test_epo_only_candidate_reaches_the_main_table_with_official_support(
+    client, shortlisted
+) -> None:
+    """공식 응답에 구성 대응이 대조되면 EPO 단독 후보가 정식 분류를 받는다."""
+    manifest = manifest_of(client, start_search(client))
+    candidate = _epo_only(manifest)
+
+    assert candidate["doc_number"] == "EP1000000A1"
+    assert candidate["channel"] == search_manifest.CHANNEL_PATENT_DB
+    assert candidate["group"] in ("A", "B", "C")
+    assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_OFFICIAL
+    assert candidate["verification"]["status"] == search_manifest.VERIFY_PROMOTED
+    assert candidate["official_supported_rows"] >= 1
+    # 존재하지 않는 페이지 분류를 만들지 않는다.
+    assert "page_classification" not in candidate
+    assert candidate["page_fetch_succeeded"] is False
+    assert candidate["page_supported_rows"] == 0
+    # 원본 레인 기록은 그대로 남는다.
+    lane = next(
+        lane for lane in manifest["epo"]["lanes"] if lane["id"] == "epo:claim_only"
+    )
+    assert lane["shortlist"][0]["doc_number"] == "EP1000000A1"
+    assert lane["candidates"]
+
+
+def test_official_mismatch_keeps_the_epo_candidate_provisional(
+    client, shortlisted
+) -> None:
+    """근거 문장이 대조되지 않으면 삭제하지 않고 잠정으로 남긴다."""
+    fake_provider.CLASSIFY_FABRICATE = True
+    manifest = manifest_of(client, start_search(client))
+    candidate = _epo_only(manifest)
+
+    assert candidate["group"] is None
+    assert candidate["provisional_group"] in ("A", "B", "C")
+    assert candidate["verification"]["status"] == (
+        search_manifest.VERIFY_EVIDENCE_MISMATCH
+    )
+    assert "page_classification" not in candidate
+
+
+def test_the_verification_reuses_the_lane_artifacts(client, shortlisted) -> None:
+    """EPO 레인이 이미 받은 청구항을 검증 단계가 다시 내려받지 않는다."""
+    job = start_search(client)
+    manifest = manifest_of(client, job)
+
+    usage = manifest["verification"]["usage"]
+    assert usage["reused_artifact_calls"] >= 1
+    # 같은 문헌의 청구항을 두 번 받지 않았다.
+    claims_calls = [
+        url
+        for url in shortlisted
+        if "EP.1000000.A1" in url and url.endswith("/claims")
+    ]
+    assert len(claims_calls) == 1, claims_calls
+
+
+def test_a_document_found_by_both_channels_keeps_both_origins(
+    client, epo_on
+) -> None:
+    """웹 후보와 같은 공개번호를 EPO 도 찾으면 후보 하나에 두 출처가 남는다."""
+    # 웹 대역이 보고하는 후보 번호는 AB1234 다. EPO 레인도 같은 번호를 골랐다고
+    # 하면, 검색 결과에 없는 번호라 shortlist 에서 걸러진다. 그래서 이 검사는
+    # 병합 함수를 직접 부른다 — 러너 경로의 계약은 위 테스트가 이미 본다.
+    manifest = manifest_of(client, start_search(client))
+    lane = next(
+        lane for lane in manifest["epo"]["lanes"] if lane["id"] == "epo:claim_only"
+    )
+    number = lane["candidates"][0]["doc_number"]
+    reported = {
+        "candidates": [
+            {
+                "index": 1,
+                "doc_number": number,
+                "doi": "",
+                "group": None,
+                "provisional_group": "C",
+                "channel": search_manifest.CHANNEL_WEB,
+                "discovery_origins": [search_manifest.DISCOVERY_WEB],
+                "search_origins": [search_manifest.ORIGIN_CLAIM_ONLY],
+                "mapping": [],
+            }
+        ]
+    }
+    lane = {**lane, "shortlist": [{"doc_number": number, "reason": "같은 문헌"}]}
+    merged, notes = search_manifest.merge_epo_discoveries(
+        reported, {"enabled": True, "lanes": [lane]}
+    )
+
+    assert len(merged["candidates"]) == 1
+    assert merged["candidates"][0]["discovery_origins"] == ["web", "epo"]
+    assert merged["candidates"][0]["provisional_group"] == "C"
+    assert notes
+
+
+def test_limit_exclusions_are_recorded(client, shortlisted) -> None:
+    """상한 때문에 빠진 것은 사유와 함께 기록에 남는다."""
+    with session_scope() as session:
+        settings_service.update(session, {"epo_verification_targets": 1})
+    try:
+        manifest = manifest_of(client, start_search(client))
+    finally:
+        with session_scope() as session:
+            settings_service.update(session, {"epo_verification_targets": 8})
+
+    verification = manifest["verification"]
+    assert verification["limits"]["verification_targets"] == 1
+    excluded = verification["excluded_candidates"]
+    assert excluded, "상한으로 빠진 후보의 사유가 기록되지 않았습니다."
+    assert all(row["reason_code"] == "verification_target_limit" for row in excluded)
+    # 그 후보는 사라지지 않고 사유를 든 채 남는다.
+    numbers = {item["doc_number"] for item in manifest["reported"]["candidates"]}
+    assert {row["doc_number"] for row in excluded} <= numbers
+
+
+def test_settings_drive_the_lane_budget(client, shortlisted) -> None:
+    """상한은 코드가 아니라 설정에서 온다."""
+    with session_scope() as session:
+        settings_service.update(
+            session,
+            {"epo_max_results_per_query": 3, "epo_shortlist_limit": 2},
+        )
+    try:
+        manifest = manifest_of(client, start_search(client))
+    finally:
+        with session_scope() as session:
+            settings_service.update(
+                session,
+                {"epo_max_results_per_query": 20, "epo_shortlist_limit": 5},
+            )
+
+    budget = manifest["epo"]["lane_budget"]
+    assert budget["max_results_per_query"] == 3
+    assert budget["shortlist_limit"] == 2
+
+
+# ------------------- 경계 사례: 웹이 실패해도 EPO 결과는 살아남는다
+#
+# 두 채널은 격리되어 있다. 웹 레인의 출력 형식 오류가, EPO 레인이 실제로 받아
+# 아티팩트로 보존한 공식 응답을 무효로 만들 이유는 없다. 다만 그 실행이 "두
+# 채널을 다 돌린 결과"처럼 보여서도 안 된다.
+
+
+def test_epo_only_report_when_the_web_audit_block_is_missing(
+    client, shortlisted
+) -> None:
+    """웹 감사 블록이 없어도 EPO 후보로 보고서를 만든다."""
+    job = start_search(client, claim=f"{CLAIM}\nSEARCH_NOLOG")
+    manifest = manifest_of(client, job)
+
+    # 보고서가 실제로 나왔다. 예전에는 여기서 결과가 통째로 비었다.
+    assert (job["result_text"] or "").strip()
+    assert manifest["reported"] is not None
+    numbers = {item["doc_number"] for item in manifest["reported"]["candidates"]}
+    assert "EP1000000A1" in numbers
+    # 후보는 EPO 발견뿐이다. 웹이 찾은 문헌은 하나도 없다.
+    assert all(
+        search_manifest.DISCOVERY_EPO
+        in search_manifest.discovery_origins(item)
+        for item in manifest["reported"]["candidates"]
+    )
+
+    # 웹의 실패 상태는 세 곳에 그대로 남는다.
+    assert manifest["error"], "웹 파싱 실패 사유가 사라졌습니다."
+    assert manifest["reported"]["web_report_error"]
+    assert job["search_manifest_error"]
+    assert "웹 채널의 검색 결과를 읽지 못했습니다" in job["result_text"]
+    # 실행 기록에도 남긴다. 보고서가 나왔다고 실패가 지워지지 않는다.
+    assert any("웹 채널의 검색 감사 블록" in error for error in job["errors"])
+
+
+def test_epo_only_candidates_still_go_through_official_verification(
+    client, shortlisted
+) -> None:
+    """웹이 실패한 실행에서도 EPO 후보의 공식 대조는 그대로 돈다."""
+    job = start_search(client, claim=f"{CLAIM}\nSEARCH_NOLOG")
+    manifest = manifest_of(client, job)
+
+    assert manifest["verification"]["attempted"] is True
+    candidate = next(
+        item
+        for item in manifest["reported"]["candidates"]
+        if item["doc_number"] == "EP1000000A1"
+    )
+    assert candidate["verification"]["status"] == search_manifest.VERIFY_PROMOTED
+    assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_OFFICIAL
+
+
+def test_a_web_failure_without_epo_results_still_fails(client, epo_on) -> None:
+    """살릴 EPO 결과가 없으면 예전대로 실패한다. 골격을 지어내지 않는다."""
+    fake_provider.EPO_SCRIPT["epo:claim_only"] = ["깨진 응답"] * 5
+    job = start_search(client, claim=f"{CLAIM}\nSEARCH_NOLOG")
+    manifest = manifest_of(client, job)
+
+    assert job["status"] == "FAILED"
+    assert manifest["reported"] is None
+    assert not (job["result_text"] or "").strip()
+
+
+# ------------------- 경계 사례: 검증 대상 선택 정책 (전 구간)
+
+
+def test_epo_candidates_keep_a_verification_slot_under_a_tight_limit(
+    client, shortlisted
+) -> None:
+    """상한이 1이어도 EPO 후보가 웹 후보에 밀려 통째로 빠지지 않는다."""
+    with session_scope() as session:
+        settings_service.update(session, {"epo_verification_targets": 1})
+    try:
+        manifest = manifest_of(client, start_search(client))
+    finally:
+        with session_scope() as session:
+            settings_service.update(session, {"epo_verification_targets": 8})
+
+    order = manifest["verification"]["selection_order"]
+    assert len(order) == 1
+    assert order[0]["doc_number"] == "EP1000000A1"
+    # 이미 받아 둔 응답이 있으므로 재사용 순위로 먼저 뽑혔다.
+    assert order[0]["selection_reason"] == "reusable_official_artifact"
+    # 밀려난 웹 후보는 사유와 함께 남는다.
+    excluded = manifest["verification"]["excluded_candidates"]
+    assert excluded and all(
+        row["reason_code"] == "verification_target_limit" for row in excluded
+    )
+
+
+# ------------------- 경계 사례: 최종 선택 턴 (전 구간)
+
+
+def test_the_selection_turn_runs_once_per_lane(client, shortlisted) -> None:
+    """검색 라운드와 다른 프롬프트로 레인마다 한 번 돈다."""
+    fake_provider.EPO_SELECTION_REQUESTS.clear()
+    manifest = manifest_of(client, start_search(client))
+
+    lanes = [entry["lane"] for entry in fake_provider.EPO_SELECTION_REQUESTS]
+    assert lanes == ["epo:claim_only"]
+    lane = next(
+        lane for lane in manifest["epo"]["lanes"] if lane["id"] == "epo:claim_only"
+    )
+    assert lane["selection"]["attempted"] is True
+    assert lane["selection"]["status"] == "ok"
+    # 검색 라운드 사용량과 섞이지 않는다.
+    assert lane["usage"]["selection_turn"]["search_calls"] == 0
+    assert lane["usage"]["rounds_used"] == 1
+
+
+def test_the_selection_turn_can_add_a_candidate_the_search_rounds_missed(
+    client, epo_on
+) -> None:
+    """검색 응답에 shortlist 가 없어도 최종 선택 턴이 후보를 올릴 수 있다."""
+    fake_provider.EPO_SCRIPT["epo:claim_only"] = [epo_reply()]
+    fake_provider.EPO_SELECTION_SCRIPT["epo:claim_only"] = [
+        json.dumps(
+            {
+                "shortlist": [
+                    {"doc_number": "EP1000000A1", "reason": "마지막 결과에서 골랐다"}
+                ],
+                "actions": [{"action": "finish", "notes": "선택 완료"}],
+            },
+            ensure_ascii=False,
+        )
+    ]
+    try:
+        manifest = manifest_of(client, start_search(client))
+    finally:
+        fake_provider.EPO_SELECTION_SCRIPT.clear()
+
+    lane = next(
+        lane for lane in manifest["epo"]["lanes"] if lane["id"] == "epo:claim_only"
+    )
+    assert [row["doc_number"] for row in lane["shortlist"]] == ["EP1000000A1"]
+    assert lane["shortlist"][0]["turn"] == "selection"
+    numbers = {item["doc_number"] for item in manifest["reported"]["candidates"]}
+    assert "EP1000000A1" in numbers

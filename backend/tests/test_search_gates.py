@@ -292,7 +292,6 @@ def test_manifest_carries_the_group_definitions_it_used() -> None:
     manifest = search_manifest.build(
         claim_text="청구항 1.",
         prompt_id="search_prompt.md",
-        prompt_version=6,
         prompt_sha256="c" * 64,
         claim_boundary_neutralized=False,
         started_at=None,
