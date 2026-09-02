@@ -104,6 +104,25 @@ _CLASSIFICATION = re.compile(r"^[A-Za-z0-9/\- ]{1,30}$")
 _DOC_NUMBER = re.compile(r"^[A-Za-z]{2}[A-Za-z0-9/\-]{1,25}$")
 
 
+def _normalize_classification(value: str) -> str:
+    """IPC/CPC 를 OPS 전송 형식으로 바꾼다. ``G08B 13/196`` -> ``G08B13/196``.
+
+    왜 여기만 값을 고치는가
+    -----------------------
+    이 모듈은 값을 고치지 않고 거절하는 것이 원칙이다(파일 첫머리). 분류코드는
+    그 원칙의 **명시적 예외**다. ``G08B 13/196`` 은 사람과 WIPO 표기의 정본이고
+    ``G08B13/196`` 은 같은 코드의 OPS 전송 표기다. 둘은 다른 검색어가 아니라
+    같은 코드의 두 표기이므로, 여기서 바꾸는 것은 검색 의도가 아니라 형식이다.
+
+    자유 텍스트에는 절대 쓰지 않는다. ``camera field of view`` 에서 공백을 없애면
+    그건 형식 변환이 아니라 다른 검색어가 된다.
+
+    바꾼 사실은 호출부가 ``build(node, normalized=[...])`` 로 받아 감사 기록에
+    남긴다. 조용히 고치면 모델이 적은 값과 나간 값이 달라진 채로 아무도 모른다.
+    """
+    return value.replace(" ", "")
+
+
 class CqlError(ValueError):
     """검색식을 만들 수 없다. 값이 허용 범위를 벗어났거나 필드를 모른다."""
 
@@ -158,7 +177,7 @@ def _clean_value(value: str) -> str:
     return text
 
 
-def _render_term(term: Term) -> str:
+def _render_term(term: Term, normalized: list | None = None) -> str:
     if term.field not in ALLOWED_FIELDS:
         raise CqlError(f"허용되지 않은 검색 필드입니다: {term.field!r}")
     if term.field in DATE_FIELDS:
@@ -169,10 +188,17 @@ def _render_term(term: Term) -> str:
         raise CqlError(f"알 수 없는 대조 방식입니다: {term.match!r}")
     value = _clean_value(term.value)
 
-    if term.field in CLASSIFICATION_FIELDS and not _CLASSIFICATION.match(value):
-        raise CqlError(
-            f"분류코드 형식이 아닙니다: {value!r} (예: G06F 3/01)"
-        )
+    if term.field in CLASSIFICATION_FIELDS:
+        if not _CLASSIFICATION.match(value):
+            raise CqlError(
+                f"분류코드 형식이 아닙니다: {value!r} (예: G06F 3/01)"
+            )
+        sent = _normalize_classification(value)
+        if sent != value and normalized is not None:
+            normalized.append(
+                {"field": term.field, "original": value, "sent": sent}
+            )
+        value = sent
     if term.field in IDENTIFIER_FIELDS and not _DOC_NUMBER.match(value):
         raise CqlError(
             f"문헌번호 형식이 아닙니다: {value!r} (예: EP1000000)"
@@ -197,7 +223,7 @@ def _render_date(node: DateRange) -> str:
     return f'{node.field} within "{node.begin} {node.end}"'
 
 
-def _render(node, depth: int, counter: list[int]) -> str:
+def _render(node, depth: int, counter: list[int], normalized: list | None = None) -> str:
     if depth > MAX_DEPTH:
         raise CqlError(f"검색식 중첩이 {MAX_DEPTH}단계를 넘습니다.")
 
@@ -205,7 +231,7 @@ def _render(node, depth: int, counter: list[int]) -> str:
         counter[0] += 1
         if counter[0] > MAX_TERMS:
             raise CqlError(f"검색항이 {MAX_TERMS}개를 넘습니다.")
-        return _render_term(node)
+        return _render_term(node, normalized)
     if isinstance(node, DateRange):
         counter[0] += 1
         if counter[0] > MAX_TERMS:
@@ -220,7 +246,9 @@ def _render(node, depth: int, counter: list[int]) -> str:
         if node.op == OP_NOT and len(items) != 2:
             # CQL 의 not 은 이항이다. "A not B" = A 이면서 B 가 아닌 것.
             raise CqlError("not 은 항이 정확히 둘이어야 합니다.")
-        rendered = [_render(item, depth + 1, counter) for item in items]
+        rendered = [
+            _render(item, depth + 1, counter, normalized) for item in items
+        ]
         if len(rendered) == 1:
             return rendered[0]
         joined = f" {node.op} ".join(rendered)
@@ -228,10 +256,15 @@ def _render(node, depth: int, counter: list[int]) -> str:
     raise CqlError(f"검색식에 넣을 수 없는 값입니다: {type(node).__name__}")
 
 
-def build(node) -> str:
-    """구조화된 질의를 CQL 문자열로 만든다. ARIA 에서 CQL 을 만드는 유일한 곳."""
+def build(node, *, normalized: list | None = None) -> str:
+    """구조화된 질의를 CQL 문자열로 만든다. ARIA 에서 CQL 을 만드는 유일한 곳.
+
+    ``normalized`` 리스트를 주면 분류코드 형식 변환을 거기에 적는다
+    (``{"field", "original", "sent"}``). 호출부는 이것을 감사 기록에 남겨야
+    한다 — 모델이 적은 값과 OPS 로 나간 값이 다르다는 사실은 사람이 알아야 한다.
+    """
     counter = [0]
-    cql = _render(node, 1, counter)
+    cql = _render(node, 1, counter, normalized)
     if counter[0] == 0:
         raise CqlError("검색항이 하나도 없습니다.")
     if len(cql) > MAX_CQL_CHARS:

@@ -201,6 +201,21 @@ SEARCH_OTHER_FAULT_404 = b"""<?xml version="1.0" encoding="UTF-8" standalone="ye
 """
 
 
+# 상태 코드는 500 이지만 내용은 영구 오류다. 질의 자체가 거절된 것이라
+# 기다렸다 다시 보내도 같은 답이 온다.
+SEARCH_DOMAIN_ACCESS_500 = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<fault xmlns="http://ops.epo.org">
+    <code>SERVER.DomainAccess</code>
+    <message>The requested domain is not accessible with the given query</message>
+</fault>
+"""
+
+# 진짜 일시적인 500. fault 문서가 아니므로 재시도 대상이다.
+SEARCH_TRANSIENT_500 = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html><body>Internal Server Error</body></html>
+"""
+
+
 # fault 문서가 아니다. 본문 어딘가에 같은 문자열이 들어 있을 뿐이다.
 # substring 검사를 쓰면 이것을 "결과 0건" 으로 오판한다.
 SEARCH_ECHOES_FAULT_TEXT_404 = b"""<?xml version="1.0" encoding="UTF-8"?>

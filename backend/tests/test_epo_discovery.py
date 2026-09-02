@@ -151,6 +151,61 @@ def test_the_lane_record_carries_the_analysis(store, tmp_path) -> None:
     assert record["tool_violations"] == []
 
 
+# --------------------------------------------------------------- 레인 상태
+
+
+def test_provider_error_lane_is_not_recorded_as_ok() -> None:
+    """예외 없이 run 객체가 나왔다는 것과 검색이 됐다는 것은 다른 말이다."""
+    run = epo_agent.EpoSearchRun(
+        termination_reason=epo_agent.TERM_PROVIDER_ERROR,
+        termination_detail="EPO OPS 오류(HTTP 500). SERVER.DomainAccess",
+    )
+
+    assert epo_agent.lane_status(run) == "failed"
+
+    record = search_manifest.epo_lane_record(
+        origin=search_manifest.ORIGIN_CLAIM_ONLY,
+        run=run,
+        status=epo_agent.lane_status(run),
+    )
+    assert record["status"] == "failed"
+    assert record["termination_reason"] == "provider_error"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        epo_agent.TERM_PROVIDER_ERROR,
+        epo_agent.TERM_AUTH_FAILED,
+        epo_agent.TERM_THROTTLED,
+        epo_agent.TERM_TIMEOUT,
+        epo_agent.TERM_QUOTA_EXCEEDED,
+        epo_agent.TERM_INVALID_RESPONSE_LIMIT,
+        epo_agent.TERM_UNAUTHORIZED_TOOL_USE,
+    ],
+)
+def test_failed_terminations_never_read_as_ok(reason: str) -> None:
+    run = epo_agent.EpoSearchRun(termination_reason=reason)
+    assert epo_agent.lane_status(run) == "failed"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [epo_agent.TERM_LLM_FINISHED, epo_agent.TERM_SEARCH_CALL_LIMIT],
+)
+def test_normal_terminations_stay_ok(reason: str) -> None:
+    run = epo_agent.EpoSearchRun(termination_reason=reason)
+    assert epo_agent.lane_status(run) == "ok"
+
+
+def test_cancelled_lane_is_cancelled_not_failed() -> None:
+    run = epo_agent.EpoSearchRun(
+        termination_reason=epo_agent.TERM_CANCELLED,
+        cancelled=True,
+    )
+    assert epo_agent.lane_status(run) == "cancelled"
+
+
 # ----------------------------------------------------------------- shortlist
 
 

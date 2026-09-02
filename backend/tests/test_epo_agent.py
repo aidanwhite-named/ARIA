@@ -611,7 +611,13 @@ def test_queries_are_recorded_as_built_cql(store, tmp_path) -> None:
     transport = FakeTransport(token_response(), ok(fx.SEARCH_BIBLIO))
     result = run(make_agent(provider, transport, store, tmp_path))
 
-    assert result.queries == [{"round": 1, "cql": 'ta all "robot arm"'}]
+    assert result.queries == [
+        {
+            "round": 1,
+            "cql": 'ta all "robot arm"',
+            "normalized_classifications": [],
+        }
+    ]
 
 
 def test_run_serializes_without_secrets(store, tmp_path) -> None:

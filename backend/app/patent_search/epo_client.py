@@ -68,6 +68,15 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 # 일시적 실패 재시도. 사용자 확정값(최대 2회).
 MAX_RETRIES = 2
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+# 상태 코드는 재시도 대상인데 **내용은 영구 오류**인 fault code.
+#
+# OPS 는 질의 자체가 잘못됐을 때도 500 을 준다. SERVER.DomainAccess 가 그렇다 —
+# 기다린다고 풀리지 않는데 500 이라는 이유로 같은 질의를 세 번 보내면, 예산과
+# 할당량만 세 배로 쓰고 결과는 똑같다. 상태 코드가 아니라 fault code 로 나눈다.
+#
+# 이 목록은 **확인한 것만** 넣는다. 모르는 code 를 넣어 두면 진짜 일시적
+# 오류를 재시도하지 않게 되고, 그 실패는 "OPS 가 원래 그렇다"로 읽힌다.
+PERMANENT_FAULT_CODES = frozenset({"SERVER.DomainAccess"})
 # Retry-After 를 존중하되, 이만큼을 넘으면 기다리지 않고 채널을 끝낸다.
 MAX_RETRY_SLEEP_SECONDS = 30.0
 
@@ -86,9 +95,21 @@ class OpsError(PatentSearchError):
     깨지는 파싱이 되고, 그 값이 검증 기록에 남는다.
     """
 
-    def __init__(self, message: str = "", *, status: int = 0) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status: int = 0,
+        fault_code: str = "",
+        fault_message: str = "",
+    ) -> None:
         super().__init__(message)
         self.status = int(status or 0)
+        # OPS fault 문서의 code/message. 상태 코드만으로는 "질의가 틀렸다"와
+        # "서버가 잠깐 죽었다"를 구분할 수 없다. 문구를 다시 파싱하지 않도록
+        # 필드로 들고 있는다.
+        self.fault_code = str(fault_code or "")
+        self.fault_message = str(fault_message or "")
 
 
 class OpsAuthError(OpsError):
@@ -455,14 +476,20 @@ class OpsClient:
             for name in dict(response.headers or {})
         ):
             self._observe_transient_throttle(state.throttle)
-        self.calls.append(
-            {
-                "kind": kind,
-                "status": response.status,
-                "bytes": len(response.body),
-                "elapsed_seconds": round(elapsed, 3),
-            }
-        )
+        # 오류 응답이면 fault code/message 도 남긴다. HTTP 상태만 남기면
+        # "500 이 났다"까지는 알지만 "왜"를 다음 실행에서 다시 재현해야 한다.
+        entry = {
+            "kind": kind,
+            "status": response.status,
+            "bytes": len(response.body),
+            "elapsed_seconds": round(elapsed, 3),
+        }
+        if response.status >= 400:
+            fault = _fault_fields(response.body)
+            if fault:
+                entry["fault_code"] = fault.get("code", "")
+                entry["fault_message"] = fault.get("message", "")
+        self.calls.append(entry)
         if len(response.body) > MAX_RESPONSE_BYTES:
             raise OpsError(
                 f"응답이 상한({MAX_RESPONSE_BYTES:,} bytes)을 넘습니다. "
@@ -505,6 +532,24 @@ class OpsClient:
                     f"EPO OPS 접근이 거부되었습니다(HTTP {response.status}). {detail}",
                     status=response.status,
                 )
+            fault = (
+                _fault_fields(response.body) if response.status >= 400 else {}
+            )
+            fault_code = fault.get("code", "")
+            fault_message = fault.get("message", "")
+            if (
+                response.status in RETRYABLE_STATUSES
+                and fault_code in PERMANENT_FAULT_CODES
+            ):
+                # 재시도 대상 상태이지만 내용은 영구 오류다. 같은 질의를 다시
+                # 보내도 같은 답이 온다 — 예산을 쓰지 않고 여기서 끝낸다.
+                raise OpsError(
+                    f"EPO OPS 가 질의를 거절했습니다"
+                    f"(HTTP {response.status}, {fault_code}). {fault_message}",
+                    status=response.status,
+                    fault_code=fault_code,
+                    fault_message=fault_message,
+                )
             if response.status in RETRYABLE_STATUSES and retries < MAX_RETRIES:
                 wait = _retry_after_seconds(response.headers)
                 if wait is None:
@@ -528,6 +573,8 @@ class OpsClient:
                     f"EPO OPS 가 계속 실패합니다(HTTP {response.status}, "
                     f"재시도 {retries}회).",
                     status=response.status,
+                    fault_code=fault_code,
+                    fault_message=fault_message,
                 )
             if _is_search_no_results(kind, response.status, response.body):
                 # OPS 는 "검색 결과 0건"을 404 + SERVER.EntityNotFound 로 알린다.
@@ -553,6 +600,8 @@ class OpsClient:
                 raise OpsError(
                     f"EPO OPS 오류(HTTP {response.status}). {detail}",
                     status=response.status,
+                    fault_code=fault_code,
+                    fault_message=fault_message,
                 )
 
             return OpsCall(
@@ -611,6 +660,9 @@ class OpsClient:
     def usage(self) -> dict:
         """이 클라이언트가 쓴 것. manifest 와 화면에 그대로 실린다."""
         by_kind: dict[str, dict] = {}
+        # 관측한 오류. kind 별 집계에 뭉개면 "몇 번 실패했나"만 남고 "왜"가
+        # 사라진다. 같은 (상태, code, message) 는 한 줄로 합치되 지우지 않는다.
+        faults: list[dict] = []
         for call in self.calls:
             row = by_kind.setdefault(
                 call["kind"], {"count": 0, "bytes": 0, "seconds": 0.0}
@@ -618,8 +670,23 @@ class OpsClient:
             row["count"] += 1
             row["bytes"] += call["bytes"]
             row["seconds"] = round(row["seconds"] + call["elapsed_seconds"], 3)
+            if int(call.get("status") or 0) < 400:
+                continue
+            observed = {
+                "kind": call["kind"],
+                "status": call["status"],
+                "fault_code": call.get("fault_code", ""),
+                "fault_message": call.get("fault_message", ""),
+            }
+            for seen in faults:
+                if all(seen[k] == observed[k] for k in observed):
+                    seen["count"] += 1
+                    break
+            else:
+                faults.append({**observed, "count": 1})
         return {
             "calls_by_kind": by_kind,
+            "faults": faults,
             "http_seconds": round(self._spent_seconds, 3),
             "http_budget_seconds": self.http_budget_seconds,
             "quota": self.ledger.snapshot(),

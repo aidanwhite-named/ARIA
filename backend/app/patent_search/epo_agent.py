@@ -216,6 +216,9 @@ class RoundRecord:
     detail_fetches: int = 0
     new_candidates: int = 0
     errors: list = field(default_factory=list)
+    # OPS 가 돌려준 오류의 구조화 형태. errors 는 사람이 읽는 문장이고 이쪽은
+    # 화면·보고서가 상태와 fault code 를 따로 읽을 수 있는 값이다.
+    faults: list = field(default_factory=list)
     # 이 라운드에서 감지된 도구 호출. NO_TOOLS 턴이므로 비어 있어야 한다.
     tool_uses: list = field(default_factory=list)
 
@@ -235,6 +238,7 @@ class RoundRecord:
             "detail_fetches": self.detail_fetches,
             "new_candidates": self.new_candidates,
             "errors": list(self.errors),
+            "faults": [dict(item) for item in self.faults],
             "tool_uses": list(self.tool_uses),
         }
 
@@ -314,6 +318,40 @@ TURN_SELECTION = "selection"
 #: 검색이 정상적으로 끝난 경우에만 준다. 취소·인증 실패·할당량 초과·도구 위반
 #: 뒤에 모델을 한 번 더 부르는 것은, 사용자가 멈춘 실행을 이어 가거나 신뢰할 수
 #: 없는 출력을 한 번 더 받는 것이다.
+#: 이 사유로 끝난 레인은 **성공이 아니다.**
+#:
+#: 에이전트가 예외를 던지지 않고 run 객체를 돌려줬다는 사실과 "EPO 검색이
+#: 됐다"는 다른 말이다. 인증이 막혀도, OPS 가 질의를 거절해도, 채널 시간이
+#: 말라도 루프는 정상적으로 끝나고 객체는 만들어진다. 그 객체를 ``ok`` 로
+#: 적으면 화면과 매니페스트에서 "검색 0건"과 "검색 실패"가 같아 보인다.
+FAILED_TERMINATIONS = frozenset(
+    {
+        TERM_TIMEOUT,
+        TERM_THROTTLED,
+        TERM_QUOTA_EXCEEDED,
+        TERM_AUTH_FAILED,
+        TERM_PROVIDER_ERROR,
+        TERM_INVALID_RESPONSE_LIMIT,
+        TERM_UNAUTHORIZED_TOOL_USE,
+    }
+)
+
+
+def lane_status(run) -> str:
+    """레인 하나의 상태. ``ok`` / ``failed`` / ``cancelled``.
+
+    상태를 정하는 곳을 하나로 둔다. 호출부마다 판정하면 화면과 보고서가 같은
+    실행을 다르게 읽는다.
+    """
+    if run is None:
+        return "failed"
+    if getattr(run, "cancelled", False):
+        return "cancelled"
+    if getattr(run, "termination_reason", "") in FAILED_TERMINATIONS:
+        return "failed"
+    return "ok"
+
+
 SELECTION_TURN_TERMINATIONS = frozenset(
     {
         TERM_LLM_FINISHED,
@@ -1166,9 +1204,12 @@ class EpoSearchAgent:
             )
             return None
 
+        # 분류코드 형식 변환 기록. 모델이 "G08B 13/196" 을 적고 OPS 에는
+        # "G08B13/196" 이 나간다면, 두 값이 **모두** 기록에 남아야 한다.
+        normalized: list = []
         try:
             node = epo_actions.to_cql_node(action.query)
-            cql = epo_cql.build(node)
+            cql = epo_cql.build(node, normalized=normalized)
         except epo_cql.CqlError as exc:
             # 검색식이 잘못됐다. 호출은 나가지 않았으므로 예산은 쓰지 않지만,
             # 무한히 되돌려 주지 않도록 잘못된 응답으로 센다.
@@ -1190,7 +1231,11 @@ class EpoSearchAgent:
             )
         run.search_calls += 1
         record.search_calls += 1
-        run.queries.append({"round": record.round, "cql": cql})
+        run.queries.append({
+            "round": record.round,
+            "cql": cql,
+            "normalized_classifications": normalized,
+        })
         await self.emit(
             "epo_progress",
             {
@@ -1260,6 +1305,14 @@ class EpoSearchAgent:
     def _call_failure(self, exc: BaseException, record: RoundRecord):
         """OPS 호출 실패를 종료 사유로 옮긴다. 0건과 섞지 않는다."""
         record.errors.append(str(exc))
+        if isinstance(exc, epo_client.OpsError) and (
+            exc.status or exc.fault_code
+        ):
+            record.faults.append({
+                "status": exc.status,
+                "fault_code": exc.fault_code,
+                "fault_message": exc.fault_message,
+            })
         if isinstance(exc, epo_client.OpsCancelled):
             record.status = "cancelled"
             return TERM_CANCELLED, "사용자가 실행을 취소했습니다."

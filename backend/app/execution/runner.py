@@ -597,13 +597,25 @@ class JobRunner:
                 section_error = section_error or str(exc)
                 continue
             runs.append(run)
+            # 예외가 없었다는 이유만으로 ok 를 적지 않는다. 종료 사유가
+            # 무엇이었는지가 이 레인의 상태다.
             lanes.append(
                 search_manifest.epo_lane_record(
                     origin=origin,
                     run=run,
-                    status="cancelled" if run.cancelled else "ok",
+                    status=epo_agent.lane_status(run),
+                    error=(
+                        run.termination_detail
+                        if run.termination_reason in epo_agent.FAILED_TERMINATIONS
+                        else ""
+                    ),
                 )
             )
+            if run.termination_reason in epo_agent.FAILED_TERMINATIONS:
+                section_error = section_error or (
+                    run.termination_detail
+                    or f"EPO 검색이 {run.termination_reason} 로 끝났습니다."
+                )
 
         # 사용량은 실행 뒤에 반드시 저장한다. 여기서 빠뜨리면 나간 바이트가
         # 메모리에만 남는다.

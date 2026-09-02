@@ -107,7 +107,44 @@ def test_cql_builds_allowed_fields() -> None:
             epo_cql.Term(epo_cql.FIELD_IPC, "B25J 9/16"),
         ),
     )
-    assert epo_cql.build(query) == '(ta all "robot arm" and ipc = "B25J 9/16")'
+    # 분류코드는 OPS 전송 형식으로 나간다. 일반 검색어의 공백은 그대로다.
+    assert epo_cql.build(query) == '(ta all "robot arm" and ipc = "B25J9/16")'
+
+
+def test_cql_normalizes_classification_and_reports_both_values() -> None:
+    """사람 표기 ``G08B 13/196`` 은 OPS 에 ``G08B13/196`` 으로 나간다."""
+    normalized: list = []
+    cql = epo_cql.build(
+        epo_cql.Term(epo_cql.FIELD_IPC, "G08B 13/196"), normalized=normalized
+    )
+
+    assert cql == 'ipc = "G08B13/196"'
+    assert normalized == [
+        {"field": "ipc", "original": "G08B 13/196", "sent": "G08B13/196"}
+    ]
+
+
+def test_cql_normalizes_cpc_the_same_way() -> None:
+    normalized: list = []
+    cql = epo_cql.build(
+        epo_cql.Term(epo_cql.FIELD_CPC, "G06V 20/52"), normalized=normalized
+    )
+
+    assert cql == 'cpc = "G06V20/52"'
+    assert normalized[0]["original"] == "G06V 20/52"
+    assert normalized[0]["sent"] == "G06V20/52"
+
+
+def test_cql_keeps_spaces_in_free_text_fields() -> None:
+    """일반 검색어의 단어 사이 공백은 없애지 않는다. 없애면 다른 검색어가 된다."""
+    normalized: list = []
+    cql = epo_cql.build(
+        epo_cql.Term(epo_cql.FIELD_TITLE_ABSTRACT, "camera field of view"),
+        normalized=normalized,
+    )
+
+    assert cql == 'ta all "camera field of view"'
+    assert normalized == []
 
 
 def test_cql_rejects_unknown_field() -> None:
@@ -332,6 +369,72 @@ def test_retry_stops_at_two(store) -> None:
     with pytest.raises(epo_client.OpsUnavailable, match="재시도 2회"):
         backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
     # 토큰 1 + 최초 1 + 재시도 2 = 4. 무한 재시도가 아니다.
+    assert len(transport.requests) == 4
+
+
+def test_permanent_fault_500_is_not_retried(store) -> None:
+    """SERVER.DomainAccess 는 500 이라도 재시도하지 않는다.
+
+    상태 코드로만 나누면 질의가 잘못된 실행이 같은 질의를 세 번 보내면서
+    예산과 할당량을 세 배로 쓴다. 결과는 세 번 다 같다.
+    """
+    transport = FakeTransport(
+        token_response(),
+        ok(fx.SEARCH_DOMAIN_ACCESS_500, status=500),
+    )
+    backend = make_backend(transport, store)
+    backend._client.sleep = lambda _s: None
+    with pytest.raises(epo_client.OpsError) as caught:
+        backend.search_structured(epo_cql.Term(epo_cql.FIELD_IPC, "G08B 13/196"))
+
+    # 토큰 1 + 검색 1. 재시도가 없다.
+    assert len(transport.requests) == 2
+    assert caught.value.status == 500
+    assert caught.value.fault_code == "SERVER.DomainAccess"
+    assert "domain is not accessible" in caught.value.fault_message
+    # 사용량 기록에도 상태와 fault 가 남는다.
+    faults = backend._client.usage()["faults"]
+    assert faults == [
+        {
+            "kind": "search",
+            "status": 500,
+            "fault_code": "SERVER.DomainAccess",
+            "fault_message": (
+                "The requested domain is not accessible with the given query"
+            ),
+            "count": 1,
+        }
+    ]
+
+
+def test_transient_500_is_retried_within_the_limit(store) -> None:
+    """fault 문서가 아닌 500 은 정해진 횟수만큼만 재시도한다."""
+    transport = FakeTransport(
+        token_response(),
+        ok(fx.SEARCH_TRANSIENT_500, status=500),
+        ok(fx.SEARCH_TRANSIENT_500, status=500),
+        ok(fx.SEARCH_BIBLIO),
+    )
+    backend = make_backend(transport, store)
+    backend._client.sleep = lambda _s: None
+    response = backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
+
+    assert len(response.records) == 2
+    # 토큰 1 + 최초 1 + 재시도 2 = 4.
+    assert len(transport.requests) == 4
+
+
+def test_transient_500_stops_after_two_retries(store) -> None:
+    transport = FakeTransport(
+        token_response(),
+        ok(fx.SEARCH_TRANSIENT_500, status=500),
+        ok(fx.SEARCH_TRANSIENT_500, status=500),
+        ok(fx.SEARCH_TRANSIENT_500, status=500),
+    )
+    backend = make_backend(transport, store)
+    backend._client.sleep = lambda _s: None
+    with pytest.raises(epo_client.OpsUnavailable, match="재시도 2회"):
+        backend.search_structured(epo_cql.Term(epo_cql.FIELD_TITLE, "robot arm"))
     assert len(transport.requests) == 4
 
 
