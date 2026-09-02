@@ -710,7 +710,7 @@ def test_nameless_term_expansion_rows_are_dropped() -> None:
 
 def test_isolated_results_are_merged_as_union_and_preserve_baseline_group() -> None:
     base, _ = search_manifest.parse(
-        _block({"candidates": [_candidate(group="C")]}),
+        _block({"candidates": [_candidate(group="B")]}),
         _observed(),
         search_origin=search_manifest.ORIGIN_CLAIM_ONLY,
     )
@@ -741,7 +741,7 @@ def test_isolated_results_are_merged_as_union_and_preserve_baseline_group() -> N
         "US2020/9999999A1",
     ]
     duplicate = merged["candidates"][0]
-    assert duplicate["group"] == "C"
+    assert duplicate["group"] == "B"
     assert duplicate["search_origins"] == ["claim_only", "spec_assisted"]
     assert merged["candidates"][1]["search_origins"] == ["spec_assisted"]
 
@@ -915,15 +915,48 @@ def test_ungrouped_candidate_keeps_its_number_but_loses_the_group_letter() -> No
     assert candidate["origin_groups"] == {search_manifest.ORIGIN_CLAIM_ONLY: None}
 
 
-def test_group_eligible_candidate_still_falls_back_to_c() -> None:
-    """자격이 있는 후보의 알 수 없는 글자는 예전대로 C 로 떨어진다."""
+def test_unknown_group_letter_has_no_fallback() -> None:
+    """알 수 없는 글자는 그룹이 되지 않는다. 예전에는 조용히 C 가 됐다.
+
+    기본값이 C 였기 때문에 C 는 "부분 대응"이 아니라 "판단 실패"의 저장고이기도
+    했다. 이제 모르면 그룹이 없다.
+    """
     reported, _notes = search_manifest.parse(
         _block({"candidates": [_candidate(group="Z")]}),
         _observed(),
     )
     candidate = reported["candidates"][0]
     assert candidate["group_eligible"] is True
-    assert candidate["group"] == "C"
+    assert candidate["group"] is None
+    assert candidate["classification_outcome"] == search_manifest.OUTCOME_UNVERIFIED
+
+
+def test_a_new_run_never_produces_group_c() -> None:
+    """새 실행은 C 를 만들지 않는다. 모델이 C 라고 적어도 마찬가지다."""
+    reported, _notes = search_manifest.parse(
+        _block({"candidates": [_candidate(group="C")]}),
+        _observed(),
+    )
+    candidate = reported["candidates"][0]
+    assert candidate["group"] is None
+    assert candidate["provisional_group"] is None
+    assert candidate["classification_outcome"] == search_manifest.OUTCOME_UNVERIFIED
+
+
+def test_past_manifests_with_c_are_still_readable() -> None:
+    """과거 기록의 C 는 지우지도 다시 분류하지도 않는다. 과거 분류로 표시한다."""
+    view = search_manifest.classification_view(
+        {
+            "group": "C",
+            "group_eligible": True,
+            "page_supported_rows": 2,
+            "identifier_url_matched": True,
+            "page_fetch_succeeded": True,
+        },
+        manifest_version=10,
+    )
+    assert view["group"] == "C"
+    assert view["outcome"] == search_manifest.OUTCOME_LEGACY_C
 
 
 def test_merged_candidates_never_carry_a_group_without_the_eligibility() -> None:
@@ -1068,6 +1101,7 @@ def test_legacy_group_without_saved_gate_is_only_provisional() -> None:
         "group": None,
         "provisional_group": "A",
         "basis": search_manifest.CLASSIFICATION_LEGACY,
+        "outcome": search_manifest.OUTCOME_UNVERIFIED,
     }
 
 

@@ -31,12 +31,13 @@ function candidate(
   };
 }
 
-describe("safe A/B/C interpretation", () => {
+describe("safe A/B interpretation", () => {
   it("treats a legacy group without saved evidence as provisional", () => {
     expect(classificationView(candidate())).toEqual({
       group: null,
       provisionalGroup: "A",
       basis: "legacy_unknown",
+      outcome: "unverified",
     });
   });
 
@@ -47,10 +48,11 @@ describe("safe A/B/C interpretation", () => {
       group: null,
       provisionalGroup: "B",
       basis: "search_result",
+      outcome: "unverified",
     });
   });
 
-  it("keeps a page-supported group formal", () => {
+  it("keeps a past C readable and marks it as a legacy classification", () => {
     expect(
       classificationView(
         candidate({
@@ -65,6 +67,37 @@ describe("safe A/B/C interpretation", () => {
       group: "C",
       provisionalGroup: null,
       basis: "page_observed",
+      outcome: "legacy_c",
     });
+  });
+
+  it("keeps a page-supported A/B group formal", () => {
+    expect(
+      classificationView(
+        candidate({
+          group: "B",
+          group_eligible: true,
+          page_fetch_succeeded: true,
+          identifier_url_matched: true,
+          page_supported_rows: 1,
+        }),
+      ),
+    ).toEqual({
+      group: "B",
+      provisionalGroup: null,
+      basis: "page_observed",
+      outcome: "",
+    });
+  });
+
+  it("separates a verified below-threshold candidate from an unverified one", () => {
+    expect(
+      classificationView(
+        candidate({ group: null, classification_outcome: "below_threshold" }),
+      ).outcome,
+    ).toBe("below_threshold");
+    expect(classificationView(candidate({ group: null })).outcome).toBe(
+      "unverified",
+    );
   });
 });

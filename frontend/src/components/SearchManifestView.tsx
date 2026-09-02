@@ -159,12 +159,31 @@ const SUPPORT_LABEL: Record<string, string> = {
   none: "근거 없음",
 };
 
+/** 새 실행이 만드는 그룹. C 는 과거 기록에서만 온다. */
+const WRITE_GROUPS = ["A", "B"] as const;
+/** 읽을 수 있는 그룹. 과거 매니페스트의 C 를 계속 표시한다. */
+const READ_GROUPS = ["A", "B", "C"] as const;
+
 type SearchGroup = "A" | "B" | "C";
+type ClassificationOutcome = "" | "below_threshold" | "unverified" | "legacy_c";
 type ClassificationView = {
   group: SearchGroup | null;
   provisionalGroup: SearchGroup | null;
   basis: string;
+  outcome: ClassificationOutcome;
 };
+
+/** 정식 A/B 가 아니라면 왜인가. 저장값을 고치지 않고 읽기만 한다. */
+function outcomeFor(
+  item: SearchCandidate,
+  group: string | null,
+  fallback: ClassificationOutcome,
+): ClassificationOutcome {
+  if (group === "C") return "legacy_c";
+  const stored = item.classification_outcome;
+  if (stored === "below_threshold" || stored === "unverified") return stored;
+  return fallback;
+}
 
 /** 과거 group을 새 기준의 정식 분류로 자동 승격하지 않는 읽기 규칙. */
 export function classificationView(item: SearchCandidate): ClassificationView {
@@ -200,7 +219,12 @@ export function classificationView(item: SearchCandidate): ClassificationView {
           : officialSaved || item.evidence_status === "official_record_verified"
             ? "official_record"
             : "page_observed";
-    return { group: rawGroup, provisionalGroup: null, basis };
+    return {
+      group: rawGroup,
+      provisionalGroup: null,
+      basis,
+      outcome: outcomeFor(item, rawGroup, ""),
+    };
   }
   const proposed = rawProvisional || rawGroup;
   if (proposed) {
@@ -211,9 +235,19 @@ export function classificationView(item: SearchCandidate): ClassificationView {
         : item.group_eligible === false || rawProvisional
           ? "search_result"
           : "legacy_unknown";
-    return { group: null, provisionalGroup: proposed, basis };
+    return {
+      group: null,
+      provisionalGroup: proposed,
+      basis,
+      outcome: outcomeFor(item, proposed, "unverified"),
+    };
   }
-  return { group: null, provisionalGroup: null, basis: "none" };
+  return {
+    group: null,
+    provisionalGroup: null,
+    basis: "none",
+    outcome: outcomeFor(item, null, "unverified"),
+  };
 }
 
 const SCOPE_LABEL: Record<string, string> = {
@@ -536,13 +570,23 @@ export default function SearchManifestView({ job }: { job: Job }) {
   // group_eligible 이 없는 옛 기록은 정식으로 간주하지 않는다. 저장된 검증
   // 흔적이 없으면 잠정 등급으로 보이되 후보 자체는 숨기지 않는다.
   const grouped = classified.filter(({ classification }) => classification.group);
+  // 공식 검증했는데 A/B 기준에 못 미친 후보. 아직 검증하지 못한 후보와 다른
+  // 사실이므로 같은 칸에 두지 않는다.
+  const belowThreshold = classified.filter(
+    ({ classification }) =>
+      !classification.group && classification.outcome === "below_threshold",
+  );
+  const belowIndexes = new Set(belowThreshold.map(({ item }) => item.index));
   const provisional = classified.filter(
-    ({ classification }) => classification.provisionalGroup,
+    ({ item, classification }) =>
+      classification.provisionalGroup && !belowIndexes.has(item.index),
   );
   const isolated = classified
     .filter(
-      ({ classification }) =>
-        !classification.group && !classification.provisionalGroup,
+      ({ item, classification }) =>
+        !classification.group &&
+        !classification.provisionalGroup &&
+        !belowIndexes.has(item.index),
     )
     .map(({ item }) => item);
   const hasOriginData = candidates.some(
@@ -853,7 +897,7 @@ export default function SearchManifestView({ job }: { job: Job }) {
               후보입니다. 문헌번호와 주소는 재검토 단서로만 사용하십시오.
             </p>
           )}
-          {(["A", "B", "C"] as const).map((group) => {
+          {READ_GROUPS.map((group) => {
             const formalRows = grouped.filter(
               ({ classification }) => classification.group === group,
             );
@@ -863,7 +907,12 @@ export default function SearchManifestView({ job }: { job: Job }) {
             if (formalRows.length === 0 && provisionalRows.length === 0) return null;
             return (
               <div key={group}>
-                <h4>{groupTitle(manifest, group)}</h4>
+                <h4>
+                  {groupTitle(manifest, group)}
+                  {!WRITE_GROUPS.includes(group as "A" | "B") && (
+                    <span className="pill neutral"> 과거 분류</span>
+                  )}
+                </h4>
                 {formalRows.length > 0 && (
                   <>
                     <h5>정식 분류</h5>
@@ -935,9 +984,36 @@ export default function SearchManifestView({ job }: { job: Job }) {
         </div>
       )}
 
+      {belowThreshold.length > 0 && (
+        <div className="search-groups">
+          <h4>공식 검증했으나 A/B 기준 미달</h4>
+          <p className="faint">
+            공식 문헌을 확보해 대조했지만 A 에도 B 에도 해당하지 않는다고 판단한
+            후보입니다. 상세 구성 대응표는 만들지 않고 사유만 남깁니다.
+          </p>
+          <ul className="search-candidate-list">
+            {belowThreshold.map(({ item }) => (
+              <li className="search-candidate" key={item.index}>
+                <div className="search-candidate-head">
+                  <span className="mono-text">
+                    {item.doc_number || item.doi || "문헌번호 확인 필요"}
+                  </span>
+                  <span className="pill neutral">A/B 기준 미달</span>
+                </div>
+                {(item.verification?.detail || item.note) && (
+                  <p className="faint">
+                    {item.verification?.detail || item.note}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {isolated.length > 0 && (
         <div className="search-groups">
-          <h4>미확인 검색 단서</h4>
+          <h4>미검증 참고 후보</h4>
           <p className="faint">
             아직 그룹 분류와 구성 대응표에 들어가지 못한 후보입니다. 웹 후보는
             문헌 식별이 확인되지 않았거나 페이지 관측에 근거한 대응이 없어서이고,

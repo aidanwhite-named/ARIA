@@ -44,7 +44,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 10
+MANIFEST_VERSION = 11
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -109,7 +109,38 @@ MODEL_REPORTED_EVIDENCE_STATUS = (EVIDENCE_CANDIDATE, EVIDENCE_REVIEWED)
 ARIA_PRODUCED_EVIDENCE_STATUS = (EVIDENCE_OFFICIAL,)
 EVIDENCE_STATUS = MODEL_REPORTED_EVIDENCE_STATUS + ARIA_PRODUCED_EVIDENCE_STATUS
 
+#: **새 실행이 만들 수 있는** 그룹. C 는 없다.
+#:
+#: C("전체 구조는 유사하지만 핵심 대응은 부분적")는 공식 검증 전의 스니펫
+#: 판단에서 가장 불안정한 칸이었다. 정식 그룹에서 빼되 그 자리의 후보를 버리지는
+#: 않는다 — 왜 A/B 가 아닌지를 classification_outcome 에 적어 남긴다.
+WRITE_GROUPS = ("A", "B")
+
+#: **읽을 수 있는** 그룹. 과거 매니페스트의 C 를 그대로 표시하기 위해 남긴다.
+#: 새 값은 여기서 만들지 않는다 — 쓰는 쪽은 언제나 WRITE_GROUPS 다.
 GROUPS = ("A", "B", "C")
+
+#: 정식 그룹에 들지 못한 후보가 **왜** 그런가. group 이 차 있으면 빈 값이다.
+#:
+#: group=null 하나로는 "공식 검증했는데 기준에 못 미쳤다"와 "검증 대상에 들지
+#: 못했다"가 같아 보인다. 사용자에게는 전혀 다른 사실이다 — 앞은 결론이고
+#: 뒤는 아직 보지 않은 것이다. 후보를 조용히 지우지 않으려면 이 칸이 필요하다.
+OUTCOME_PROMOTED = ""
+OUTCOME_BELOW_THRESHOLD = "below_threshold"
+OUTCOME_UNVERIFIED = "unverified"
+#: 과거 실행의 C. 새 실행은 만들지 않는다.
+OUTCOME_LEGACY_C = "legacy_c"
+CLASSIFICATION_OUTCOMES = (
+    OUTCOME_PROMOTED,
+    OUTCOME_BELOW_THRESHOLD,
+    OUTCOME_UNVERIFIED,
+    OUTCOME_LEGACY_C,
+)
+OUTCOME_LABELS = {
+    OUTCOME_BELOW_THRESHOLD: "공식 검증했으나 A/B 기준 미달",
+    OUTCOME_UNVERIFIED: "미검증 참고 후보",
+    OUTCOME_LEGACY_C: "과거 C 분류 (A/B 기준 미달에 해당)",
+}
 
 # A/B/C 값과 그 값을 뒷받침하는 근거는 별개의 축이다. ``group`` 하나만
 # 저장하면 페이지 본문을 본 분류와 공식 문헌을 대조한 분류가 화면에서 같은
@@ -161,11 +192,19 @@ VERIFICATION_STATUSES = (
 # 그래서 정의를 여기 한 곳에 두고 매니페스트에 실어 보낸다. 렌더러는 자기 표를
 # 갖지 않고 기록에 적힌 정의를 인쇄한다. 정의가 없는 옛 매니페스트만 렌더러의
 # fallback 을 쓴다.
-GROUP_SCHEMA_VERSION = 1
+GROUP_SCHEMA_VERSION = 2
 GROUP_DEFINITIONS: dict[str, str] = {
     "A": "전체 구조와 핵심 특징이 모두 강하게 유사",
     "B": "전체 구조는 다르지만 핵심 특징 또는 핵심 관계가 강하게 유사",
-    "C": "전체 구조는 유사하지만 핵심 대응은 부분적",
+}
+
+#: 과거 매니페스트를 **읽을 때만** 쓰는 정의. C 를 포함한다.
+#:
+#: 옛 기록에서 C 를 지우거나 다시 분류하지 않는다. 그 실행이 실제로 내린
+#: 판단이고, 나중에 바뀐 기준으로 덮어쓰면 그때 무엇을 봤는지 알 수 없게 된다.
+LEGACY_GROUP_DEFINITIONS: dict[str, str] = {
+    **GROUP_DEFINITIONS,
+    "C": "전체 구조는 유사하지만 핵심 대응은 부분적 (과거 분류)",
 }
 
 DOC_TYPES = ("patent", "paper", "other")
@@ -412,7 +451,12 @@ def classification_view(candidate: dict, manifest_version: int | None = None) ->
             basis = CLASSIFICATION_OFFICIAL
         else:
             basis = CLASSIFICATION_PAGE
-        return {"group": raw_group, "provisional_group": None, "basis": basis}
+        return {
+            "group": raw_group,
+            "provisional_group": None,
+            "basis": basis,
+            "outcome": _outcome_for(candidate, raw_group, OUTCOME_PROMOTED),
+        }
 
     proposed = raw_provisional or raw_group
     if proposed:
@@ -425,13 +469,33 @@ def classification_view(candidate: dict, manifest_version: int | None = None) ->
             basis = CLASSIFICATION_SEARCH
         else:
             basis = CLASSIFICATION_LEGACY
-        return {"group": None, "provisional_group": proposed, "basis": basis}
+        return {
+            "group": None,
+            "provisional_group": proposed,
+            "basis": basis,
+            "outcome": _outcome_for(candidate, proposed, OUTCOME_UNVERIFIED),
+        }
 
     return {
         "group": None,
         "provisional_group": None,
         "basis": CLASSIFICATION_NONE,
+        "outcome": _outcome_for(candidate, None, OUTCOME_UNVERIFIED),
     }
+
+
+def _outcome_for(candidate: dict, group: str | None, fallback: str) -> str:
+    """이 후보가 정식 A/B 가 아니라면 왜인가.
+
+    과거 매니페스트의 C 는 다시 분류하지 않고 **과거 분류**로 표시한다. 저장된
+    값을 고치지 않으므로 옛 기록을 열어도 그때의 판단이 그대로 보인다.
+    """
+    if group == "C":
+        return OUTCOME_LEGACY_C
+    stored = candidate.get("classification_outcome")
+    if stored in CLASSIFICATION_OUTCOMES and stored != OUTCOME_PROMOTED:
+        return stored
+    return fallback
 
 
 def normalize_url(raw) -> str:
@@ -923,9 +987,13 @@ def _normalize_candidate(
             )
 
     # 그룹 값은 모델이 정하지 않는다. group_eligible 이 거짓이면 무조건 null 이다.
-    # A/B/C 중 아무 글자나 남겨 두면, 격리 영역에 찍히는 후보가 다운스트림에서는
-    # 분류된 후보처럼 읽힌다 — 채널 대조와 프런트 집계가 그 값을 그대로 쓴다.
-    group = _one_of(entry.get("group"), GROUPS, "C") if group_eligible else None
+    # 아무 글자나 남겨 두면, 격리 영역에 찍히는 후보가 다운스트림에서는 분류된
+    # 후보처럼 읽힌다 — 채널 대조와 프런트 집계가 그 값을 그대로 쓴다.
+    #
+    # 기본값이 "C" 였다. 모델이 알 수 없는 값을 적으면 조용히 C 가 됐다는 뜻이고,
+    # 그래서 C 는 "부분 대응"이 아니라 "판단 실패"의 저장고이기도 했다. 이제
+    # 기본값은 없다 — 모르면 그룹이 없는 것이다.
+    group = _one_of(entry.get("group"), WRITE_GROUPS, None) if group_eligible else None
 
     # 검증되지 않은 분류는 **버리지 않고 다른 칸에 둔다.** 예전에는 group 에
     # null 을 넣는 것으로 끝냈는데, 그러면 모델이 실제로 내린 판단이 기록에서
@@ -936,7 +1004,7 @@ def _normalize_candidate(
     # 두 칸은 **동시에 차지 않는다.** group 이 차면 provisional_group 은 null
     # 이다. 둘 다 값이 있으면 화면과 집계가 어느 쪽을 이 후보의 분류로 읽어야
     # 하는지 알 수 없고, 결국 둘 중 하나가 조용히 승격된다.
-    claimed_group = entry.get("group") if entry.get("group") in GROUPS else None
+    claimed_group = entry.get("group") if entry.get("group") in WRITE_GROUPS else None
     provisional_group = None if group_eligible else claimed_group
     classification_basis = (
         CLASSIFICATION_ORIGINAL
@@ -951,7 +1019,12 @@ def _normalize_candidate(
     return {
         "index": index,
         "group": group,
-        # 검증되지 않은 잠정 A/B/C. group 이 null 인 후보에만 값이 있다.
+        # 왜 정식 그룹이 아닌가. 이 단계에서는 아직 공식 검증을 하지 않았으므로
+        # 승격되지 않은 후보는 전부 '미검증'이다. 검증 단계가 이 값을 갱신한다.
+        "classification_outcome": (
+            OUTCOME_PROMOTED if group else OUTCOME_UNVERIFIED
+        ),
+        # 검증되지 않은 잠정 분류. group 이 null 인 후보에만 값이 있다.
         "provisional_group": provisional_group,
         # 모델이 고르는 값이 아니라 위의 ARIA 게이트 결과로 계산한다.
         "classification_basis": classification_basis,
@@ -2420,6 +2493,7 @@ def build(
         # 적이 있다(GROUP_DEFINITIONS 주석 참조).
         "group_schema_version": GROUP_SCHEMA_VERSION,
         "group_definitions": dict(GROUP_DEFINITIONS),
+        "classification_outcome_labels": dict(OUTCOME_LABELS),
         "channels_used": sorted(channels_used),
         "input": {
             "claim_text": claim_text,

@@ -205,12 +205,17 @@ def test_classification_failure_does_not_hide_fetch_failures() -> None:
     )
 
 
-def test_missing_second_stage_group_is_never_invented_as_c() -> None:
+def test_no_group_means_below_the_ab_threshold_not_a_failure() -> None:
+    """group 을 비운 것은 실패가 아니라 결론이다. 후보는 남고 표만 안 만든다."""
     reported = {"candidates": [_candidate(1, "EP1234567A1", "B")]}
     key, bundle = _bundle("EP1234567A1", verified=True)
     payload = {
         "candidates": [
-            {"doc_number": "EP1234567A1", "mapping": [{"support_text": "x"}]}
+            {
+                "doc_number": "EP1234567A1",
+                "note": "초록에 유사 서술이 있으나 핵심 관계가 다릅니다.",
+                "mapping": [{"support_text": "x"}],
+            }
         ]
     }
 
@@ -220,8 +225,16 @@ def test_missing_second_stage_group_is_never_invented_as_c() -> None:
 
     candidate = updated["candidates"][0]
     assert candidate["group"] is None
-    assert candidate["provisional_group"] == "B"
-    assert candidate["verification"]["reason_code"] == "invalid_or_missing_group"
+    assert candidate["classification_outcome"] == (
+        search_manifest.OUTCOME_BELOW_THRESHOLD
+    )
+    # 긴 대응표를 만들지 않는다. 짧은 사유만 남는다.
+    assert candidate["mapping"] == []
+    assert "핵심 관계가 다릅니다" in candidate["note"]
+    assert candidate["verification"]["reason_code"] == "below_ab_threshold"
+    assert candidate["verification"]["status"] == (
+        search_manifest.VERIFY_RECORD_FETCHED
+    )
 
 
 # --- 충돌 해소 규칙 -------------------------------------------------------
@@ -248,7 +261,7 @@ def test_official_classification_overrides_the_page_group(monkeypatch) -> None:
         "candidates": [
             {
                 "doc_number": "EP1234567A1",
-                "group": "C",
+                "group": "B",
                 "mapping": [{"feature": "x", "support_text": "y"}],
             }
         ]
@@ -260,7 +273,7 @@ def test_official_classification_overrides_the_page_group(monkeypatch) -> None:
 
     candidate = updated["candidates"][0]
     # 규칙 1·5: 공식 분류가 primary 다.
-    assert candidate["group"] == "C"
+    assert candidate["group"] == "B"
     assert candidate["provisional_group"] is None
     assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_OFFICIAL
     # 규칙 3: 덮인 페이지 분류와 대응표는 보존된다.
@@ -344,7 +357,7 @@ def test_unsupported_official_rows_do_not_demote_a_page_backed_group(
         "candidates": [
             {
                 "doc_number": "EP1234567A1",
-                "group": "C",
+                "group": "B",
                 "mapping": [{"feature": "x", "support_text": "초록에 없는 문장"}],
             }
         ]
@@ -358,7 +371,7 @@ def test_unsupported_official_rows_do_not_demote_a_page_backed_group(
     # 초록·청구항에서 못 찾았다고 페이지 관측 분류를 내리지 않는다.
     assert candidate["group"] == "A"
     assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_PAGE
-    # 검증되지 않은 2차 제안(C)이 정식 칸도 잠정 칸도 차지하지 못한다.
+    # 검증되지 않은 2차 제안이 정식 칸도 잠정 칸도 차지하지 못한다.
     assert candidate["provisional_group"] is None
     assert candidate["verification"]["status"] == (
         search_manifest.VERIFY_EVIDENCE_MISMATCH

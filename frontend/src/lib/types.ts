@@ -311,8 +311,16 @@ export interface SearchMappingRow {
 
 export interface SearchCandidate {
   index: number;
-  /** 그룹 자격을 얻지 못한 후보(미확인 검색 단서)는 null 이다. */
+  /**
+   * 정식 그룹. 새 실행은 A/B 만 만들고, C 는 과거 매니페스트에서만 온다.
+   * 그룹 자격을 얻지 못한 후보(참고 후보)는 null 이다.
+   */
   group: "A" | "B" | "C" | null;
+  /**
+   * 왜 정식 A/B 가 아닌가. group 이 차 있으면 빈 문자열이다.
+   * below_threshold 는 공식 검증한 결론이고, unverified 는 아직 안 본 것이다.
+   */
+  classification_outcome?: "" | "below_threshold" | "unverified" | "legacy_c";
   /** 검색 결과 기반 AI 제안. 정식 group 과 동시에 값이 있으면 안 된다. */
   provisional_group?: "A" | "B" | "C" | null;
   /** ARIA가 저장된 관측/공식 근거로 계산한 분류 근거 등급. */

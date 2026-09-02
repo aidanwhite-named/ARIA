@@ -35,6 +35,7 @@ from .search_manifest import (
     EVIDENCE_OFFICIAL,
     EVIDENCE_REVIEWED,
     GROUP_DEFINITIONS,
+    LEGACY_GROUP_DEFINITIONS,
     GROUPS,
     PROV_OFFICIAL_RESPONSE,
     PROV_RAW,
@@ -72,8 +73,13 @@ def _group_titles(manifest: dict) -> dict[str, str]:
     """
     stored = manifest.get("group_definitions")
     definitions = stored if isinstance(stored, dict) and stored else GROUP_DEFINITIONS
+    # C 는 새 실행이 만들지 않지만 과거 기록에는 남아 있다. fallback 은 그 정의를
+    # 아는 표를 써야 한다 — 없으면 옛 보고서를 여는 순간 KeyError 다.
     return {
-        group: f"{group}. {definitions.get(group) or GROUP_DEFINITIONS[group]}"
+        group: (
+            f"{group}. "
+            + (definitions.get(group) or LEGACY_GROUP_DEFINITIONS[group])
+        )
         for group in GROUPS
     }
 
@@ -505,6 +511,32 @@ def _expansion_section(manifest: dict, reported: dict) -> list[str]:
         "ARIA의 합집합 병합 단계에서 금지됩니다.",
         "",
     ]
+    return lines
+
+
+def _below_threshold_section(items: list[dict]) -> list[str]:
+    """공식 검증했으나 A/B 기준에 못 미친 후보.
+
+    긴 구성 대응표를 만들지 않는다. 중요하지 않은 후보에 60행짜리 표를 붙이는
+    것이 이 보고서를 읽기 어렵게 만든 주된 이유였다. 대신 **왜 아닌지**를 한
+    줄로 남긴다 — 후보를 조용히 지우지 않는 것이 목적이다.
+    """
+    if not items:
+        return []
+    lines = [
+        "## 공식 검증했으나 A/B 기준 미달",
+        "",
+        "공식 문헌을 확보해 대조했지만 A 에도 B 에도 해당하지 않는다고 판단한 "
+        "후보입니다. 상세 구성 대응표는 만들지 않고 사유만 남깁니다.",
+        "",
+    ]
+    for item in items:
+        identity = item.get("doc_number") or item.get("doi") or "문헌번호 확인 필요"
+        reason = (item.get("verification") or {}).get("detail") or item.get("note")
+        lines.append(f"- `{identity}`")
+        if reason:
+            lines.append(f"  - {_cell(str(reason))}")
+    lines.append("")
     return lines
 
 
@@ -972,10 +1004,24 @@ def render(manifest: dict) -> str:
     provisional = [
         (item, view) for item, view in classified if view["provisional_group"]
     ]
+    # 공식 검증했는데 A/B 기준에 못 미친 후보. 아직 검증하지 못한 후보와 다른
+    # 사실이므로 같은 칸에 두지 않는다 — 앞은 결론이고 뒤는 아직 보지 않은 것이다.
+    below_threshold = [
+        item
+        for item, view in classified
+        if not view["group"]
+        and view.get("outcome") == search_manifest.OUTCOME_BELOW_THRESHOLD
+    ]
+    below_ids = {id(item) for item in below_threshold}
+    provisional = [
+        (item, view) for item, view in provisional if id(item) not in below_ids
+    ]
     isolated = [
         item
         for item, view in classified
-        if not view["group"] and not view["provisional_group"]
+        if not view["group"]
+        and not view["provisional_group"]
+        and id(item) not in below_ids
     ]
     official = sum(
         1 for _item, view in classified if view["basis"] == CLASSIFICATION_OFFICIAL
@@ -1179,7 +1225,10 @@ def render(manifest: dict) -> str:
         ]
         if not formal_rows and not provisional_rows:
             continue
-        lines += [f"## {titles[group]}", ""]
+        heading = titles[group]
+        if group not in search_manifest.WRITE_GROUPS:
+            heading += " — 과거 분류 (새 실행은 만들지 않습니다)"
+        lines += [f"## {heading}", ""]
         if formal_rows:
             lines += ["### 정식 분류", ""]
             for item, view in formal_rows:
@@ -1187,6 +1236,7 @@ def render(manifest: dict) -> str:
                 lines += _candidate_section(item)
         lines += _provisional_candidates(provisional_rows)
 
+    lines += _below_threshold_section(below_threshold)
     lines += _isolated_section(isolated)
     # 후보 분류를 모두 읽은 뒤에만 채널 감사 표가 나온다. 표 전체는 기본으로
     # 접혀 있어 20~30건의 EPO 차집합이 핵심 A/B/C 결과를 밀어내지 않는다.

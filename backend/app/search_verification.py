@@ -91,8 +91,12 @@ LITERATURE_CONSTITUENTS = ("abstract", "biblio")
 MAX_FIELD_CHARS = 12000
 # 후보 하나에 실어 보낼 필드 수 상한.
 MAX_FIELDS_PER_CANDIDATE = 8
-# 2차 턴이 돌려줄 수 있는 대응표 행 수 상한. 1차와 같은 값을 쓴다.
-MAX_MAPPING_ROWS = 60
+# 2차 턴이 돌려줄 수 있는 대응표 행 수 상한.
+#
+# 60에서 10으로 줄였다. 60행짜리 대응표는 읽는 사람이 없고, 상한이 크면 모델은
+# 근거가 약한 행까지 채워 넣는다 — 그 행은 어차피 아티팩트 대조에서 떨어진다.
+# 상세 대응표는 A/B 로 승격된 문헌에만 만든다.
+MAX_MAPPING_ROWS = 10
 
 # 프롬프트에 실을 필드 이름의 한국어 라벨. 없는 이름은 그대로 쓴다.
 _FIELD_LABELS = {
@@ -1199,7 +1203,8 @@ def classification_system_prompt() -> str:
     도구도 필요하지 않고, 모델 기억이나 1차 검색 결과를 섞으면 안 된다.
     """
     definitions = "\n".join(
-        f'- {group}: {search_manifest.GROUP_DEFINITIONS[group]}' for group in GROUPS
+        f'- {group}: {search_manifest.GROUP_DEFINITIONS[group]}'
+        for group in search_manifest.WRITE_GROUPS
     )
     return f"""당신은 ARIA 유사문헌 검색의 공식 근거 분류 단계입니다.
 
@@ -1214,6 +1219,14 @@ def classification_system_prompt() -> str:
 [그룹 정의]
 {definitions}
 
+정식 그룹은 A 와 B 뿐입니다. 둘 다 아니면 group 을 null 로 두십시오.
+
+[A/B 기준에 못 미치는 문헌]
+- group 을 null 로 두고 mapping 은 **빈 배열**로 두십시오.
+- note 에 왜 A/B 가 아닌지 한두 문장으로 적으십시오.
+- 긴 구성 대응표를 만들지 마십시오. 중요하지 않은 후보에 긴 표를 만드는 것이
+  이 단계에서 가장 흔한 낭비입니다.
+
 [대응표 규칙]
 - feature는 <CLAIM_TEXT>의 기술적 특징 또는 관계를 그대로 옮기십시오.
 - support_text는 [field:...] 아래에서 실제로 읽은 연속된 문장을 그대로
@@ -1224,6 +1237,8 @@ def classification_system_prompt() -> str:
 - counterpart·similar·different는 support_text가 말하는 범위를 넘지 마십시오.
 - 근거 문장을 찾지 못한 구성은 대응표에 지어 넣지 마십시오.
 - 제공된 문헌마다 한 번씩만 작성하고, 제공되지 않은 문헌을 추가하지 마십시오.
+- mapping 은 최대 {MAX_MAPPING_ROWS}행입니다. 핵심 구성 또는 핵심 관계만
+  적으십시오. 넘게 적으면 뒤에서부터 잘립니다.
 
 [출력]
 설명문 없이 아래 블록을 정확히 한 번 출력하십시오.
@@ -1233,7 +1248,7 @@ def classification_system_prompt() -> str:
   "candidates": [
     {{
       "doc_number": "제공된 문헌번호",
-      "group": "A 또는 B 또는 C",
+      "group": "A 또는 B, 둘 다 아니면 null",
       "note": "공식 근거에서 확인한 주요 유사점과 한계",
       "mapping": [
         {{
@@ -1409,7 +1424,7 @@ def apply_classification(
 
         entry = _entry_for(candidate, by_key)
         claimed = entry.get("group") if isinstance(entry, dict) else None
-        claimed = claimed if claimed in GROUPS else None
+        claimed = claimed if claimed in search_manifest.WRITE_GROUPS else None
 
         if bundle is None or not bundle.verified:
             _keep_provisional(candidate, claimed)
@@ -1425,14 +1440,35 @@ def apply_classification(
             }
             continue
         if claimed is None:
+            # A/B 기준 미달. 이것은 실패가 아니라 **결론**이다. 공식 문헌을
+            # 확보하고 그 근거로 A 도 B 도 아니라고 판단한 것이므로, 아직
+            # 검증하지 못한 후보와 같은 칸에 두면 안 된다.
+            #
+            # 후보를 지우지 않는다. 긴 대응표만 만들지 않고 짧은 사유를 남긴다.
+            note = _text(entry.get("note"), 500)
             _keep_provisional(candidate, None)
+            if not candidate.get("group"):
+                candidate["classification_outcome"] = (
+                    search_manifest.OUTCOME_BELOW_THRESHOLD
+                )
+                candidate["mapping"] = []
+            if note:
+                candidate["note"] = note
             candidate["verification"] = {
-                "status": search_manifest.VERIFY_CLASSIFICATION_FAILED,
-                "reason_code": "invalid_or_missing_group",
-                "detail": "2차 분류 출력에 유효한 A/B/C 등급이 없습니다.",
+                "status": search_manifest.VERIFY_RECORD_FETCHED,
+                "reason_code": "below_ab_threshold",
+                "detail": (
+                    "공식 문헌을 확보해 대조했지만 A/B 기준에 미치지 "
+                    "못했습니다." + (f" {note}" if note else "")
+                ),
                 "backend_id": bundle.backend_id,
                 "artifact_ids": bundle.artifact_ids,
             }
+            notes.append(
+                f"후보 {int(candidate.get('index') or 0)}: 공식 문헌 "
+                f"{bundle.doc_key} 을(를) 확보했지만 A/B 기준에 미치지 못해 "
+                "정식 그룹으로 승격하지 않았습니다."
+            )
             continue
 
         index = int(candidate.get("index") or 0)
@@ -1479,6 +1515,7 @@ def apply_classification(
                 )
         candidate["group"] = claimed
         candidate["provisional_group"] = None
+        candidate["classification_outcome"] = search_manifest.OUTCOME_PROMOTED
         candidate["classification_basis"] = search_manifest.CLASSIFICATION_OFFICIAL
         candidate["group_eligible"] = True
         candidate["quarantined"] = False
