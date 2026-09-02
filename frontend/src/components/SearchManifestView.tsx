@@ -86,6 +86,12 @@ const VERIFICATION_LABEL: Record<string, string> = {
   promoted: "공식 근거 분류 완료",
 };
 
+const VERIFICATION_BUCKET_LABEL: Record<string, string> = {
+  page_ab: "페이지 A/B 공식 근거 보강",
+  epo_shortlist: "EPO 검색 후보 검증",
+  other: "남은 자리 보충",
+};
+
 function verificationDetail(value?: string): string {
   const text = (value ?? "").trim();
   if (!/<fault|<\?xml/i.test(text)) {
@@ -297,6 +303,17 @@ function CandidateRow({
         <span className="pill ok">
           {CLASSIFICATION_LABEL[classification.basis] ?? classification.basis}
         </span>
+        {/* 공식 응답을 받아 봤지만 A/B 근거를 더 찾지 못한 후보. 분류는
+            내리지 않되 그 사실을 숨기지도 않는다 — OPS 는 초록·청구항만
+            주므로 명세서에만 있는 구성은 여기서 대조될 수 없다. */}
+        {item.official_ab_confirmation === "not_confirmed" && (
+          <span
+            className="pill warn"
+            title={item.official_ab_confirmation_detail || undefined}
+          >
+            공식 추가 확인 못함
+          </span>
+        )}
         {discovered.map((origin) => (
           <span
             key={`discovery-${origin}`}
@@ -849,7 +866,14 @@ export default function SearchManifestView({ job }: { job: Job }) {
               <ol className="search-query-list">
                 {selectionOrder.map((row) => (
                   <li key={`${row.index}-${row.doc_number}`}>
-                    <span className="mono-text">{row.doc_number}</span> —{" "}
+                    <span className="mono-text">{row.doc_number}</span>{" "}
+                    {row.selection_bucket && (
+                      <span className="pill neutral">
+                        {VERIFICATION_BUCKET_LABEL[row.selection_bucket] ??
+                          row.selection_bucket}
+                      </span>
+                    )}{" "}
+                    —{" "}
                     {row.detail}
                   </li>
                 ))}

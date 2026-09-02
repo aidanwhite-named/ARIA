@@ -321,6 +321,13 @@ export interface SearchCandidate {
    * below_threshold 는 공식 검증한 결론이고, unverified 는 아직 안 본 것이다.
    */
   classification_outcome?: "" | "below_threshold" | "unverified" | "legacy_c";
+  /**
+   * 페이지 관측으로 정식 A/B 를 받은 후보를 공식 응답으로 추가 확인했는가.
+   * not_confirmed 라도 분류는 내리지 않는다 — OPS 가 주는 것은 초록·청구항
+   * 뿐이라 명세서에만 있는 구성은 여기서 대조될 수 없기 때문이다.
+   */
+  official_ab_confirmation?: "confirmed" | "not_confirmed";
+  official_ab_confirmation_detail?: string;
   /** 검색 결과 기반 AI 제안. 정식 group 과 동시에 값이 있으면 안 된다. */
   provisional_group?: "A" | "B" | "C" | null;
   /** ARIA가 저장된 관측/공식 근거로 계산한 분류 근거 등급. */
@@ -605,6 +612,10 @@ export interface SearchManifest {
       doc_number: string;
       reason_code: string;
       detail: string;
+      selection_reason?: string;
+      selection_bucket?: "page_ab" | "epo_shortlist" | "other";
+      expected_fetches?: number | null;
+      missing_constituents?: string[];
     }[];
     limits?: Record<string, number>;
     /** 무엇을 어떤 순서로 왜 골랐는가. 상한이 무엇을 잘랐는지와 함께 읽는다. */
@@ -613,6 +624,7 @@ export interface SearchManifest {
       index: number;
       doc_number: string;
       selection_reason: string;
+      selection_bucket?: "page_ab" | "epo_shortlist" | "other";
       detail: string;
       /** 이 후보를 확인하려고 OPS 를 몇 번 더 부를 것인가. null 이면 세어 보지
        *  않았다는 뜻이고 0 과 다르다. */

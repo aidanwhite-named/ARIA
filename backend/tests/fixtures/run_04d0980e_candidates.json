@@ -1,0 +1,280 @@
+{
+  "note": "job 04d0980e 실행의 후보 9건. 공식 검증 대상 선택 회귀 입력.",
+  "candidates": [
+    {
+      "index": 1,
+      "doc_number": "US8284254B2",
+      "doi": "",
+      "group": "A",
+      "provisional_group": null,
+      "classification_basis": "page_observed",
+      "group_eligible": true,
+      "page_supported_rows": 5,
+      "identifier_url_matched": true,
+      "page_fetch_succeeded": true,
+      "evidence_status": "source_page_reviewed",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "web"
+      ],
+      "classification_outcome": ""
+    },
+    {
+      "index": 2,
+      "doc_number": "KR101954899B1",
+      "doi": "",
+      "group": "B",
+      "provisional_group": null,
+      "classification_basis": "page_observed",
+      "group_eligible": true,
+      "page_supported_rows": 3,
+      "identifier_url_matched": true,
+      "page_fetch_succeeded": true,
+      "evidence_status": "source_page_reviewed",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "web"
+      ],
+      "classification_outcome": ""
+    },
+    {
+      "index": 3,
+      "doc_number": "KR101445045B1",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "web"
+      ],
+      "classification_outcome": "unverified"
+    },
+    {
+      "index": 4,
+      "doc_number": "KR101674033B1",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "web"
+      ],
+      "classification_outcome": "unverified"
+    },
+    {
+      "index": 5,
+      "doc_number": "CN121509624A",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "epo"
+      ],
+      "classification_outcome": "below_threshold",
+      "epo_discovery": {
+        "lanes": [
+          "epo:claim_only"
+        ],
+        "artifact_ids": [
+          "5e3a1a73c2b2f8753bb365da074fe059a5281bbb78395444c8fabeb26f37929d"
+        ],
+        "evidence_fields": [
+          "abstract:en",
+          "abstract:ol",
+          "applicants",
+          "application_number",
+          "family_id",
+          "inventors",
+          "ipc",
+          "publication_date",
+          "publication_number",
+          "title:en",
+          "title:ol"
+        ]
+      }
+    },
+    {
+      "index": 6,
+      "doc_number": "CN120526346A",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "epo"
+      ],
+      "classification_outcome": "below_threshold",
+      "epo_discovery": {
+        "lanes": [
+          "epo:claim_only"
+        ],
+        "artifact_ids": [
+          "5e3a1a73c2b2f8753bb365da074fe059a5281bbb78395444c8fabeb26f37929d"
+        ],
+        "evidence_fields": [
+          "abstract:en",
+          "abstract:ol",
+          "applicants",
+          "application_number",
+          "family_id",
+          "inventors",
+          "ipc",
+          "publication_date",
+          "publication_number",
+          "title:en",
+          "title:ol"
+        ]
+      }
+    },
+    {
+      "index": 7,
+      "doc_number": "CN118644547A",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "epo"
+      ],
+      "classification_outcome": "below_threshold",
+      "epo_discovery": {
+        "lanes": [
+          "epo:claim_only"
+        ],
+        "artifact_ids": [
+          "5e3a1a73c2b2f8753bb365da074fe059a5281bbb78395444c8fabeb26f37929d"
+        ],
+        "evidence_fields": [
+          "abstract:en",
+          "abstract:ol",
+          "applicants",
+          "application_number",
+          "family_id",
+          "inventors",
+          "ipc",
+          "publication_date",
+          "publication_number",
+          "title:en",
+          "title:ol"
+        ]
+      }
+    },
+    {
+      "index": 8,
+      "doc_number": "CN122340354A",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "epo"
+      ],
+      "classification_outcome": "below_threshold",
+      "epo_discovery": {
+        "lanes": [
+          "epo:claim_only"
+        ],
+        "artifact_ids": [
+          "92544c2f7cfef60c03958ee13ed1cc64d7b759a835ec0a5c25d1a8eed962ce43"
+        ],
+        "evidence_fields": [
+          "abstract:en",
+          "abstract:ol",
+          "applicants",
+          "application_number",
+          "family_id",
+          "inventors",
+          "ipc",
+          "publication_date",
+          "publication_number",
+          "title:en",
+          "title:ol"
+        ]
+      }
+    },
+    {
+      "index": 9,
+      "doc_number": "CN120416441A",
+      "doi": "",
+      "group": null,
+      "provisional_group": null,
+      "classification_basis": "none",
+      "group_eligible": false,
+      "page_supported_rows": 0,
+      "identifier_url_matched": false,
+      "page_fetch_succeeded": false,
+      "evidence_status": "candidate_only",
+      "original_verified": false,
+      "official_supported_rows": 0,
+      "discovery_origins": [
+        "epo"
+      ],
+      "epo_discovery": {
+        "lanes": [
+          "epo:claim_only"
+        ],
+        "artifact_ids": [
+          "5e3a1a73c2b2f8753bb365da074fe059a5281bbb78395444c8fabeb26f37929d"
+        ],
+        "evidence_fields": [
+          "abstract:en",
+          "abstract:ol",
+          "applicants",
+          "application_number",
+          "family_id",
+          "inventors",
+          "ipc",
+          "publication_date",
+          "publication_number",
+          "title:en",
+          "title:ol"
+        ]
+      }
+    }
+  ]
+}

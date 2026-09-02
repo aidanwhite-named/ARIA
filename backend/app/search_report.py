@@ -253,6 +253,13 @@ def _candidate_section(item: dict) -> list[str]:
             str(item.get("classification_basis") or "확인 필요"),
         )
     )
+    # 공식 응답을 받아 봤지만 A/B 근거를 더 찾지 못한 후보. 분류는 내리지 않되
+    # 그 사실을 숨기지도 않는다 — OPS 는 초록·청구항만 주므로 명세서에만 있는
+    # 구성은 여기서 대조될 수 없고, 읽는 사람은 그 한계를 알아야 한다.
+    if item.get("official_ab_confirmation") == "not_confirmed":
+        detail = _cell(str(item.get("official_ab_confirmation_detail") or ""))
+        lines.append(f"- 공식 문헌 추가 확인: {detail}")
+
     # 공식 대조로 덮이기 전의 1차 분류. 두 분류를 같은 줄에 나란히 쓰지 않는다 —
     # 나란히 두면 같은 위계로 읽히고, 그러면 등급을 나눈 의미가 없다. 이 후보의
     # 분류는 위의 '분류 근거' 줄이고, 여기는 대체되기 전의 기록이다.

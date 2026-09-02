@@ -134,6 +134,19 @@ _TECHNICAL_FIELD_BASES = frozenset({"abstract", "claims", "description"})
 # 대체되기 전에 무엇으로 보였는지에 대한 기록이다.
 PAGE_CLASSIFICATION_FIELD = "page_classification"
 
+#: 페이지 관측으로 정식 A/B 를 받은 후보를 공식 응답으로 **추가 확인하지
+#: 못했다**는 표시. 강등하지 않는다.
+#:
+#: OPS 가 주는 것은 초록·청구항뿐이다. 명세서 본문에만 있는 구성은 여기서 절대
+#: 대조되지 않으므로, 그것을 이유로 이미 관측된 분류를 내리면 "확인하지
+#: 못했다"가 "아니었다"로 바뀐다. 대신 무엇을 확인하지 못했는지를 적어 둔다.
+OFFICIAL_AB_CONFIRMED = "confirmed"
+OFFICIAL_AB_NOT_CONFIRMED = "not_confirmed"
+OFFICIAL_AB_NOT_CONFIRMED_DETAIL = (
+    "공식 문헌에서 확보한 범위에서는 A/B 근거를 추가 확인하지 못했습니다. "
+    "페이지 관측 근거로 받은 분류를 그대로 유지합니다."
+)
+
 # 이 근거로 정식 분류를 받은 후보는 공식 조회가 실패해도 강등하지 않는다.
 # EPO 에 그 문헌이 없다는 것은 "문헌이 없다"가 아니라 "이 채널로 받지 못했다"
 # 이고, 그것을 근거로 이미 관측된 분류를 내리면 조회 실패가 후보에게 불리한
@@ -374,6 +387,92 @@ def _selection_rank(
     return 3, SELECT_CANDIDATE_ORDER, None, []
 
 
+#: 공식 검증 자리를 나눠 주는 두 묶음. 한 채널이 상한을 통째로 가져가지 않게
+#: 하려고 둔다. 2026-09-02 실행에서 EPO 후보가 4자리를 전부 차지해, 페이지
+#: 관측만으로 A/B 를 받은 웹 후보 둘이 공식 검증을 한 번도 받지 못했다.
+#:
+#: 기준은 "채널이 무엇인가"가 아니라 **"공식 검증이 왜 필요한가"**다.
+#:   page_ab       페이지 관측만으로 A/B 를 받은 후보. 공식 근거가 없다.
+#:   epo_shortlist EPO 검색이 데려온 후보. 웹 페이지 근거가 아예 없다.
+BUCKET_PAGE_AB = "page_ab"
+BUCKET_EPO_SHORTLIST = "epo_shortlist"
+BUCKET_OTHER = "other"
+_BUCKET_LABELS = {
+    BUCKET_PAGE_AB: "페이지 관측만으로 A/B 를 받아 공식 근거가 필요한 후보",
+    BUCKET_EPO_SHORTLIST: "EPO 검색이 데려와 웹 페이지 근거가 없는 후보",
+    BUCKET_OTHER: "그 밖의 후보",
+}
+
+
+def _selection_bucket(candidate: dict) -> str:
+    """이 후보가 어느 묶음에서 자리를 받는가. 한 후보는 한 묶음에만 든다.
+
+    양쪽에서 발견된 문헌이 두 자리를 차지하지 못하게 **먼저 맞는 묶음 하나**로
+    보낸다. page_ab 를 먼저 보는 이유는 그쪽이 더 급하기 때문이다 — 이미 A/B 로
+    보고서에 실릴 후보인데 공식 근거가 하나도 없는 상태다.
+    """
+    view = search_manifest.classification_view(candidate)
+    if (
+        view["group"] in search_manifest.WRITE_GROUPS
+        and view["basis"] == search_manifest.CLASSIFICATION_PAGE
+    ):
+        return BUCKET_PAGE_AB
+    discovery = search_manifest.discovery_origins(candidate)
+    if search_manifest.DISCOVERY_EPO in discovery:
+        return BUCKET_EPO_SHORTLIST
+    return BUCKET_OTHER
+
+
+def _balanced_pick(ranked: list, cap: int) -> list:
+    """묶음마다 자리를 나눠 준 뒤 남는 자리를 기존 순위로 채운다.
+
+    묶음 **안의** 순서는 건드리지 않는다 — 재사용 가능성과 후보 목록 순서로
+    이미 정렬된 목록에서 앞에서부터 가져온다. 복잡한 점수 모델은 만들지 않는다.
+    """
+    if cap <= 0:
+        return []
+    # 기본 상한 4에서는 page A/B 2건 + EPO 2건이다. 상한이 더 작아져도
+    # 선택 수를 넘기지 않는다. 홀수 한도에서는 EPO 쪽에 한 자리를 더 준다 —
+    # EPO 검색 후보는 아직 정식 A/B 분류가 전혀 없는 반면 page 후보는 페이지
+    # 관측 분류가 있기 때문이다. 특히 상한 1에서도 EPO 검색 결과를 검증하는
+    # 기존 계약을 지킨다. 각 묶음의 예약석은 최대 2건이다.
+    page_quota = min(2, cap // 2)
+    epo_quota = min(2, (cap + 1) // 2)
+    buckets: dict[str, list] = {BUCKET_PAGE_AB: [], BUCKET_EPO_SHORTLIST: []}
+    for row in ranked:
+        bucket = row[7]
+        if bucket in buckets:
+            buckets[bucket].append(row)
+
+    chosen: list = []
+    chosen_keys: set = set()
+    for bucket, quota in (
+        (BUCKET_PAGE_AB, page_quota),
+        (BUCKET_EPO_SHORTLIST, epo_quota),
+    ):
+        for row in buckets[bucket][:quota]:
+            if len(chosen) >= cap:
+                break
+            if row[3] in chosen_keys:
+                continue
+            chosen.append(row)
+            chosen_keys.add(row[3])
+
+    # 한쪽이 모자라면 남은 자리를 기존 순위 그대로 채운다. 자리를 비워 두면
+    # 조회 예산이 남는데도 후보를 확인하지 않게 된다.
+    for row in ranked:
+        if len(chosen) >= cap:
+            break
+        if row[3] in chosen_keys:
+            continue
+        chosen.append(row)
+        chosen_keys.add(row[3])
+
+    # 최종 순서는 기존 순위를 따른다. 묶음 순서로 내보내면 감사 기록의 순번이
+    # 선택 정책과 어긋나 보인다.
+    return [row for row in ranked if row[3] in chosen_keys][:cap]
+
+
 def _expected_detail(reason: str, expected, missing: list) -> str:
     """왜 골랐는가 + 그래서 몇 번을 더 부를 것인가."""
     label = _SELECT_LABELS[reason]
@@ -421,7 +520,7 @@ def targets(
     fresh_cost = len(constituents)
     cap = max(0, int(limit or 0))
 
-    ranked: list[tuple[int, int, dict, str, str, object, list]] = []
+    ranked: list[tuple[int, int, dict, str, str, object, list, str]] = []
     seen: set[str] = set()
     for position, candidate in enumerate((reported or {}).get("candidates") or []):
         doc_number = _text(candidate.get("doc_number"), 120)
@@ -446,16 +545,28 @@ def targets(
             expected = fresh_cost
             missing = list(constituents)
         ranked.append(
-            (rank, position, candidate, doc_key, reason, expected, missing)
+            (
+                rank,
+                position,
+                candidate,
+                doc_key,
+                reason,
+                expected,
+                missing,
+                _selection_bucket(candidate),
+            )
         )
 
     ranked.sort(key=lambda row: (row[0], row[1]))
+    picked = _balanced_pick(ranked, cap)
+    picked_keys = {row[3] for row in picked}
 
     found: list[Target] = []
-    for rank, _position, candidate, doc_key, reason, expected, missing in ranked:
+    for row in ranked:
+        _rank, _position, candidate, doc_key, reason, expected, missing, bucket = row
         index = int(candidate.get("index") or 0)
         doc_number = _text(candidate.get("doc_number"), 120)
-        if len(found) >= cap:
+        if doc_key not in picked_keys:
             if dropped is not None:
                 dropped.append(
                     {
@@ -465,9 +576,11 @@ def targets(
                         "detail": (
                             f"공식 검증 후보 상한({cap}건)을 넘어 이 후보는 공식 "
                             "문헌 대조를 시도하지 않았습니다. 선택 정책에서의 "
-                            f"순위는 '{_SELECT_LABELS[reason]}' 였습니다."
+                            f"순위는 '{_SELECT_LABELS[reason]}', 묶음은 "
+                            f"'{_BUCKET_LABELS[bucket]}' 였습니다."
                         ),
                         "selection_reason": reason,
+                        "selection_bucket": bucket,
                         "expected_fetches": expected,
                         "missing_constituents": list(missing),
                     }
@@ -480,6 +593,9 @@ def targets(
                     "index": index,
                     "doc_number": doc_number,
                     "selection_reason": reason,
+                    # 어느 묶음에서 자리를 받았는가. 한 채널이 상한을 통째로
+                    # 가져가지 않았다는 것을 이 값으로 확인한다.
+                    "selection_bucket": bucket,
                     "detail": _expected_detail(reason, expected, missing),
                     # 이 후보 하나를 확인하는 데 OPS 를 몇 번 더 부를 것인가.
                     # None 이면 세어 보지 않았다는 뜻이고 0 과 다르다.
@@ -1454,6 +1570,7 @@ def apply_classification(
             continue
         if not isinstance(entry, dict):
             _keep_provisional(candidate, claimed)
+            _mark_official_ab_unconfirmed(candidate, bundle)
             candidate["verification"] = {
                 "status": search_manifest.VERIFY_CLASSIFICATION_FAILED,
                 "reason_code": "candidate_missing_from_classification",
@@ -1470,6 +1587,7 @@ def apply_classification(
             # 후보를 지우지 않는다. 긴 대응표만 만들지 않고 짧은 사유를 남긴다.
             note = _text(entry.get("note"), 500)
             _keep_provisional(candidate, None)
+            _mark_official_ab_unconfirmed(candidate, bundle)
             if not candidate.get("group"):
                 candidate["classification_outcome"] = (
                     search_manifest.OUTCOME_BELOW_THRESHOLD
@@ -1511,6 +1629,7 @@ def apply_classification(
                 "행이 없어 그룹 분류에서 제외하고 잠정 분류로 남겼습니다."
             )
             _keep_provisional(candidate, claimed)
+            _mark_official_ab_unconfirmed(candidate, bundle)
             candidate["verification"] = {
                 "status": search_manifest.VERIFY_EVIDENCE_MISMATCH,
                 "reason_code": "no_supported_mapping_rows",
@@ -1539,6 +1658,8 @@ def apply_classification(
         candidate["group"] = claimed
         candidate["provisional_group"] = None
         candidate["classification_outcome"] = search_manifest.OUTCOME_PROMOTED
+        candidate["official_ab_confirmation"] = OFFICIAL_AB_CONFIRMED
+        candidate["official_ab_confirmation_detail"] = ""
         candidate["classification_basis"] = search_manifest.CLASSIFICATION_OFFICIAL
         candidate["group_eligible"] = True
         candidate["quarantined"] = False
@@ -1597,6 +1718,27 @@ def apply_classification(
 
     reported["candidates"] = candidates
     return reported, notes
+
+
+def _mark_official_ab_unconfirmed(candidate: dict, bundle) -> None:
+    """공식 응답을 받아 봤지만 A/B 근거를 더 찾지 못한 후보에 표시를 남긴다.
+
+    페이지 관측으로 정식 분류를 받은 후보에만 붙인다. 분류는 내리지 않는다 —
+    그 이유는 OFFICIAL_AB_NOT_CONFIRMED 주석에 있다.
+    """
+    view = search_manifest.classification_view(candidate)
+    if not (
+        view["group"] in search_manifest.WRITE_GROUPS
+        and view["basis"] == search_manifest.CLASSIFICATION_PAGE
+    ):
+        return
+    candidate["official_ab_confirmation"] = OFFICIAL_AB_NOT_CONFIRMED
+    candidate["official_ab_confirmation_detail"] = OFFICIAL_AB_NOT_CONFIRMED_DETAIL
+    scope = sorted(constituents_present(getattr(bundle, "texts", {}) or {}))
+    if scope:
+        candidate["official_ab_confirmation_detail"] += (
+            f" 확인한 범위: {', '.join(scope)}."
+        )
 
 
 def _keep_provisional(candidate: dict, claimed: str | None) -> None:

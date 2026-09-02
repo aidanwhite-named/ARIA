@@ -1030,3 +1030,231 @@ def test_the_mapping_row_cap_is_ten(monkeypatch) -> None:
         reported, payload, {key: bundle}, store=object()
     )
     assert len(updated["candidates"][0]["mapping"]) == 10
+
+
+# ------------------------------- 공식 검증 대상의 채널 균형 (실행 기록 회귀)
+#
+# 입력은 2026-09-02 실행(job 04d0980e)의 후보 9건이다. 그 실행에서 EPO 후보가
+# 상한 4자리를 전부 가져갔고, 페이지 관측만으로 A/B 를 받은 웹 후보 둘은 공식
+# 검증을 한 번도 받지 못했다. 같은 입력으로 그 일이 다시 일어나지 않는지 본다.
+
+
+def _recorded_candidates() -> list[dict]:
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).parent / "fixtures" / "run_04d0980e_candidates.json"
+    return json.loads(path.read_text(encoding="utf-8"))["candidates"]
+
+
+def _recorded_reuse() -> dict:
+    """그 실행에서 EPO 레인이 이미 받아 둔 자료. 부분 재사용이었다."""
+    return {
+        epo_client.normalize_doc_key(row["doc_number"]): {
+            "complete": False,
+            "missing": ["claims"],
+            "expected_fetches": 1,
+        }
+        for row in _recorded_candidates()
+        if "epo" in (row.get("discovery_origins") or [])
+    }
+
+
+def test_the_verification_slots_are_shared_between_both_channels() -> None:
+    """한 채널이 상한을 통째로 가져가지 않는다."""
+    order: list = []
+    dropped: list = []
+    found = search_verification.targets(
+        {"candidates": _recorded_candidates()},
+        limit=4,
+        reuse=_recorded_reuse(),
+        order=order,
+        dropped=dropped,
+    )
+
+    numbers = [t.doc_number for t in found]
+    assert len(numbers) == 4
+
+    # 페이지 관측만으로 A/B 를 받아 공식 근거가 없는 웹 후보 둘이 자리를 받는다.
+    assert "US8284254B2" in numbers
+    assert "KR101954899B1" in numbers
+
+    # 나머지 두 자리는 EPO 후보가 받는다.
+    epo_picked = [n for n in numbers if n.startswith("CN")]
+    assert len(epo_picked) == 2
+
+    buckets = {row["doc_number"]: row["selection_bucket"] for row in order}
+    assert buckets["US8284254B2"] == search_verification.BUCKET_PAGE_AB
+    assert buckets["KR101954899B1"] == search_verification.BUCKET_PAGE_AB
+    for number in epo_picked:
+        assert buckets[number] == search_verification.BUCKET_EPO_SHORTLIST
+
+    # 빠진 후보는 조용히 사라지지 않는다. 묶음도 함께 남는다.
+    assert dropped
+    assert all("selection_bucket" in row for row in dropped)
+
+
+def test_the_epo_bucket_keeps_its_own_reuse_order() -> None:
+    """묶음 안의 순서는 건드리지 않는다. 재사용 가능한 후보가 먼저다."""
+    candidates = _recorded_candidates()
+    reuse = _recorded_reuse()
+    # 세 번째 EPO 후보만 완전 재사용으로 바꾼다. 그러면 그 후보가 앞으로 온다.
+    reuse[epo_client.normalize_doc_key("CN118644547A")] = {
+        "complete": True, "missing": [], "expected_fetches": 0
+    }
+    order: list = []
+    found = search_verification.targets(
+        {"candidates": candidates}, limit=4, reuse=reuse, order=order
+    )
+
+    numbers = [t.doc_number for t in found]
+    assert "CN118644547A" in numbers
+    reasons = {row["doc_number"]: row["selection_reason"] for row in order}
+    assert reasons["CN118644547A"] == search_verification.SELECT_REUSABLE
+
+
+def test_a_single_slot_keeps_an_epo_candidate() -> None:
+    """상한 1에서도 EPO 검색 결과를 공식 검증하는 기존 계약을 지킨다."""
+    order: list = []
+    found = search_verification.targets(
+        {"candidates": _recorded_candidates()},
+        limit=1,
+        reuse=_recorded_reuse(),
+        order=order,
+    )
+
+    assert [target.doc_number for target in found] == ["CN121509624A"]
+    assert order[0]["selection_bucket"] == search_verification.BUCKET_EPO_SHORTLIST
+
+
+def test_three_slots_reserve_one_for_page_ab_and_two_for_epo() -> None:
+    order: list = []
+    found = search_verification.targets(
+        {"candidates": _recorded_candidates()},
+        limit=3,
+        reuse=_recorded_reuse(),
+        order=order,
+    )
+
+    numbers = [target.doc_number for target in found]
+    assert len({"US8284254B2", "KR101954899B1"}.intersection(numbers)) == 1
+    assert len([number for number in numbers if number.startswith("CN")]) == 2
+
+
+def test_original_text_ab_does_not_take_a_page_observed_reserved_slot() -> None:
+    """원문 근거가 있는 후보는 page_observed 보강용 예약석 대상이 아니다."""
+    original = _page_candidate(99, "EP9999999A1", "A")
+    original["classification_basis"] = search_manifest.CLASSIFICATION_ORIGINAL
+    original["provenance"] = "raw_original_verified"
+
+    assert (
+        search_verification._selection_bucket(original)
+        == search_verification.BUCKET_OTHER
+    )
+
+
+def test_an_empty_bucket_gives_its_slots_back() -> None:
+    """한쪽이 없으면 남은 자리를 다른 쪽이 기존 순위대로 채운다."""
+    candidates = [
+        row for row in _recorded_candidates()
+        if "epo" in (row.get("discovery_origins") or [])
+    ]
+    found = search_verification.targets(
+        {"candidates": candidates}, limit=4, reuse=_recorded_reuse()
+    )
+    assert len(found) == 4, "빈 묶음 때문에 자리를 비워 두면 안 된다."
+
+
+def test_a_document_found_by_both_channels_takes_only_one_slot() -> None:
+    """양쪽에서 발견된 문헌이 두 묶음에서 각각 뽑히지 않는다."""
+    candidates = _recorded_candidates()
+    both = dict(candidates[0])          # US8284254B2, page_observed A
+    both["discovery_origins"] = ["web", "epo"]
+    order: list = []
+    found = search_verification.targets(
+        {"candidates": [both] + candidates[1:]},
+        limit=4,
+        reuse=_recorded_reuse(),
+        order=order,
+    )
+
+    numbers = [t.doc_number for t in found]
+    assert numbers.count("US8284254B2") == 1
+    assert len(numbers) == len(set(numbers)) == 4
+    buckets = {row["doc_number"]: row["selection_bucket"] for row in order}
+    # 더 급한 쪽(공식 근거가 없는 A/B)으로 보낸다.
+    assert buckets["US8284254B2"] == search_verification.BUCKET_PAGE_AB
+
+
+def test_a_page_backed_group_is_not_demoted_but_says_what_was_missing() -> None:
+    """공식 초록에서 A/B 근거를 더 찾지 못해도 강등하지 않는다.
+
+    OPS 가 주는 것은 초록·청구항뿐이다. 명세서에만 있는 구성은 여기서 대조될 수
+    없으므로, 그것을 이유로 분류를 내리면 "확인하지 못했다"가 "아니었다"로
+    바뀐다. 대신 무엇을 확인하지 못했는지 적는다.
+    """
+    reported = {"candidates": [_page_candidate(1, "EP1234567A1", "A")]}
+    key, bundle = _bundle("EP1234567A1", verified=True)
+    payload = {"candidates": [{"doc_number": "EP1234567A1", "note": "다릅니다."}]}
+
+    updated, _notes = search_verification.apply_classification(
+        reported, payload, {key: bundle}, store=object()
+    )
+
+    candidate = updated["candidates"][0]
+    assert candidate["group"] == "A", "강등하지 않는다."
+    assert candidate["classification_basis"] == search_manifest.CLASSIFICATION_PAGE
+    assert candidate["official_ab_confirmation"] == (
+        search_verification.OFFICIAL_AB_NOT_CONFIRMED
+    )
+    detail = candidate["official_ab_confirmation_detail"]
+    assert "공식 문헌에서 확보한 범위에서는 A/B 근거를 추가 확인하지 못했습니다" in detail
+    # 무엇을 보고 그렇게 말하는지도 적는다.
+    assert "확인한 범위:" in detail
+
+
+def test_original_text_ab_is_not_marked_as_unconfirmed_page_observation() -> None:
+    reported = {"candidates": [_page_candidate(1, "EP1234567A1", "A")]}
+    reported["candidates"][0]["classification_basis"] = (
+        search_manifest.CLASSIFICATION_ORIGINAL
+    )
+    key, bundle = _bundle("EP1234567A1", verified=True)
+    payload = {"candidates": [{"doc_number": "EP1234567A1", "note": "다릅니다."}]}
+
+    updated, _notes = search_verification.apply_classification(
+        reported, payload, {key: bundle}, store=object()
+    )
+
+    candidate = updated["candidates"][0]
+    assert candidate["group"] == "A"
+    assert "official_ab_confirmation" not in candidate
+
+
+def test_a_promoted_candidate_is_marked_confirmed(monkeypatch) -> None:
+    reported = {"candidates": [_candidate(1, "EP1234567A1", "A")]}
+    key, bundle = _bundle("EP1234567A1", verified=True)
+    monkeypatch.setattr(
+        search_verification,
+        "_verify_row",
+        lambda *_args, **_kwargs: {
+            "official_supported": True,
+            "support_source": search_manifest.SUPPORT_OFFICIAL,
+        },
+    )
+    payload = {
+        "candidates": [
+            {
+                "doc_number": "EP1234567A1",
+                "group": "B",
+                "mapping": [{"feature": "x", "support_text": "a verified claim sentence"}],
+            }
+        ]
+    }
+    updated, _notes = search_verification.apply_classification(
+        reported, payload, {key: bundle}, store=object()
+    )
+    candidate = updated["candidates"][0]
+    assert candidate["group"] == "B"
+    assert candidate["official_ab_confirmation"] == (
+        search_verification.OFFICIAL_AB_CONFIRMED
+    )

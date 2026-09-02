@@ -25,6 +25,15 @@ def test_shipped_search_prompt_satisfies_contract() -> None:
     assert search_prompt.has_focus_section(prompt.body)
 
 
+def test_shipped_prompt_orders_page_evidence_for_limited_official_review() -> None:
+    """후보 순서가 공식 검증 대상 선택에 쓰인다는 계약을 프롬프트에도 둔다."""
+    body = search_prompt.load().body
+    assert "후보 목록의 순서는 뒤따르는 공식 검증의 우선순위" in body
+    assert "전용 페이지에서 문헌 식별정보를 확인했고" in body
+    assert "이 단계에서는 공식 검증을 마쳤다고 주장하지 말고" in body
+    assert "페이지에서 관측한 근거의 부재나 모순으로 바꾸지 마" in body
+
+
 def search_manifest_capability(prompt) -> bool:
     from app.search_manifest import CAPABILITY
 

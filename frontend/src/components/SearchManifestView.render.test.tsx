@@ -183,6 +183,36 @@ describe("page_classification", () => {
 });
 
 describe("공식 분류 상태", () => {
+  it("공식 범위에서 A/B를 더 확인하지 못한 페이지 분류를 강등하지 않고 표시한다", () => {
+    render(
+      panel(
+        withCandidates(
+          candidate({
+            group: "A",
+            group_eligible: true,
+            provisional: false,
+            classification_basis: "page_observed",
+            evidence_status: "source_page_reviewed",
+            page_fetch_succeeded: true,
+            official_ab_confirmation: "not_confirmed",
+            official_ab_confirmation_detail:
+              "공식 문헌에서 확보한 범위에서는 A/B 근거를 추가 확인하지 못했습니다.",
+          }),
+        ),
+      ),
+    );
+
+    expect(
+      screen.getByRole("heading", {
+        name: "A · 전체 구조와 핵심 특징이 모두 강하게 유사",
+      }),
+    ).toBeTruthy();
+    const badge = screen.getByText("공식 추가 확인 못함");
+    expect(badge.getAttribute("title")).toContain(
+      "공식 문헌에서 확보한 범위에서는",
+    );
+  });
+
   it("공식 기록으로 분류된 후보 수를 따로 센다", () => {
     render(
       panel(
@@ -495,6 +525,7 @@ describe("검증 대상 선택 순서", () => {
                 index: 4,
                 doc_number: "EP1000000A1",
                 selection_reason: "reusable_official_artifact",
+                selection_bucket: "page_ab",
                 detail:
                   "이미 받아 둔 공식 응답이 있어 추가 조회 없이 대조할 수 있음",
               },
@@ -513,6 +544,7 @@ describe("검증 대상 선택 순서", () => {
     );
 
     expect(screen.getByText("공식 검증 대상 선택 순서")).toBeTruthy();
+    expect(screen.getByText("페이지 A/B 공식 근거 보강")).toBeTruthy();
     expect(
       screen.getByText(/이미 받아 둔 공식 응답이 있어 추가 조회 없이/),
     ).toBeTruthy();

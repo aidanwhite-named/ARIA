@@ -411,6 +411,27 @@ def test_report_marks_an_agreeing_replaced_classification() -> None:
     assert "공식 대조 결과와 같음" in report
 
 
+def test_report_discloses_when_official_scope_did_not_confirm_page_ab() -> None:
+    reported, _notes = _parsed(_hostile_candidate(group="A"))
+    candidate = reported["candidates"][0]
+    candidate.update(
+        {
+            "official_ab_confirmation": "not_confirmed",
+            "official_ab_confirmation_detail": (
+                "공식 문헌에서 확보한 범위에서는 A/B 근거를 추가 확인하지 "
+                "못했습니다. 페이지 관측 근거로 받은 분류를 그대로 유지합니다. "
+                "확인한 범위: abstract."
+            ),
+        }
+    )
+
+    report = search_report.render(_manifest([candidate]))
+
+    assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
+    assert "- 공식 문헌 추가 확인:" in report
+    assert "페이지 관측 근거로 받은 분류를 그대로 유지합니다" in report
+
+
 # --------------------------------------------------- 채널별 상태 (보고서 상단)
 
 
