@@ -556,7 +556,12 @@ export interface SearchManifest {
   channels: string[];
   /** 이 실행이 쓴 A/B/C 정의. 렌더러가 자기 표를 들고 있으면 정의를 고친 뒤
    *  갱신되지 않은 렌더러가 옛 제목으로 인쇄한다. 실제로 그렇게 어긋난 적이
-   *  있어서 정의를 기록에 싣는다. 없는 옛 매니페스트만 fallback 을 쓴다. */
+   *  있어서 정의를 기록에 싣는다.
+   *
+   *  **프런트는 이 정의의 사본을 갖지 않는다.** 표시해야 하면 이 값을 읽고,
+   *  값이 없는 옛 매니페스트는 백엔드 렌더러가 그린 result.md 로 본다.
+   *  사본이 되살아나지 않는지는 백엔드 게이트가 이 파일들을 훑어 지킨다
+   *  (test_search_gates 의 the_frontend_keeps_no_copy_of_the_group_definitions). */
   group_schema_version?: number;
   group_definitions?: Record<string, string>;
   input: {
@@ -700,6 +705,13 @@ export interface SearchManifest {
     search_queries: string[];
     /** 검색 호출 수. 한 호출이 질의 여러 개를 묶어 보내므로 질의 수와 다르다. */
     search_call_count?: number;
+    /** 위 호출 수를 결과별로 나눈 값. 셋을 더하면 search_call_count 가 된다.
+     *
+     *  unknown 은 실패가 아니라 **관측 불가**다. Codex 의 web_search 는
+     *  구조화된 성공 신호를 주지 않아 늘 여기 온다. 성공으로 읽으면 안 된다. */
+    search_call_succeeded?: number;
+    search_call_failed?: number;
+    search_call_unknown?: number;
     search_queries_by_origin?: Partial<
       Record<"claim_only" | "spec_assisted", string[]>
     >;
@@ -745,7 +757,39 @@ export interface SearchManifest {
       reason: string;
       search_origin?: "claim_only" | "spec_assisted";
     }[];
+    /** 모델이 보고한 후보 중 몇 건이 정규화를 통과했고 몇 건이 버려졌는가.
+     *
+     *  **채널 상태 판정에는 들어가지 않는다.** 모델이 후보 하나를 이상한
+     *  모양으로 적은 것은 검색 실패가 아니다. 다만 "모델이 5건을 적었는데
+     *  목록에 4건뿐"이라는 사실은 감사에 남아야 한다. */
+    candidate_normalization?: {
+      raw: number;
+      accepted: number;
+      dropped: number;
+      dropped_malformed: number;
+      dropped_over_limit: number;
+    };
   } | null;
+  /** 채널별 최종 상태와 사유.
+   *
+   *  **파생 스냅샷이다. 원본이 아니다.** 원본은 같은 기록 안의 reported ·
+   *  observed · epo.lanes 의 종료 사유 · literature.queries 이고, 상태는
+   *  백엔드의 search_channels.status_rows() 가 그것들에서 계산한다. 여기
+   *  저장된 것은 실행이 끝난 그 시점의 계산 결과일 뿐이다.
+   *
+   *  매니페스트를 만든 뒤 채널 절을 고치는 경로가 있는 한 이 값은 낡을 수
+   *  있다 — 2026-09-01 실행의 EPO 레인은 provider_error 로 끝났는데 저장된
+   *  lane.status 에는 "ok" 가 적혀 있었다. 그래서 보고서는 이 값을 읽지 않고
+   *  같은 함수를 다시 부른다. 화면도 상태를 표시하게 되면 같은 규칙을 따르고,
+   *  이 배열은 "그때 ARIA 가 무엇으로 판정했는가"라는 감사 기록으로만 읽는다. */
+  channel_status?: {
+    id: string;
+    channel: string;
+    label: string;
+    status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "SKIPPED";
+    detail: string;
+  }[];
+  channel_status_overall?: "SUCCEEDED" | "PARTIAL" | "FAILED" | "SKIPPED" | "";
   /** ARIA 가 증거 등급을 내리거나 고친 내역. */
   normalization_notes: string[];
   error: string | null;

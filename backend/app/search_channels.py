@@ -203,20 +203,6 @@ def cell(value: str) -> str:
     보고서 렌더러도 같은 함수를 쓴다. 채널 상태의 사유 문자열은 여기서 만들어져
     보고서로 넘어가므로, 두 곳이 각자 다듬으면 같은 값이 다르게 보인다.
     """
-    text = str(value or "").replace("|", "\|")
-    return " ".join(text.split()) or "-"
-
-
-def _cell(value: str) -> str:
-    return cell(value)
-
-
-def cell(value: str) -> str:
-    """표 한 칸. 파이프와 줄바꿈이 표를 깨지 않게 한다.
-
-    보고서 렌더러도 같은 함수를 쓴다. 채널 상태의 사유 문자열은 여기서 만들어져
-    보고서로 넘어가므로, 두 곳이 각자 다듬으면 같은 값이 다르게 보인다.
-    """
     text = str(value or "").replace("|", "\\|")
     return " ".join(text.split()) or "-"
 
@@ -278,16 +264,76 @@ def status_rows(manifest: dict) -> list[dict]:
         for item in candidates
         if search_manifest.DISCOVERY_WEB in search_manifest.discovery_origins(item)
     )
-    web_state = STATUS_FAILED if web_error else STATUS_SUCCEEDED
-    rows.append(
-        _row(
-            "web_search",
-            CHANNEL_WEB,
-            "웹 검색",
-            web_state,
-            web_error or f"검색어 {len(queries)}개 · 후보 {web_candidates}건",
-        )
+    # 이 칸이 답하는 질문은 하나다: **검색 호출이 나가서 끝났는가.**
+    #
+    # 후보가 몇 건 나왔는지, 그 후보가 어떤 증거 등급을 받았는지, 몇 건이
+    # 격리·강등됐는지는 여기 들어오지 않는다. 검색은 다 성공했는데 이 청구항에
+    # 유사문헌이 없어 후보가 0건인 실행과, 검색 호출 절반이 실패해 후보가 0건인
+    # 실행은 전혀 다른 사실이다. 한 칸에 섞으면 둘 중 하나는 반드시 틀리게
+    # 읽힌다 — 후보 품질은 아래 분류 절이 이미 따로 말한다.
+    #
+    #     정책상 비활성이고 호출 0건    SKIPPED
+    #     실행 대상인데 호출 0건        FAILED
+    #     감사 블록 자체를 읽지 못함   FAILED  (web_report_error)
+    #     검색 호출이 전부 실패        FAILED
+    #     일부 실패하거나 결과 관측 불가 PARTIAL
+    #     그 밖                        SUCCEEDED
+    #
+    # 관측 불가를 성공으로 올리지 않는다. Codex 의 web_search 는 구조화된 성공
+    # 신호를 주지 않아 늘 이 자리에 온다 — 그것을 성공으로 적으면 ARIA 가 보지
+    # 않은 것을 봤다고 쓰는 셈이다.
+    outcomes = search_manifest.search_call_outcomes(observed)
+    total_calls = int(outcomes.get("total") or 0)
+    ok_calls = int(outcomes.get("succeeded") or 0)
+    failed_calls = int(outcomes.get("failed") or 0)
+    unknown_calls = int(outcomes.get("unknown") or 0)
+    dropped = int((reported.get("candidate_normalization") or {}).get("dropped") or 0)
+
+    policy_channels = (manifest.get("channel_policy") or {}).get("channels") or []
+    web_decision = next(
+        (
+            row
+            for row in policy_channels
+            if isinstance(row, dict) and row.get("channel") == CHANNEL_WEB
+        ),
+        None,
     )
+    web_disabled = web_decision is not None and not bool(web_decision.get("enabled"))
+
+    if web_disabled and total_calls == 0:
+        web_state = STATUS_SKIPPED
+        web_detail = str(
+            web_decision.get("reason") or "웹 검색 채널이 비활성화되어 있습니다."
+        )
+    elif web_error:
+        web_state = STATUS_FAILED
+        web_detail = web_error
+    elif total_calls == 0:
+        web_state = STATUS_FAILED
+        web_detail = "실행 대상으로 설정됐지만 검색 호출이 실행되지 않았습니다."
+    else:
+        if failed_calls == total_calls:
+            web_state = STATUS_FAILED
+        elif failed_calls or unknown_calls:
+            web_state = STATUS_PARTIAL
+        else:
+            web_state = STATUS_SUCCEEDED
+        parts = [f"검색 호출 {total_calls}건"]
+        if failed_calls or unknown_calls:
+            parts.append(f"성공 {ok_calls}건")
+            if failed_calls:
+                parts.append(f"실패 {failed_calls}건")
+            if unknown_calls:
+                # '실패'가 아니다. 호출이 끝났다는 것만 알고 결과는 모른다.
+                parts.append(f"결과 관측 불가 {unknown_calls}건")
+        parts.append(f"검색어 {len(queries)}개")
+        parts.append(f"후보 {web_candidates}건")
+        if dropped:
+            # 상태를 바꾸지 않는다. 모델이 이상한 모양으로 적은 후보를 버린
+            # 것은 검색 실패가 아니다. 다만 버렸다는 사실은 보여야 한다.
+            parts.append(f"정규화 탈락 {dropped}건")
+        web_detail = " · ".join(parts)
+    rows.append(_row("web_search", CHANNEL_WEB, "웹 검색", web_state, web_detail))
 
     # --- 웹페이지 확인 ----------------------------------------------------
     #

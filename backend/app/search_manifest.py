@@ -418,6 +418,29 @@ def empty_candidate_verification(
     }
 
 
+def empty_candidate_normalization() -> dict:
+    """후보 정규화 통계의 빈 골격.
+
+    모델이 보고한 후보 중 몇 건이 정규화를 통과했고 몇 건이 버려졌는가.
+    **이 수는 채널 상태 판정에 들어가지 않는다** — 검색 호출이 성공했는데
+    모델이 후보 하나를 이상한 모양으로 적은 것은 검색 실패가 아니다. 다만
+    "모델이 5건을 적었는데 목록에 4건뿐"이라는 사실은 감사에 남아야 한다.
+
+        raw                 감사 블록의 candidates 배열 길이
+        accepted            정규화를 통과해 목록에 들어간 수
+        dropped             raw - accepted
+        dropped_malformed   객체가 아니어서 읽지 못한 수
+        dropped_over_limit  상한(_MAX_CANDIDATES)을 넘어 자른 수
+    """
+    return {
+        "raw": 0,
+        "accepted": 0,
+        "dropped": 0,
+        "dropped_malformed": 0,
+        "dropped_over_limit": 0,
+    }
+
+
 def classification_view(candidate: dict, manifest_version: int | None = None) -> dict:
     """저장된 후보를 정식/잠정 분류로 안전하게 해석한다.
 
@@ -1276,11 +1299,35 @@ def parse(
         for url in ((observed_section or {}).get("succeeded_fetch_urls") or [])
         if normalize_url(url)
     }
+    # 모양이 깨진 후보 하나가 웹 채널 전체를 죽이지 않는다. 읽을 수 있는 것은
+    # 읽고, 읽지 못한 수는 세어 통계와 메모로 남긴다. 통계는 감사용이고 채널
+    # 상태 판정에는 들어가지 않는다(empty_candidate_normalization 참조).
+    considered = raw_candidates[:_MAX_CANDIDATES]
+    dropped_over_limit = len(raw_candidates) - len(considered)
+    dropped_malformed = sum(1 for entry in considered if not isinstance(entry, dict))
     candidates = [
         _normalize_candidate(entry, index, notes, succeeded, search_origin)
-        for index, entry in enumerate(raw_candidates[:_MAX_CANDIDATES], start=1)
+        for index, entry in enumerate(considered, start=1)
         if isinstance(entry, dict)
     ]
+    normalization = {
+        "raw": len(raw_candidates),
+        "accepted": len(candidates),
+        "dropped": len(raw_candidates) - len(candidates),
+        "dropped_malformed": dropped_malformed,
+        "dropped_over_limit": dropped_over_limit,
+    }
+    if dropped_malformed:
+        notes.append(
+            f"모델이 보고한 후보 {len(raw_candidates)}건 중 {dropped_malformed}건이 "
+            "객체가 아니어서 읽지 못하고 버렸습니다. 나머지 후보는 그대로 "
+            "살렸습니다."
+        )
+    if dropped_over_limit:
+        notes.append(
+            f"모델이 보고한 후보가 {len(raw_candidates)}건이라 상한 "
+            f"{_MAX_CANDIDATES}건까지만 읽고 {dropped_over_limit}건을 잘랐습니다."
+        )
 
     raw_failures = payload.get("access_failures")
     failures: list[dict] = []
@@ -1301,6 +1348,7 @@ def parse(
         "term_expansions": expansions,
         "candidates": candidates,
         "access_failures": failures,
+        "candidate_normalization": normalization,
     }
     return reported, notes
 
@@ -1418,9 +1466,16 @@ def merge_reported(*reports: dict | None) -> dict | None:
     expansions: list[dict] = []
     failures: list[dict] = []
     candidates: dict[str, dict] = {}
+    normalization = empty_candidate_normalization()
 
     for report_index, report in enumerate(available):
         rounds.extend(report.get("rounds") or [])
+        # 레인마다 자기 감사 블록을 읽었으므로 통계는 합산한다. 병합으로 같은
+        # 문헌이 하나로 합쳐져도 "모델이 몇 건을 적었고 몇 건을 못 읽었는가"는
+        # 레인별 사실의 합이지 병합 결과의 길이가 아니다.
+        lane_stats = report.get("candidate_normalization") or {}
+        for key in normalization:
+            normalization[key] += int(lane_stats.get(key) or 0)
         for row in report.get("term_expansions") or []:
             if row not in expansions:
                 expansions.append(row)
@@ -1525,6 +1580,7 @@ def merge_reported(*reports: dict | None) -> dict | None:
         "term_expansions": expansions,
         "candidates": merged_candidates,
         "access_failures": failures,
+        "candidate_normalization": normalization,
     }
 
 
@@ -1563,6 +1619,14 @@ def observed(
             )
         elif data.get("query"):
             queries.append(data["query"])
+    # 검색 호출의 **결과**. ok 는 True/False/None 세 값이고 None 은 "성공"이
+    # 아니라 관측할 수 없음이다. Codex 의 web_search 는 구조화된 성공 신호를
+    # 주지 않아 이 값이 늘 None 이다(codex_stream 의 item.completed 처리 참조).
+    # 세 수를 따로 세어 두어야 채널 상태가 "확인된 실패 0건"을 "전부 성공"으로
+    # 승격하지 않는다.
+    search_ok = [call for call in search_calls if call.get("ok") is True]
+    search_failed = [call for call in search_calls if call.get("ok") is False]
+    search_unknown = [call for call in search_calls if call.get("ok") is None]
     # URL 조회는 검색이 아니고 페이지 열람도 아니다. 세 번째 종류로 따로 센다.
     # attempted/succeeded_fetch_urls 에는 절대 넣지 않는다 — 이 호출은 성공
     # 신호를 주지 않으므로, 넣는 순간 열지 못한 URL 이 열람 기록이 된다.
@@ -1634,6 +1698,10 @@ def observed(
         # 실제로 나간 질의는 이것이다. 호출 수와는 다른 값이므로 따로 센다.
         "search_queries": queries,
         "search_call_count": len(search_calls),
+        # 위 호출 수를 결과별로 나눈 값. 셋을 더하면 search_call_count 가 된다.
+        "search_call_succeeded": len(search_ok),
+        "search_call_failed": len(search_failed),
+        "search_call_unknown": len(search_unknown),
         # 연 주소가 아니라 '열려고 한' 주소다. 성공 여부는 아래에 따로 있다.
         "attempted_fetch_urls": attempted,
         # 열람에 성공했고 그 본문을 실제로 읽은 것까지 확인된 주소.
@@ -1664,6 +1732,44 @@ def merge_observed(*sections: dict) -> dict:
     merged = observed(calls, uses)
     merged["search_queries_by_origin"] = by_origin
     return merged
+
+
+def search_call_outcomes(observed_section: dict | None) -> dict:
+    """검색 호출 몇 건이 성공했고, 실패했고, 결과를 알 수 없었는가.
+
+    채널 상태는 이 수만 본다. 후보가 몇 건 나왔는지·어떤 등급을 받았는지는
+    여기 들어오지 않는다 — 검색 호출이 다 성공했는데 후보가 0건인 실행과
+    검색 호출이 절반 실패한 실행은 전혀 다른 사실이고, 한 칸에 섞으면 둘
+    중 하나는 반드시 잘못 읽힌다.
+
+    ``unknown`` 은 실패가 아니라 **관측 불가**다. 성공으로 올리지 않는다.
+
+    새 기록에는 observed() 가 세어 둔 값이 있고, 그 값이 없는 옛 기록에서는
+    원본 호출 목록에서 같은 규칙으로 되센다. 두 경로가 같은 규칙을 쓰도록
+    판정은 이 함수 하나에만 둔다.
+    """
+    section = observed_section or {}
+    if "search_call_failed" in section:
+        return {
+            "total": int(section.get("search_call_count") or 0),
+            "succeeded": int(section.get("search_call_succeeded") or 0),
+            "failed": int(section.get("search_call_failed") or 0),
+            "unknown": int(section.get("search_call_unknown") or 0),
+        }
+
+    calls = [
+        call
+        for call in (section.get("tool_calls") or [])
+        if isinstance(call, dict)
+        and call.get("name") in _SEARCH_TOOL_NAMES
+        and _call_kind(call) == INPUT_KIND_QUERY
+    ]
+    return {
+        "total": len(calls),
+        "succeeded": sum(1 for call in calls if call.get("ok") is True),
+        "failed": sum(1 for call in calls if call.get("ok") is False),
+        "unknown": sum(1 for call in calls if call.get("ok") is None),
+    }
 
 
 def empty_epo_section(enabled: bool = False, reason: str = "") -> dict:
@@ -1898,6 +2004,7 @@ def empty_reported(*, web_report_error: str = "") -> dict:
         "term_expansions": [],
         "candidates": [],
         "access_failures": [],
+        "candidate_normalization": empty_candidate_normalization(),
         "web_report_error": _text(web_report_error, 2000),
     }
 
@@ -2765,9 +2872,23 @@ def build(
         # 이번 실행에서 어떤 채널을 돌기로 했고 왜 그렇게 정했는가. 프롬프트
         # 본문은 이 판정에 들어가지 않는다(search_channels 참조).
         "channel_policy": dict(channel_policy or {}),
-        # 채널별 최종 상태(SUCCEEDED/PARTIAL/FAILED/SKIPPED)와 사유. 실행
-        # 시점에 확정해 저장한다 — 보고서가 나중에 다시 계산하면 저장된 기록과
-        # 화면이 갈라진다.
+        # 채널별 최종 상태(SUCCEEDED/PARTIAL/FAILED/SKIPPED)와 사유.
+        #
+        # **파생 스냅샷이다. 원본이 아니다.** 원본은 이 기록의 reported ·
+        # observed · epo.lanes 의 종료 사유 · literature.queries 이고, 상태는
+        # search_channels.status_rows() 가 그것들에서 계산한다. 여기 저장하는
+        # 것은 실행이 끝난 그 시점의 계산 결과일 뿐이다.
+        #
+        # 그래서 읽는 쪽은 이 값을 믿지 않고 같은 함수를 다시 부른다. 저장된
+        # 상태를 정본으로 삼았다가 실제로 어긋난 적이 있다 — 2026-09-01 실행의
+        # EPO 레인은 provider_error 로 끝났는데 저장된 lane.status 에는 "ok" 가
+        # 적혀 있었고, 그 값을 읽은 표가 "EPO 독립 검색 성공"으로 인쇄했다.
+        # 매니페스트를 만든 뒤 채널 절을 고치는 경로(이관·후처리·테스트)가
+        # 있는 한 저장된 상태는 언제든 낡을 수 있다.
+        #
+        # 그래도 저장은 한다. 이 실행이 끝난 시점에 ARIA 가 무엇으로 판정했는지
+        # 자체가 감사 대상이기 때문이다. 두 값이 갈라지면 갈라졌다는 사실이
+        # 곧 기록이다.
         "channel_status": [],
         "channel_status_overall": "",
         # ARIA 가 검색 전에 만든 정규화된 내부 검색 계획. 실제로 실행된 검색어는

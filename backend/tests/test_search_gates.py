@@ -336,24 +336,38 @@ def test_group_definitions_come_from_the_program_contract() -> None:
         assert f"{group}. {definition}" in rendered
 
 
-def test_frontend_fallback_titles_match_the_backend_definitions() -> None:
-    """프런트엔드 fallback 표도 같은 정의를 담아야 한다.
+def test_the_frontend_keeps_no_copy_of_the_group_definitions() -> None:
+    """그룹 정의는 백엔드가 소유하고 프런트는 자기 사본을 갖지 않는다.
 
-    렌더링 경로가 둘이다. 저장된 result.md 는 백엔드가 찍고, 감사 패널은
-    SearchManifestView 가 찍는다. 정의를 싣지 않는 옛 매니페스트에서는 프런트가
-    자기 fallback 을 쓰므로, 그 표가 낡으면 같은 사고가 감사 패널에서 재현된다.
+    예전 게이트는 정반대를 요구했다 — 프런트가 같은 정의를 fallback 표로
+    들고 있는지 대조했다. 그 표가 실제로 사라진 뒤에는 그 게이트가 **없어진
+    중복을 되살리라고 요구하는** 셈이 되어, 방향을 뒤집었다. 막으려는 사고는
+    처음부터 하나였다: 두 곳에 적힌 정의가 갈라지는 것(2026-08-25 실행에서
+    B 와 C 가 뒤집혀 나갔다).
+
+    정의를 화면에 표시해야 하면 프런트는 ``manifest.group_definitions`` 를
+    읽는다. 그 값이 매 실행 매니페스트에 실린다는 사실과 프로그램 계약에
+    주입된다는 사실은 바로 위 두 게이트가 지킨다. 정의를 싣지 않는 옛
+    매니페스트는 백엔드 렌더러가 그리므로(test_search_report 의
+    ``test_a_past_manifest_without_group_definitions_still_renders``) 프런트에
+    fallback 표를 새로 만들 이유가 없다.
+
+    테스트 파일은 보지 않는다. 매니페스트를 흉내 내는 픽스처가 정의 문장을
+    담는 것은 사본이 아니라 입력 데이터다.
     """
-    source = (
-        Path(__file__).resolve().parents[2]
-        / "frontend"
-        / "src"
-        / "components"
-        / "SearchManifestView.tsx"
-    ).read_text(encoding="utf-8")
-    for group, definition in search_manifest.GROUP_DEFINITIONS.items():
-        assert (
-            f'{group}: "{definition}"' in source
-        ), f"프런트엔드 fallback 에 그룹 {group} 정의가 코드와 다릅니다."
+    root = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    sources = [path for path in root.rglob("*.ts*") if ".test." not in path.name]
+    assert sources, "프런트엔드 소스를 찾지 못했습니다."
+
+    # 옛 C 정의까지 본다. 되살아나는 중복이 현행 A/B 라는 보장이 없다.
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for group, definition in search_manifest.LEGACY_GROUP_DEFINITIONS.items():
+            assert definition not in text, (
+                f"{path.relative_to(root)} 에 그룹 {group} 의 정의 문장이 "
+                "복제되어 있습니다. 정의는 백엔드가 소유하고 매니페스트의 "
+                "group_definitions 로 전달합니다."
+            )
 
 
 def test_paper_without_an_identifier_keeps_its_title_when_the_page_was_opened() -> None:
