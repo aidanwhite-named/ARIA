@@ -10,6 +10,8 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 
 from ..prompt_store import (
+    KIND_ANALYSIS,
+    KIND_SEARCH,
     PROMPT_STORE,
     RESERVED_PROMPT_IDS,
     InvalidPromptFile,
@@ -17,7 +19,7 @@ from ..prompt_store import (
     PromptNotFound,
     PromptStoreError,
 )
-from ..search_prompt import SEARCH_PROMPT_ID, SearchPromptError, validate_body
+from ..search_prompt import SearchPromptError, validate_strategy_body
 from ..schemas import (
     PromptCatalogOut,
     PromptCreate,
@@ -30,14 +32,11 @@ router = APIRouter(prefix="/api/prompts", tags=["prompts"])
 
 
 def _catalog_item(prompt: PromptFile) -> PromptCatalogOut:
+    # 예약은 "지울 수 없다"만 뜻한다. 종류는 파일이 스스로 밝히며, 검색 전략
+    # 프롬프트는 사용자가 얼마든지 더 만들 수 있다.
     reserved = prompt.id in RESERVED_PROMPT_IDS
     base = PromptOut.model_validate(prompt)
-    return PromptCatalogOut(
-        **base.model_dump(),
-        kind="search" if prompt.id == SEARCH_PROMPT_ID else "analysis",
-        editable=True,
-        deletable=not reserved,
-    )
+    return PromptCatalogOut(**base.model_dump(), editable=True, deletable=not reserved)
 
 
 def _raise_http(exc: PromptStoreError) -> None:
@@ -50,10 +49,23 @@ def _raise_http(exc: PromptStoreError) -> None:
 
 @router.get("", response_model=list[PromptOut])
 def list_prompts(
-    search: str = Query(default=""), tag: str = Query(default="")
+    search: str = Query(default=""),
+    tag: str = Query(default=""),
+    kind: str = Query(default=KIND_ANALYSIS),
 ) -> list[PromptFile]:
+    """실행 화면의 프롬프트 선택 목록.
+
+    기본은 분석 프롬프트다. 이 목록은 구성대비 분석의 분석 기준을 고르는 데
+    쓰이므로, 검색 전략 프롬프트가 섞이면 검색 계약을 만족하지 않는 본문이
+    분석 실행에 선택될 수 있다. 검색 화면은 ``kind=search`` 로 부른다.
+    """
     try:
-        return PROMPT_STORE.list(search=search, tag=tag)
+        return PROMPT_STORE.list(
+            search=search,
+            tag=tag,
+            kind=kind,
+            include_reserved=kind == KIND_SEARCH,
+        )
     except PromptStoreError as exc:
         _raise_http(exc)
 
@@ -80,8 +92,18 @@ def list_prompt_catalog(
 
 @router.post("", response_model=PromptOut, status_code=201)
 def create_prompt(payload: PromptCreate) -> PromptFile:
+    values = payload.model_dump()
+    if values.get("kind") == KIND_SEARCH:
+        # 검색 전략 프롬프트에는 요구하는 표시가 없다(데이터 구간은 ARIA 가
+        # 붙인다). 다만 옛 방식으로 placeholder 를 직접 든 본문을 붙여 넣었다면
+        # 그 계약은 만족해야 한다 — 반쯤 옮겨 적은 본문으로 실행하면 청구항이
+        # 경계 밖에 놓인다.
+        try:
+            validate_strategy_body(str(values.get("body") or ""))
+        except SearchPromptError as exc:
+            raise HTTPException(422, str(exc)) from exc
     try:
-        return PROMPT_STORE.create(**payload.model_dump())
+        return PROMPT_STORE.create(**values)
     except PromptStoreError as exc:
         _raise_http(exc)
 
@@ -103,6 +125,9 @@ def export_prompts() -> dict:
                 "output_mode": row.output_mode,
                 "tags": row.tags,
                 "accepted_file_types": row.accepted_file_types,
+                # 종류를 함께 내보낸다. 빠뜨리면 다시 들여올 때 검색 전략
+                # 프롬프트가 분석 프롬프트로 되살아난다.
+                "kind": row.kind,
             }
             for row in rows
         ],
@@ -144,6 +169,15 @@ def get_prompt(prompt_id: str) -> PromptFile:
 def update_prompt(prompt_id: str, payload: PromptUpdate) -> PromptFile:
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
     try:
+        current = PROMPT_STORE.get(prompt_id)
+    except PromptStoreError as exc:
+        _raise_http(exc)
+    if current.kind == KIND_SEARCH and "body" in changes:
+        try:
+            validate_strategy_body(str(changes["body"]), prompt_id=prompt_id)
+        except SearchPromptError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    try:
         return PROMPT_STORE.update(prompt_id, changes)
     except PromptStoreError as exc:
         _raise_http(exc)
@@ -153,13 +187,15 @@ def update_prompt(prompt_id: str, payload: PromptUpdate) -> PromptFile:
 def update_reserved_prompt(
     prompt_id: str, payload: PromptUpdate
 ) -> PromptCatalogOut:
-    """검색 프롬프트를 실행 계약 검증 후 갱신한다."""
-    if prompt_id != SEARCH_PROMPT_ID:
+    """배포본 검색 전략 프롬프트를 조립 계약 검증 후 갱신한다."""
+    if prompt_id not in RESERVED_PROMPT_IDS:
         raise HTTPException(404, "예약된 프롬프트를 찾을 수 없습니다.")
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
     try:
         current = PROMPT_STORE.get_reserved(prompt_id)
-        validate_body(str(changes.get("body", current.body)))
+        validate_strategy_body(
+            str(changes.get("body", current.body)), prompt_id=prompt_id
+        )
         return _catalog_item(PROMPT_STORE.update_reserved(prompt_id, changes))
     except SearchPromptError as exc:
         raise HTTPException(422, str(exc)) from exc

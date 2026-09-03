@@ -17,6 +17,7 @@ from app import search_manifest, search_verification
 from app.execution.runner import _literature_queries
 from app.patent_search import (
     artifacts,
+    base,
     literature_backend,
     literature_client,
 )
@@ -113,6 +114,414 @@ def test_target_limit_records_what_it_dropped(tmp_path):
     assert len(found) == 1
     assert dropped[0]["doc_number"] == "10.1000/second"
     assert dropped[0]["reason_code"] == "literature_verification_target_limit"
+
+
+# --- 페이지 근거가 있는 후보를 먼저 검증한다 ------------------------------
+#
+# 2026-09-02 실행에서 무너진 지점이다. 서지 검색이 데려온 관련성 미판정 후보
+# 8건이 상한을 통째로 가져가, 웹에서 페이지까지 열고 대응 행 4개를 얻은 잠정 B
+# 후보(arXiv:2409.17106)가 공식 검증 대상에서 빠졌다. 그리고 그 8건 중 4건은
+# 초록이 없어 실패했는데도 자리가 넘어가지 않았다.
+def _page_backed(index: int, doi: str, *, group: str = "B", rows: int = 4) -> dict:
+    """페이지를 열어 본문 근거로 잠정 A/B 를 받은 웹 후보."""
+    candidate = _paper_candidate(index, doi)
+    candidate.update(
+        {
+            "provisional_group": group,
+            "classification_basis": search_manifest.CLASSIFICATION_SEARCH,
+            "page_fetch_succeeded": True,
+            "page_supported_rows": rows,
+            "evidence_status": search_manifest.EVIDENCE_REVIEWED,
+        }
+    )
+    return candidate
+
+
+def test_page_backed_paper_outranks_plain_bibliographic_candidates():
+    """일반 서지 후보가 배열 앞에 있어도 페이지 근거가 있는 후보를 먼저 고른다."""
+    reported = {
+        "candidates": [
+            _paper_candidate(
+                index, f"10.1000/noise-{index}",
+                origins=[search_manifest.DISCOVERY_LITERATURE],
+            )
+            for index in range(1, 9)
+        ]
+        + [_page_backed(9, fx.TARGET_DOI)]
+    }
+    order: list = []
+    found = search_verification.literature_targets(reported, limit=8, order=order)
+    assert found[0].doc_key == fx.TARGET_DOI
+    assert order[0]["selection_reason"] == search_verification.SELECT_PAGE_EVIDENCE
+    # 상한이 8이어도 자리를 받는다. 예전에는 9번째로 밀려 잘렸다.
+    assert fx.TARGET_DOI in {target.doc_key for target in found[:8]}
+
+
+def test_page_backed_priority_applies_to_a_and_b_alike():
+    """B 만 특별 취급하지 않는다. 같은 근거를 가진 A 도 같은 자리를 받는다."""
+    for group in ("A", "B"):
+        reported = {
+            "candidates": [
+                _paper_candidate(
+                    1, "10.1000/noise",
+                    origins=[search_manifest.DISCOVERY_LITERATURE],
+                ),
+                _page_backed(2, fx.TARGET_DOI, group=group),
+            ]
+        }
+        found = search_verification.literature_targets(reported, limit=1)
+        assert [target.doc_key for target in found] == [fx.TARGET_DOI], group
+
+
+def test_snippet_only_provisional_group_gets_no_special_priority():
+    """잠정 분류만 있고 페이지를 열지 못한 후보는 우선순위를 받지 않는다.
+
+    검색 스니펫만 보고 적은 등급이 페이지 본문 대조와 같은 자리를 받으면, 이
+    정책은 "모델이 A/B 라고 적었는가"를 다시 신뢰하는 것이 된다.
+    """
+    unopened = _page_backed(1, "10.1000/snippet-only")
+    unopened["page_fetch_succeeded"] = False
+    no_rows = _page_backed(2, "10.1000/no-rows")
+    no_rows["page_supported_rows"] = 0
+    reported = {
+        "candidates": [
+            unopened,
+            no_rows,
+            _paper_candidate(
+                3, fx.TARGET_DOI, origins=[search_manifest.DISCOVERY_LITERATURE]
+            ),
+        ]
+    }
+    order: list = []
+    found = search_verification.literature_targets(reported, limit=1, order=order)
+    assert [target.doc_key for target in found] == [fx.TARGET_DOI]
+    assert order[0]["selection_reason"] == (
+        search_verification.SELECT_LITERATURE_DISCOVERY
+    )
+
+
+def test_same_rank_keeps_candidate_order():
+    """같은 순위 안에서는 후보 목록 순서를 그대로 지킨다(안정 정렬)."""
+    reported = {
+        "candidates": [
+            _page_backed(1, "10.1000/page-first"),
+            _page_backed(2, "10.1000/page-second"),
+            _paper_candidate(
+                3, "10.1000/lit", origins=[search_manifest.DISCOVERY_LITERATURE]
+            ),
+            _paper_candidate(4, "10.1000/plain"),
+        ]
+    }
+    found = search_verification.literature_targets(reported, limit=4)
+    assert [target.doc_key for target in found] == [
+        "10.1000/page-first",
+        "10.1000/page-second",
+        "10.1000/lit",
+        "10.1000/plain",
+    ]
+
+
+# --- 조회 실패 시 다음 후보로 이월 ----------------------------------------
+class _StubBackend:
+    """DOI 별로 성공·실패를 정해 두는 서지 백엔드.
+
+    실제 백엔드로는 "이 후보만 초록이 없다"를 한 실행 안에서 만들기 어렵다.
+    여기서 고정하려는 것은 파서가 아니라 **선택·이월 정책**이므로, 호출 횟수와
+    HTTP 예산을 셀 수 있는 최소 스텁을 쓴다.
+    """
+
+    def __init__(self, abstracts: dict, *, http_budget: float = 0.0):
+        self.abstracts = abstracts
+        self.calls: list[tuple[str, str]] = []
+        self.http_seconds = 0.0
+        self.http_budget = http_budget
+
+    def usage(self) -> dict:
+        return {
+            "detail_fetches": len(self.calls),
+            "http_seconds": self.http_seconds,
+            "http_budget_seconds": self.http_budget,
+        }
+
+    def fetch_document(self, doi, constituent="abstract", *, agent_budget=True):
+        self.calls.append((doi, constituent))
+        self.http_seconds += 1.0
+        abstract = self.abstracts.get(doi)
+        fields = {
+            "title": base.FieldValue(
+                value=f"{doi} 제목",
+                evidence=base.EvidenceRef(
+                    artifact_id="a" * 64, field_path="title", profile_id="crossref"
+                ),
+            )
+        }
+        if abstract and constituent == "abstract":
+            fields["abstract"] = base.FieldValue(
+                value=abstract,
+                evidence=base.EvidenceRef(
+                    artifact_id="b" * 64,
+                    field_path="abstract",
+                    profile_id="crossref",
+                ),
+            )
+        return base.PatentSearchResponse(
+            records=(base.PatentRecord(doc_number=doi, title="", fields=fields),),
+            total_found=1,
+            raw_artifact_id="c" * 64,
+            fetched_at="2026-09-02T00:00:00+00:00",
+            http_status=200,
+            request_url=f"https://example.invalid/{doi}",
+        )
+
+
+def _shortlist(*dois: str) -> list:
+    """앞 두 건이 정규 선택, 나머지가 예비인 대상 목록."""
+    return [
+        search_verification.Target(
+            index=position + 1,
+            doc_number=doi,
+            doc_key=doi,
+            selection_reason=search_verification.SELECT_LITERATURE_DISCOVERY,
+            selection_role=(
+                search_verification.ROLE_PRIMARY
+                if position < 2
+                else search_verification.ROLE_BACKFILL
+            ),
+        )
+        for position, doi in enumerate(dois)
+    ]
+
+
+def test_failed_abstract_hands_the_slot_to_the_next_candidate():
+    """앞 후보가 초록을 못 얻으면 뒤 후보가 그 자리에서 검증된다."""
+    backend = _StubBackend({"10.1000/c": "초록 본문", "10.1000/b": "초록 본문"})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=12, verification_targets=2
+    )
+    assert bundles["10.1000/a"].status == search_verification.STATUS_FETCH_FAILED
+    assert bundles["10.1000/b"].verified
+    # 예비였던 c 가 a 의 실패로 자리를 받아 실제로 검증됐다.
+    assert bundles["10.1000/c"].verified
+    assert bundles["10.1000/c"].selection_role == search_verification.ROLE_BACKFILL
+
+
+def test_backfill_records_whose_failure_freed_the_slot():
+    """실패는 fetch_failed 로 보존하고, 대체 후보에는 누구의 자리인지 적는다."""
+    backend = _StubBackend({"10.1000/c": "초록 본문"})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    reported = {
+        "candidates": [
+            _paper_candidate(1, "10.1000/a"),
+            _paper_candidate(2, "10.1000/b"),
+            _paper_candidate(3, "10.1000/c"),
+        ]
+    }
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=12, verification_targets=2
+    )
+    updated = search_verification.annotate_bundles(reported, bundles)
+    first, second, third = updated["candidates"]
+    # 실패한 후보를 지우지 않는다. 상태와 사유가 그대로 남아 미검증 참고 후보로
+    # 인쇄된다.
+    assert first["verification"]["status"] == search_manifest.VERIFY_FETCH_FAILED
+    assert first["verification"]["detail"]
+    assert second["verification"]["status"] == search_manifest.VERIFY_FETCH_FAILED
+    assert third["verification"]["status"] == search_manifest.VERIFY_RECORD_FETCHED
+    assert third["verification"]["selection_role"] == (
+        search_verification.ROLE_BACKFILL
+    )
+    # 첫 번째 이월은 첫 번째 실패로 빈 자리를 받은 것이다.
+    assert third["verification"]["backfill_for"] == "10.1000/a"
+    assert "10.1000/a" in third["verification"]["detail"]
+    assert third["official_evidence"]["backfill_for"] == "10.1000/a"
+
+
+def test_backfill_stops_once_the_goal_is_met():
+    """목표를 채우면 남은 예비는 부르지 않는다. 미시도는 실패가 아니다."""
+    backend = _StubBackend(
+        {"10.1000/a": "초록", "10.1000/b": "초록", "10.1000/c": "초록"}
+    )
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=12, verification_targets=2
+    )
+    untried = bundles["10.1000/c"]
+    assert untried.status == search_verification.STATUS_NOT_ATTEMPTED
+    assert untried.reason_code == "literature_verification_goal_met"
+    assert "10.1000/c" not in {doi for doi, _ in backend.calls}
+
+
+def test_backfill_never_walks_past_the_shortlist():
+    """shortlist 밖은 없다. 전부 실패해도 목록을 넘어 조회하지 않는다."""
+    backend = _StubBackend({})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=99, verification_targets=2
+    )
+    assert len(bundles) == 3
+    assert {doi for doi, _ in backend.calls} == {
+        "10.1000/a",
+        "10.1000/b",
+        "10.1000/c",
+    }
+    assert all(
+        bundle.status == search_verification.STATUS_FETCH_FAILED
+        for bundle in bundles.values()
+    )
+
+
+def test_backfill_respects_the_explicit_fetch_budget():
+    """호출 예산이 끝나면 이월도 끝난다. 남은 후보는 미시도로 적는다."""
+    backend = _StubBackend({"10.1000/d": "초록"})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c", "10.1000/d")
+    # 앞 세 건이 예산을 다 쓴다. 초록을 가진 d 가 뒤에 있어도 부르지 않는다.
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=3, verification_targets=2
+    )
+    assert len(backend.calls) == 3
+    last = bundles["10.1000/d"]
+    assert last.status == search_verification.STATUS_NOT_ATTEMPTED
+    assert last.reason_code == "literature_fetch_budget_exhausted"
+
+
+def test_backfill_stops_when_the_http_time_budget_is_spent():
+    """HTTP 시간 예산이 바닥나면 부르지 않는다. 실패인 줄 알면서 부르지 않는다."""
+    backend = _StubBackend({}, http_budget=2.0)
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=99, verification_targets=3
+    )
+    assert len(backend.calls) == 2
+    stopped = bundles["10.1000/c"]
+    assert stopped.status == search_verification.STATUS_NOT_ATTEMPTED
+    assert stopped.reason_code == "literature_http_budget_exhausted"
+
+
+def test_shortlist_limit_caps_what_can_be_attempted():
+    """예비는 shortlist 상한까지만 만든다. 그 밖은 상한 제외로 기록한다."""
+    reported = {
+        "candidates": [
+            _paper_candidate(index, f"10.1000/p-{index}")
+            for index in range(1, 7)
+        ]
+    }
+    dropped: list = []
+    found = search_verification.literature_targets(
+        reported, limit=2, shortlist_limit=4, dropped=dropped
+    )
+    assert len(found) == 4
+    roles = [target.selection_role for target in found]
+    assert roles == [
+        search_verification.ROLE_PRIMARY,
+        search_verification.ROLE_PRIMARY,
+        search_verification.ROLE_BACKFILL,
+        search_verification.ROLE_BACKFILL,
+    ]
+    assert [row["doc_number"] for row in dropped] == [
+        "10.1000/p-5",
+        "10.1000/p-6",
+    ]
+    assert dropped[0]["reason_code"] == "literature_verification_target_limit"
+
+
+def test_a_shortlisted_out_candidate_says_which_cap_dropped_it():
+    """상한 제외와 미시도는 다른 말이다. 후보마다 자기 사유를 받는다."""
+    reported = {
+        "candidates": [
+            _paper_candidate(1, "10.1000/a"),
+            _paper_candidate(2, "10.1000/b"),
+        ]
+    }
+    dropped: list = []
+    found = search_verification.literature_targets(
+        reported, limit=1, shortlist_limit=1, dropped=dropped
+    )
+    backend = _StubBackend({"10.1000/a": "초록"})
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=4, verification_targets=1
+    )
+    updated = search_verification.annotate_bundles(reported, bundles, dropped)
+    excluded = updated["candidates"][1]["verification"]
+    assert excluded["status"] == search_manifest.VERIFY_NOT_ATTEMPTED
+    assert excluded["reason_code"] == "literature_verification_target_limit"
+    # 특허 채널의 사유로 설명하지 않는다. 이 후보를 자른 것은 논문 상한이다.
+    assert "EPO OPS" not in excluded["detail"]
+    assert "논문 후보 상한" in excluded["detail"]
+
+
+def test_the_shortlist_wins_when_the_goal_is_set_higher():
+    """확보 목표가 shortlist 보다 크게 설정돼도 시도 상한을 넘지 않는다."""
+    reported = {
+        "candidates": [
+            _paper_candidate(index, f"10.1000/p-{index}") for index in range(1, 8)
+        ]
+    }
+    found = search_verification.literature_targets(
+        reported, limit=6, shortlist_limit=3
+    )
+    assert len(found) == 3
+    # 예비가 없다. 세 건 전부가 정규 선택이고, 그 밖은 부르지 않는다.
+    assert all(
+        target.selection_role == search_verification.ROLE_PRIMARY
+        for target in found
+    )
+    backend = _StubBackend({})
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=99, verification_targets=6
+    )
+    assert len(backend.calls) == 3
+    assert len(bundles) == 3
+
+
+# --- 통계 -----------------------------------------------------------------
+def test_summary_separates_selected_attempted_and_verified():
+    """'대상 8건'이 고른 8건인지 부른 8건인지 알 수 있어야 한다."""
+    backend = _StubBackend({"10.1000/c": "초록"})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c", "10.1000/d")
+    order = [
+        {"position": position + 1, "doc_number": target.doc_key}
+        for position, target in enumerate(found)
+    ]
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=12, verification_targets=2
+    )
+    summary = search_verification.literature_verification_summary(
+        found,
+        bundles,
+        verification_targets=2,
+        shortlist_limit=4,
+        max_fetches=12,
+        order=order,
+    )
+    assert summary["selected"] == 2
+    assert summary["shortlisted"] == 4
+    # a·b 가 실패해 c 를 불렀고, c 로 목표를 채우지 못해 d 까지 불렀다.
+    assert summary["attempted"] == 4
+    assert summary["verified"] == 1
+    assert summary["fetch_failed"] == 3
+    assert summary["backfill_attempted"] == 2
+    assert summary["backfill_verified"] == 1
+    assert summary["not_attempted"] == 0
+    assert summary["limits"]["verification_targets"] == 2
+    # 계획만이 아니라 실제 결과가 감사 기록에 붙는다.
+    assert order[2]["attempted"] is True
+    assert order[2]["outcome"] == search_verification.STATUS_VERIFIED
+    assert order[2]["backfill_for"] == "10.1000/a"
+
+
+def test_summary_counts_untried_reserves_as_not_attempted():
+    backend = _StubBackend({"10.1000/a": "초록", "10.1000/b": "초록"})
+    found = _shortlist("10.1000/a", "10.1000/b", "10.1000/c")
+    bundles = search_verification.fetch_literature(
+        found, backend, max_fetches=12, verification_targets=2
+    )
+    summary = search_verification.literature_verification_summary(
+        found, bundles, verification_targets=2, shortlist_limit=3, max_fetches=12
+    )
+    assert (summary["attempted"], summary["verified"]) == (2, 2)
+    assert summary["not_attempted"] == 1
+    assert summary["backfill_attempted"] == 0
 
 
 # --- 근거 확보 -------------------------------------------------------------

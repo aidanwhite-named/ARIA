@@ -312,21 +312,28 @@ def test_manifest_carries_the_group_definitions_it_used() -> None:
     assert manifest["group_definitions"] == search_manifest.GROUP_DEFINITIONS
 
 
-def test_group_definitions_match_the_prompt_body() -> None:
-    """프롬프트 본문의 그룹 정의와 코드의 정의가 글자 그대로 같아야 한다.
+def test_group_definitions_come_from_the_program_contract() -> None:
+    """그룹 정의는 프로그램이 소유하고 매 실행에 그대로 나간다.
 
-    모델은 감사 블록에 "A"/"B"/"C" 라는 글자만 넘기고 그 글자의 뜻은 프롬프트
-    본문이 정한다. 두 곳이 갈라지면 모델이 한 정의로 분류한 문헌이 다른 정의의
-    제목 아래 인쇄된다. 2026-08-25 실행에서 실제로 B 와 C 가 뒤집혀 나갔고,
-    그것을 잡는 시험이 없었다.
+    모델은 감사 블록에 "A"/"B" 라는 글자만 넘기고 그 글자의 뜻은 프롬프트가
+    정한다. 예전에는 그 문장이 사용자 프롬프트 본문에 있었고, 그래서 두 곳이
+    갈라질 수 있었다 — 2026-08-25 실행에서 실제로 B 와 C 가 뒤집혀 나갔다.
+
+    이제 정의는 search_contract 가 코드의 정의에서 만들어 붙인다. 사용자가 검색
+    전략을 어떻게 고쳐도 이 문장은 바뀌지 않는다.
     """
-    body = (
-        Path(__file__).resolve().parents[2] / "prompt" / "search_prompt.md"
-    ).read_text(encoding="utf-8")
+    from app import search_contract, search_prompt
+
+    contract = search_contract.group_definitions_section()
     for group, definition in search_manifest.GROUP_DEFINITIONS.items():
         assert (
-            f"{group}. {definition}" in body
-        ), f"프롬프트 본문에 그룹 {group} 정의가 코드와 같은 문장으로 없습니다."
+            f"{group}. {definition}" in contract
+        ), f"프로그램 계약에 그룹 {group} 정의가 코드와 같은 문장으로 없습니다."
+
+    # 전략에 그룹 이야기가 한 글자도 없어도 조립된 본문에는 들어간다.
+    rendered = search_prompt.compose("아무 전략이나 적는다.", "청구항 1. 장치.").body
+    for group, definition in search_manifest.GROUP_DEFINITIONS.items():
+        assert f"{group}. {definition}" in rendered
 
 
 def test_frontend_fallback_titles_match_the_backend_definitions() -> None:

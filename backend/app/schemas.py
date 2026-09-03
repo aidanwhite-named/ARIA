@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .enums import AttachmentRole, JobKind, OutputMode, RelationType
+from .enums import AttachmentRole, JobKind, OutputMode, PromptKind, RelationType
 
 
 class PromptBase(BaseModel):
@@ -28,7 +28,17 @@ class PromptBase(BaseModel):
 
 
 class PromptCreate(PromptBase):
-    pass
+    # 만들 프롬프트의 종류. 생략하면 분석 프롬프트다 — 이 필드를 모르는 기존
+    # 클라이언트의 동작이 바뀌지 않아야 한다.
+    kind: str = PromptKind.ANALYSIS
+
+    @field_validator("kind")
+    @classmethod
+    def _check_kind(cls, value: str) -> str:
+        allowed = {item.value for item in PromptKind}
+        if value not in allowed:
+            raise ValueError(f"kind 는 {sorted(allowed)} 중 하나여야 합니다.")
+        return value
 
 
 class PromptUpdate(BaseModel):
@@ -54,6 +64,9 @@ class PromptUpdate(BaseModel):
 class PromptOut(PromptBase):
     id: str
     enabled: bool
+    # 어느 작업의 프롬프트인가. 파일 메타데이터가 정하며 API 로 바꿀 수 없다 —
+    # 종류와 본문 계약이 함께 움직여야 한다.
+    kind: str = PromptKind.ANALYSIS
     # 프롬프트 파일 메타데이터에서만 정한다. 본문과 출력 계약이 함께 움직여야
     # 해서 API 로는 바꿀 수 없다.
     capabilities: list[str] = Field(default_factory=list)
@@ -66,13 +79,21 @@ class PromptOut(PromptBase):
 class PromptCatalogOut(PromptOut):
     """프롬프트 관리 화면에 표시하는 작업별 카탈로그 항목."""
 
-    kind: str
     editable: bool = True
     deletable: bool = True
 
 
 class PromptImportItem(PromptBase):
-    pass
+    # 내보내기가 적어 준 종류. 없으면 분석이다(옛 내보내기 파일 호환).
+    kind: str = PromptKind.ANALYSIS
+
+    @field_validator("kind")
+    @classmethod
+    def _check_kind(cls, value: str) -> str:
+        allowed = {item.value for item in PromptKind}
+        if value not in allowed:
+            raise ValueError(f"kind 는 {sorted(allowed)} 중 하나여야 합니다.")
+        return value
 
 
 class PromptImportRequest(BaseModel):

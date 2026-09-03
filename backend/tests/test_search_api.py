@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app import search_report
 from app.enums import ErrorCode, JobKind, JobStatus
 
 from .conftest import wait_for_job
@@ -72,8 +71,9 @@ def test_report_is_generated_from_structured_fields(client) -> None:
     report = job["result_text"] or ""
 
     assert "ARIA_SEARCH_LOG_V1" not in report
-    assert "# 유사 특허·논문 검토 후보" in report
-    assert search_report.DISCLAIMER in report
+    assert "유사 특허·논문 검토 후보" not in report
+    assert "현재 검색 결과는 문헌 검토 후보 탐색 자료" not in report
+    assert "이 보고서는 ARIA 가 검증한 구조화 기록에서 생성했습니다" not in report
     # 모델이 쓴 제목은 보고서 본문이 아니다.
     assert "유사 문헌 검토 후보 (테스트)" not in report
     # 구조화 필드에서 온 값은 들어간다.
@@ -616,7 +616,9 @@ def test_gap_search_uses_selected_components_in_combined_then_individual_order(
     manifest = job["search_manifest"]
     assert manifest["policy"]["search_strategy"] == "combined_then_individual"
     assert manifest["input"]["search_focus"]["source_job_id"] == source_id
-    assert "# 미대응 구성 보완 검색 후보" in (job["result_text"] or "")
+    report = job["result_text"] or ""
+    assert "# 미대응 구성 보완 검색 후보" not in report
+    assert "## 검색 대상 미대응 구성" in report
     assert "1차 조합 검색 → 2차 개별 검색" in (job["result_text"] or "")
 
     final_prompt = client.get(f"/api/jobs/{job['id']}/final-prompt").text

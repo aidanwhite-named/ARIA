@@ -781,6 +781,10 @@ class DeterministicSearchProvider(Provider):
 
     async def execute(self, request: ExecutionRequest, emit: EmitFn) -> ExecutionOutcome:
         self._cancelled.discard(request.job_id)
+        # 분석 대역과 같은 기록을 남긴다. 검색 경로에서도 "무엇이 실제로
+        # 나갔는가"를 결과 텍스트가 아니라 원본 요청에서 읽어야 한다 — 검색
+        # 전략 본문이 최종 프롬프트의 어느 자리에 들어갔는지는 결과로 알 수 없다.
+        RECEIVED.append(request)
         message = request.user_message
         policy = request.tool_policy
 

@@ -75,6 +75,10 @@ STATUS_VERIFIED = "verified"          # 공식 응답을 받아 아티팩트로 
 STATUS_FETCH_FAILED = "fetch_failed"  # 조회를 시도했고 실패했다
 STATUS_NOT_ATTEMPTED = "not_attempted"  # 조회 자체를 하지 않았다(형식·예산·취소)
 
+#: 선택된 자리가 처음부터 그 후보의 것이었는가, 앞 후보의 실패로 넘어온 것인가.
+ROLE_PRIMARY = "primary"
+ROLE_BACKFILL = "backfill_reserve"
+
 # 받아올 구성요소. biblio 는 서지, abstract 는 초록, claims 는 청구항이다.
 # 순서가 곧 우선순위다 — 예산이 모자라면 뒤에서부터 못 받는다. 기술적 근거인
 # 청구항·초록을 서지보다 먼저 확보한다.
@@ -259,11 +263,20 @@ class EvidenceBundle:
     doc_key: str = ""
     status: str = STATUS_NOT_ATTEMPTED
     reason: str = ""
+    #: 미시도·실패의 사유를 상태보다 좁게 말한다. 비어 있으면 상태에서 뽑는다.
+    reason_code: str = ""
     backend_id: str = search_manifest.EPO_BACKEND_ID
     fetched_at: str = ""
     calls: list = field(default_factory=list)
     record: object | None = None
     texts: dict = field(default_factory=dict)
+    #: 이 후보가 왜 검증 자리를 받았는가(선택 정책의 사유 코드).
+    selection_reason: str = ""
+    #: 이 자리가 처음부터 이 후보의 것이었는가(primary), 앞 후보의 조회 실패로
+    #: 넘어온 것인가(backfill_reserve).
+    selection_role: str = ROLE_PRIMARY
+    #: 이월된 자리라면 **누구의** 실패로 넘어왔는가. 감사 기록용이다.
+    backfill_for: str = ""
 
     @property
     def verified(self) -> bool:
@@ -293,16 +306,26 @@ class EvidenceBundle:
             "calls": [dict(call) for call in self.calls],
             "artifact_ids": self.artifact_ids,
             "fields": sorted(self.texts),
+            "selection_reason": self.selection_reason,
+            "selection_role": self.selection_role,
+            "backfill_for": self.backfill_for,
         }
 
 
 @dataclass(frozen=True)
 class Target:
-    """조회할 후보 하나. 모델이 적은 번호와 ARIA 가 정규화한 번호를 함께 든다."""
+    """조회할 후보 하나. 모델이 적은 번호와 ARIA 가 정규화한 번호를 함께 든다.
+
+    ``selection_role`` 이 ``ROLE_BACKFILL`` 인 대상은 **예비**다. 앞 후보의 조회가
+    실패해 자리가 비었을 때만 시도한다. 목록에 들어 있다는 것과 시도한다는 것은
+    다른 말이므로 둘을 한 값으로 뭉개지 않는다.
+    """
 
     index: int
     doc_number: str
     doc_key: str
+    selection_reason: str = ""
+    selection_role: str = ROLE_PRIMARY
 
 
 # --- 검증 대상 선택 정책 ---------------------------------------------------
@@ -328,6 +351,7 @@ class Target:
 SELECT_REUSABLE = "reusable_official_artifact"
 SELECT_REUSABLE_PARTIAL = "partially_reusable_artifact"
 SELECT_EPO_DISCOVERY = "epo_discovery"
+SELECT_PAGE_EVIDENCE = "page_observed_ab"
 SELECT_LITERATURE_DISCOVERY = "literature_discovery"
 SELECT_CANDIDATE_ORDER = "candidate_order"
 
@@ -335,6 +359,7 @@ SELECT_RANKING = (
     SELECT_REUSABLE,
     SELECT_REUSABLE_PARTIAL,
     SELECT_EPO_DISCOVERY,
+    SELECT_PAGE_EVIDENCE,
     SELECT_LITERATURE_DISCOVERY,
     SELECT_CANDIDATE_ORDER,
 )
@@ -349,9 +374,19 @@ _SELECT_LABELS = {
         "받으면 됨"
     ),
     SELECT_EPO_DISCOVERY: "EPO 독립 검색이 데려온 후보",
+    SELECT_PAGE_EVIDENCE: (
+        "페이지를 열어 본문 근거로 A/B 를 받았지만 공식 근거가 아직 없는 후보"
+    ),
     SELECT_LITERATURE_DISCOVERY: "ARIA 서지 검색이 데려온 논문 후보",
     SELECT_CANDIDATE_ORDER: "후보 목록 순서",
 }
+
+#: 논문 채널의 순위 → 선택 사유. 인덱스가 곧 순위다.
+_LITERATURE_SELECT_REASONS = (
+    SELECT_PAGE_EVIDENCE,
+    SELECT_LITERATURE_DISCOVERY,
+    SELECT_CANDIDATE_ORDER,
+)
 
 
 def _reuse_plans(reuse) -> dict:
@@ -607,10 +642,37 @@ def targets(
     return found
 
 
+def _page_evidenced_ab(candidate: dict) -> bool:
+    """웹 페이지를 실제로 열어 **본문 근거로** A/B 를 본 후보인가.
+
+    셋을 모두 요구한다.
+
+      1. 분류가 A 또는 B 다(정식이든 잠정이든). 등급을 가리지 않는다 — B 만
+         특별 취급하면 같은 근거를 가진 A 후보가 뒤로 밀린다.
+      2. 페이지 열람에 성공했다(page_fetch_succeeded).
+      3. 그 페이지 관측에 근거한 대응 행이 하나 이상 있다(page_supported_rows).
+
+    2·3 이 검색 스니펫과 페이지 본문을 가르는 선이다. 검색 결과 요약만 보고 적은
+    분류는 page_fetch_succeeded 가 거짓이거나 대응 행이 0 이므로 이 우선순위를
+    받지 못한다.
+
+    제목·DOI·IPC·기술 분야는 보지 않는다. 특정 문헌을 이름으로 앞세우는 규칙은
+    다음 실행에서 다른 문헌에 대해 같은 실패를 되풀이한다.
+    """
+    view = search_manifest.classification_view(candidate)
+    claimed = view["group"] or view["provisional_group"]
+    if claimed not in search_manifest.WRITE_GROUPS:
+        return False
+    if not candidate.get("page_fetch_succeeded"):
+        return False
+    return _int(candidate.get("page_supported_rows")) > 0
+
+
 def literature_targets(
     reported: dict | None,
     *,
     limit: int = 8,
+    shortlist_limit: int | None = None,
     dropped: list | None = None,
     order: list | None = None,
 ) -> list[Target]:
@@ -621,12 +683,36 @@ def literature_targets(
     적이 없었고, 웹에서 발행사 사이트가 403 을 돌려주자 끝까지 미확인으로
     남았다. 이 함수가 그 후보들을 받는다.
 
-    ARIA 서지 검색이 데려온 후보를 먼저 고른다 — 그 후보는 이 채널이 유일하게
-    만든 것이라, 상한에 걸려 잘리면 채널을 켠 의미가 사라진다.
+    순서는 **공식 검증이 왜 필요한가**로 정한다.
+
+      1. 페이지를 열어 본문 근거로 A/B 를 본 후보. 유사성은 이미 관측됐고
+         모자란 것은 공식 근거뿐이다.
+      2. ARIA 서지 검색이 데려온 후보. 이 채널이 유일하게 만든 후보다.
+      3. 나머지 — 후보 목록 순서대로.
+
+    1 을 2 앞에 둔 이유는 2026-09-02 실행이다. 서지 검색이 데려온 후보 8건이
+    상한을 통째로 가져가, 웹에서 페이지까지 열고 대응 행 4개를 얻은 잠정 B 후보가
+    공식 검증을 한 번도 받지 못했다. 그 8건 중 4건은 초록이 없어 실패했는데도
+    자리는 넘어가지 않았다. 서지 검색 결과는 관련성 판단을 거치지 않은 목록이고,
+    페이지 관측은 이미 대조된 관측이다. 뒤엣것을 먼저 확인한다.
+
+    같은 순위 안에서는 후보 목록 순서를 지킨다(안정 정렬).
+
+    ``limit`` 은 **확보하려는 검증 문헌 수**이고, ``shortlist_limit`` 은 그것을
+    채우려고 시도해 볼 수 있는 후보 수의 상한이다. 앞쪽 ``limit`` 건이 정규
+    선택(``ROLE_PRIMARY``)이고 그 뒤는 예비(``ROLE_BACKFILL``)로, 앞 후보의 조회가
+    실패했을 때만 :func:`fetch_literature` 가 시도한다. ``shortlist_limit`` 을 주지
+    않으면 예비를 두지 않아 예전과 같은 동작이 된다.
     """
     from .patent_search import literature_client
 
     cap = max(0, int(limit or 0))
+    shortlist = cap if shortlist_limit is None else max(0, int(shortlist_limit or 0))
+    # shortlist 가 확보 목표보다 작게 설정된 실행에서는 shortlist 가 이긴다.
+    # 시도 상한을 넘겨서까지 목표를 채우면 "무제한 조회하지 않는다"가 깨지고,
+    # 정규 선택이 shortlist 보다 많아져 감사 기록의 수도 서로 맞지 않게 된다.
+    cap = min(cap, shortlist)
+
     ranked: list[tuple[int, int, dict, str]] = []
     seen: set[str] = set()
     for position, candidate in enumerate((reported or {}).get("candidates") or []):
@@ -639,8 +725,14 @@ def literature_targets(
         if doi in seen:
             continue
         seen.add(doi)
-        origins = search_manifest.discovery_origins(candidate)
-        rank = 0 if search_manifest.DISCOVERY_LITERATURE in origins else 1
+        if _page_evidenced_ab(candidate):
+            rank = 0
+        elif search_manifest.DISCOVERY_LITERATURE in search_manifest.discovery_origins(
+            candidate
+        ):
+            rank = 1
+        else:
+            rank = 2
         ranked.append((rank, position, candidate, doi))
 
     ranked.sort(key=lambda row: (row[0], row[1]))
@@ -648,10 +740,8 @@ def literature_targets(
     found: list[Target] = []
     for rank, _position, candidate, doi in ranked:
         index = int(candidate.get("index") or 0)
-        reason = (
-            SELECT_LITERATURE_DISCOVERY if rank == 0 else SELECT_CANDIDATE_ORDER
-        )
-        if len(found) >= cap:
+        reason = _LITERATURE_SELECT_REASONS[rank]
+        if len(found) >= shortlist:
             if dropped is not None:
                 dropped.append(
                     {
@@ -659,15 +749,18 @@ def literature_targets(
                         "doc_number": doi,
                         "reason_code": "literature_verification_target_limit",
                         "detail": (
-                            f"논문 검증 후보 상한({cap}건)을 넘어 이 후보는 공식 "
-                            "서지 대조를 시도하지 않았습니다."
+                            f"논문 후보 상한({shortlist}건)을 넘어 이 후보는 공식 "
+                            "서지 대조를 시도하지 않았습니다. 선택 정책에서의 "
+                            f"순위는 '{_SELECT_LABELS[reason]}' 였습니다."
                         ),
                         "selection_reason": reason,
+                        "selection_role": ROLE_BACKFILL,
                         "expected_fetches": len(LITERATURE_CONSTITUENTS),
                         "missing_constituents": list(LITERATURE_CONSTITUENTS),
                     }
                 )
             continue
+        role = ROLE_PRIMARY if len(found) < cap else ROLE_BACKFILL
         if order is not None:
             order.append(
                 {
@@ -675,13 +768,40 @@ def literature_targets(
                     "index": index,
                     "doc_number": doi,
                     "selection_reason": reason,
+                    # 처음부터 이 후보의 자리였는가, 앞 후보가 실패해야만 도는
+                    # 예비인가. 뒤엣것은 시도되지 않을 수도 있다.
+                    "selection_role": role,
                     "detail": _SELECT_LABELS.get(reason, reason),
                     "expected_fetches": len(LITERATURE_CONSTITUENTS),
                     "missing_constituents": list(LITERATURE_CONSTITUENTS),
                 }
             )
-        found.append(Target(index=index, doc_number=doi, doc_key=doi))
+        found.append(
+            Target(
+                index=index,
+                doc_number=doi,
+                doc_key=doi,
+                selection_reason=reason,
+                selection_role=role,
+            )
+        )
     return found
+
+
+def _http_budget_spent(backend) -> bool:
+    """이 백엔드의 HTTP 시간 예산이 이미 바닥났는가.
+
+    다음 후보를 부르면 어차피 예산 오류로 실패한다. 실패를 예산 안에서 세는 것과
+    실패인 줄 알면서 부르는 것은 다르므로, 부르기 전에 멈춘다. usage() 모양을
+    모르는 백엔드에서는 판단하지 않는다 — 모르는 것을 소진으로 읽지 않는다.
+    """
+    try:
+        usage = backend.usage() or {}
+        budget = float(usage.get("http_budget_seconds") or 0)
+        spent = float(usage.get("http_seconds") or 0)
+    except Exception:
+        return False
+    return bool(budget) and spent >= budget
 
 
 def fetch_literature(
@@ -690,6 +810,7 @@ def fetch_literature(
     *,
     constituents: tuple[str, ...] = LITERATURE_CONSTITUENTS,
     max_fetches: int = 12,
+    verification_targets: int | None = None,
     is_cancelled=None,
 ) -> dict[str, EvidenceBundle]:
     """논문 후보의 등록 서지를 받아 보존한다. 키는 DOI 다.
@@ -698,26 +819,76 @@ def fetch_literature(
     논문을 구분하지 않고 한 프롬프트에서 다룰 수 있게 한다. 재사용(prefetched)
     경로가 없는 것은 이 채널에 앞서 도는 검색 레인이 없기 때문이다 — 발견과
     확보가 같은 단계에서 일어난다.
+
+    목표는 "앞에서 N 명을 시도한다"가 아니라 **"대조 가능한 문헌 N 건을
+    확보한다"**이다. IEEE·Elsevier 처럼 초록을 등록하지 않는 발행사가 흔해서
+    (2026-09-02 실행: 시도 8건 중 4건이 초록 없음) 앞 후보가 실패한 만큼 자리가
+    비는데, 예전에는 그 자리가 아무에게도 넘어가지 않았다. 여기서는 확보 수가
+    ``verification_targets`` 에 닿을 때까지 shortlist 의 다음 후보로 이월한다.
+
+    무제한으로 이월하지는 않는다. 세 경계가 함께 멈춘다.
+
+      * shortlist — ``found`` 보다 뒤는 없다(:func:`literature_targets` 의
+        ``shortlist_limit``).
+      * 호출 예산 — ``max_fetches`` 회를 넘겨 부르지 않는다.
+      * HTTP 시간 예산 — 백엔드가 이미 다 썼으면 더 부르지 않는다.
+
+    ``verification_targets`` 를 주지 않으면 ``found`` 의 정규 선택 수로 읽는다.
     """
     from .patent_search import literature_client
 
     bundles: dict[str, EvidenceBundle] = {}
     spent = 0
     budget = max(0, int(max_fetches or 0))
+    if verification_targets is None:
+        primary = sum(
+            1 for target in found if target.selection_role != ROLE_BACKFILL
+        )
+        goal = primary or len(found)
+    else:
+        goal = max(0, int(verification_targets))
+    verified_count = 0
+    # 실패한 후보를 순서대로 쌓아 둔다. k 번째 이월은 k 번째 실패로 빈 자리를
+    # 받은 것이므로, 그 대응을 그대로 감사 기록에 적는다.
+    failed_docs: list[str] = []
+    backfills = 0
     for target in found:
         bundle = EvidenceBundle(
             doc_number=target.doc_number,
             doc_key=target.doc_key,
             backend_id=search_manifest.LITERATURE_BACKEND_ID,
+            selection_reason=target.selection_reason,
+            selection_role=target.selection_role,
         )
         bundles[target.doc_key] = bundle
         if is_cancelled is not None and is_cancelled():
+            bundle.reason_code = "cancelled"
             bundle.reason = "사용자가 실행을 취소했습니다."
+            continue
+        if verified_count >= goal:
+            # 목표를 채웠다. 남은 후보는 실패가 아니라 **부르지 않은** 것이다.
+            bundle.status = STATUS_NOT_ATTEMPTED
+            bundle.reason_code = "literature_verification_goal_met"
+            bundle.reason = (
+                f"앞 후보로 목표 검증 수({goal}건)를 채워 이 후보는 조회하지 "
+                "않았습니다."
+            )
             continue
         if spent >= budget:
             bundle.status = STATUS_NOT_ATTEMPTED
+            bundle.reason_code = "literature_fetch_budget_exhausted"
             bundle.reason = f"공식 서지 조회 상한({budget}건)에 도달했습니다."
             continue
+        if _http_budget_spent(backend):
+            bundle.status = STATUS_NOT_ATTEMPTED
+            bundle.reason_code = "literature_http_budget_exhausted"
+            bundle.reason = "서지 API HTTP 시간 예산을 모두 사용했습니다."
+            continue
+        if target.selection_role == ROLE_BACKFILL:
+            backfills += 1
+            bundle.backfill_for = (
+                failed_docs[backfills - 1] if backfills <= len(failed_docs) else ""
+            )
 
         record = None
         texts: dict = {}
@@ -798,6 +969,7 @@ def fetch_literature(
         if any(_technical_field(name) for name in texts) and record is not None:
             bundle.status = STATUS_VERIFIED
             bundle.reason = " / ".join(errors)
+            verified_count += 1
         else:
             bundle.status = STATUS_FETCH_FAILED
             bundle.reason = " / ".join(errors) or (
@@ -806,8 +978,79 @@ def fetch_literature(
                 if texts
                 else "공식 응답에서 본문을 얻지 못했습니다."
             )
+            # 이 실패로 자리가 하나 빈다. 뒤의 예비 후보가 그 자리를 받는다.
+            failed_docs.append(target.doc_number)
         bundle.fetched_at = bundle.fetched_at or _utcnow_iso()
     return bundles
+
+
+def literature_verification_summary(
+    found: list[Target],
+    bundles: dict[str, EvidenceBundle],
+    *,
+    verification_targets: int,
+    shortlist_limit: int,
+    max_fetches: int,
+    order: list | None = None,
+) -> dict:
+    """무엇을 골랐고, 그중 무엇을 실제로 불렀고, 무엇이 남았는가.
+
+    "검증 대상 8건"이 고른 8건인지 부른 8건인지 알 수 없던 자리를 나눈다. 고른
+    수(selected)·시도한 수(attempted)·확보한 수(verified)는 서로 다른 사실이고,
+    2026-09-02 실행에서는 각각 8·8·4 였다.
+
+    ``order`` 를 주면 선택 시점의 계획에 실제 결과를 덧붙인다. 계획만 남기면
+    "예비였는데 돌지 않았다"와 "예비였는데 돌아서 확보했다"가 같아 보인다.
+    """
+    attempted = []
+    verified = []
+    failed = []
+    for target in found:
+        bundle = bundles.get(target.doc_key)
+        if bundle is None or bundle.status == STATUS_NOT_ATTEMPTED:
+            continue
+        attempted.append(target)
+        if bundle.verified:
+            verified.append(target)
+        elif bundle.status == STATUS_FETCH_FAILED:
+            failed.append(target)
+    backfill_attempted = [
+        target for target in attempted if target.selection_role == ROLE_BACKFILL
+    ]
+    backfill_verified = [
+        target for target in verified if target.selection_role == ROLE_BACKFILL
+    ]
+    if order is not None:
+        for row in order:
+            bundle = bundles.get(str(row.get("doc_number") or ""))
+            if bundle is None:
+                continue
+            row["attempted"] = bundle.status != STATUS_NOT_ATTEMPTED
+            row["outcome"] = bundle.status
+            row["backfill_for"] = bundle.backfill_for
+            if bundle.reason_code:
+                row["reason_code"] = bundle.reason_code
+    return {
+        # 정규 선택 — 앞에서부터 목표 수만큼 고른 후보.
+        "selected": sum(
+            1 for target in found if target.selection_role != ROLE_BACKFILL
+        ),
+        # 예비를 포함해 shortlist 에 오른 후보 전체.
+        "shortlisted": len(found),
+        # 실제로 서지 API 를 부른 후보.
+        "attempted": len(attempted),
+        "verified": len(verified),
+        "fetch_failed": len(failed),
+        # 앞 후보의 실패로 자리를 받아 시도한 수 / 그중 확보한 수.
+        "backfill_attempted": len(backfill_attempted),
+        "backfill_verified": len(backfill_verified),
+        "not_attempted": len(found) - len(attempted),
+        "limits": {
+            "verification_targets": int(verification_targets),
+            "shortlist_limit": int(shortlist_limit),
+            "max_fetches": int(max_fetches),
+        },
+    }
 
 
 def annotate_not_attempted(
@@ -885,6 +1128,15 @@ def annotate_bundles(
             status = search_manifest.VERIFY_RECORD_FETCHED
             reason_code = "official_record_fetched"
             detail = "공식 문헌 본문을 확보했으며 2차 분류를 기다리고 있습니다."
+            if bundle.selection_role == ROLE_BACKFILL:
+                # 이 자리는 원래 다른 후보의 것이었다. 그것을 적지 않으면 왜 이
+                # 후보가 검증됐는지 나중에 설명할 수 없다.
+                detail = (
+                    "앞 후보의 공식 조회 실패로 넘어온 자리에서 공식 문헌 본문을 "
+                    "확보했으며 2차 분류를 기다리고 있습니다."
+                )
+                if bundle.backfill_for:
+                    detail = f"{detail} (자리를 넘겨준 후보: {bundle.backfill_for})"
             if bundle.reason:
                 # 확보에 성공했더라도 못 받은 구성요소가 있으면 함께 말한다.
                 detail = f"{detail} ({bundle.reason})"
@@ -898,10 +1150,15 @@ def annotate_bundles(
             detail = bundle.reason or "공식 문헌 조회를 시도하지 않았습니다."
         candidate["verification"] = {
             "status": status,
-            "reason_code": reason_code,
+            # 묶음이 더 좁은 사유를 알고 있으면 그것을 쓴다 — "목표를 채워 부르지
+            # 않음"과 "예산이 끝나 부르지 못함"은 사용자에게 다른 말이다.
+            "reason_code": bundle.reason_code or reason_code,
             "detail": _text(detail, 1000),
             "backend_id": bundle.backend_id,
             "artifact_ids": bundle.artifact_ids,
+            "selection_reason": bundle.selection_reason,
+            "selection_role": bundle.selection_role,
+            "backfill_for": bundle.backfill_for,
         }
     return reported
 

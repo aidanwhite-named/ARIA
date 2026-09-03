@@ -61,13 +61,24 @@ const TERMINAL: JobStatus[] = ["SUCCEEDED", "FAILED", "CANCELLED"];
  *  upload/searchUpload 를 나눈 것과 같은 이유다 — 두 축은 다른 작업이고, 축을
  *  오갈 때 한쪽 결과가 다른 쪽을 덮으면 안 된다.
  */
-type JobSlots = Record<JobKind, Job | null>;
+export type JobSlots = Record<JobKind, Job | null>;
 
 const EMPTY_SLOTS: JobSlots = { patent_analysis: null, similarity_search: null };
 
+/** 보고 있던 탭도 축마다 따로 기억한다.
+ *
+ *  한 칸을 나눠 쓰면, 분석 보고서를 보다가 검색으로 건너갔을 때 검색이 「결과
+ *  보기」로 열린다 — 아직 아무것도 돌리지 않았는데 빈 결과 화면이 뜬다. 두 축은
+ *  서로의 진행 상태를 건드리지 않는다. */
+type TabSlots = Record<JobKind, RunTab>;
+
+const EMPTY_TABS: TabSlots = { patent_analysis: "input", similarity_search: "input" };
+
+const KINDS: JobKind[] = ["patent_analysis", "similarity_search"];
+
 type Persisted = {
   jobIds: Partial<Record<JobKind, string | null>>;
-  activeTab: RunTab;
+  activeTabs: Partial<Record<JobKind, RunTab>>;
   jobKind: JobKind;
   claimText: string;
   searchClaimText: string;
@@ -79,8 +90,14 @@ export interface RunSession {
   /** 지금 보고 있는 축의 실행. 축을 바꾸면 그 축의 실행으로 바뀐다. */
   job: Job | null;
   setJob: Dispatch<SetStateAction<Job | null>>;
+  /** 두 축의 실행 전부. 상단 전환기가 "다른 축은 지금 무엇을 하고 있는지"를
+   *  이 값으로 적는다 — 두 축이 동시에 살아 있다는 것을 보여 주는 자리다. */
+  jobs: JobSlots;
+  /** 지금 보고 있는 축의 탭. */
   activeTab: RunTab;
-  setActiveTab: Dispatch<SetStateAction<RunTab>>;
+  /** 탭을 바꾼다. kind 를 주면 그 축의 탭을 바꾼다 — 축을 옮기면서 탭까지
+   *  지정할 때(미대응 구성 검색) 필요하다. 생략하면 보고 있는 축이다. */
+  setActiveTab: (tab: RunTab, kind?: JobKind) => void;
   /** 준비 중인 실행의 종류. 입력 화면이 여기서 갈린다. */
   jobKind: JobKind;
   setJobKind: Dispatch<SetStateAction<JobKind>>;
@@ -147,7 +164,7 @@ function readStored(): Persisted | null {
         : "patent_analysis";
     const jobIds: Partial<Record<JobKind, string | null>> = {};
     if (parsed.jobIds && typeof parsed.jobIds === "object") {
-      for (const slot of ["patent_analysis", "similarity_search"] as JobKind[]) {
+      for (const slot of KINDS) {
         const value = parsed.jobIds[slot];
         if (typeof value === "string") jobIds[slot] = value;
       }
@@ -155,9 +172,18 @@ function readStored(): Persisted | null {
       // 축을 나누기 전에 저장된 캐시. 그때 보고 있던 축의 실행으로 읽는다.
       jobIds[kind] = parsed.jobId;
     }
+    const activeTabs: Partial<Record<JobKind, RunTab>> = {};
+    if (parsed.activeTabs && typeof parsed.activeTabs === "object") {
+      for (const slot of KINDS) {
+        if (parsed.activeTabs[slot] === "result") activeTabs[slot] = "result";
+      }
+    } else if ((parsed as { activeTab?: unknown }).activeTab === "result") {
+      // 탭을 축마다 나누기 전에 저장된 캐시. 그때 보고 있던 축에만 얹는다.
+      activeTabs[kind] = "result";
+    }
     return {
       jobIds,
-      activeTab: parsed.activeTab === "result" ? "result" : "input",
+      activeTabs,
       jobKind:
         kind === "similarity_search"
           ? "similarity_search"
@@ -200,7 +226,10 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   const initial = stored.current;
 
   const [jobs, setJobs] = useState<JobSlots>(EMPTY_SLOTS);
-  const [activeTab, setActiveTab] = useState<RunTab>(initial?.activeTab ?? "input");
+  const [tabs, setTabs] = useState<TabSlots>(() => ({
+    ...EMPTY_TABS,
+    ...(initial?.activeTabs ?? {}),
+  }));
   const [jobKind, setJobKind] = useState<JobKind>(
     initial?.jobKind ?? "patent_analysis",
   );
@@ -222,6 +251,12 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       const slot = next?.job_kind ?? kind;
       return { ...prev, [slot]: next };
     });
+  }, []);
+  const activeTab = tabs[jobKind];
+  const setActiveTab = useCallback((tab: RunTab, kind?: JobKind) => {
+    // kind 를 주지 않으면 지금 보고 있는 축이다. jobKind 를 직접 닫아 두면 축을
+    // 바꾼 직후의 호출이 옛 축의 탭을 건드린다.
+    setTabs((prev) => ({ ...prev, [kind ?? kindRef.current]: tab }));
   }, []);
   const [claimText, setClaimText] = useState(initial?.claimText ?? "");
   const [searchClaimText, setSearchClaimText] = useState(
@@ -317,7 +352,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
           patent_analysis: jobs.patent_analysis?.id ?? null,
           similarity_search: jobs.similarity_search?.id ?? null,
         },
-        activeTab,
+        activeTabs: tabs,
         jobKind,
         claimText,
         searchClaimText,
@@ -335,7 +370,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     restoring,
     jobs.patent_analysis?.id,
     jobs.similarity_search?.id,
-    activeTab,
+    tabs,
     jobKind,
     claimText,
     searchClaimText,
@@ -356,6 +391,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     () => ({
       job,
       setJob,
+      jobs,
       activeTab,
       setActiveTab,
       jobKind,
@@ -388,7 +424,9 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     [
       job,
       setJob,
+      jobs,
       activeTab,
+      setActiveTab,
       jobKind,
       claimText,
       searchClaimText,

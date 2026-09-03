@@ -774,6 +774,8 @@ export interface CitationMapping {
   items: CitationMappingItem[];
 }
 
+export type PromptKind = "analysis" | "search";
+
 export interface Prompt {
   id: string;
   name: string;
@@ -785,14 +787,16 @@ export interface Prompt {
   accepted_file_types: string[];
   /** 프롬프트 파일 메타데이터에서만 정하는 ARIA 확장 선언. */
   capabilities: string[];
+  /**
+   * 어느 작업의 프롬프트인가. 분석 프롬프트와 검색 전략 프롬프트는 계약이
+   * 다르므로 목록도 선택도 섞지 않는다. 파일이 정하며 화면에서 바꿀 수 없다.
+   */
+  kind: PromptKind;
   created_at: string;
   updated_at: string;
 }
 
-export type PromptKind = "analysis" | "search";
-
 export interface PromptCatalogItem extends Prompt {
-  kind: PromptKind;
   editable: boolean;
   deletable: boolean;
 }
@@ -1000,6 +1004,8 @@ export interface AppSettings {
     runtime_context: string;
     runtime_context_enabled: boolean;
     default_prompt_id: string;
+    /** 검색 화면이 처음 고르는 검색 전략 프롬프트. 비어 있으면 배포본. */
+    default_search_prompt_id: string;
     default_provider: string;
     provider_paths: Record<string, string>;
     default_models: Record<string, string>;
@@ -1069,7 +1075,9 @@ export interface AppSettings {
     literature_max_results_per_query: number;
     /** 서지 API HTTP 대기 시간의 총합(초). */
     literature_http_budget_seconds: number;
-    /** 공식 서지 대조를 시도할 논문 후보 수 상한. EPO 예산과 다른 축이다. */
+    /** 공식 서지 대조로 **확보할** 논문 수. 앞 후보의 조회가 실패하면
+     *  literature_shortlist_limit 안에서 다음 후보로 이월해 이 수를 채운다.
+     *  EPO 예산과 다른 축이다. */
     literature_verification_targets: number;
   };
   warnings: string[];

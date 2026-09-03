@@ -160,6 +160,7 @@ class LiteratureBackend(PatentSearchBackend):
         # 여기서 접어 버리면 그 신호가 언제나 1 이 되어 아무 일도 하지 않는다.
         seen: set[tuple[str, str]] = set()
         notes: list[str] = []
+        failed: list[str] = []
         artifact_ids: list[str] = []
         status = 0
         request_url = ""
@@ -180,8 +181,9 @@ class LiteratureBackend(PatentSearchBackend):
                 call = call_fn(query.text, rows=rows)
             except literature_client.LiteratureError as exc:
                 # 한쪽이 죽어도 다른 쪽 결과를 버리지 않는다. 조용히 넘기지도
-                # 않는다 — 무엇이 실패했는지 notes 에 남는다.
+                # 않는다 — 무엇이 실패했는지 notes 와 failed_sources 에 남는다.
                 notes.append(f"{source} 검색 실패: {exc}")
+                failed.append(source)
                 continue
             self._search_calls += 1
             # 원본을 먼저 보존하고, 보존된 바이트에서 후보를 만든다.
@@ -216,6 +218,7 @@ class LiteratureBackend(PatentSearchBackend):
             http_status=status,
             request_url=request_url,
             notes=tuple(notes),
+            failed_sources=tuple(failed),
         )
 
     # --- 확보 -----------------------------------------------------------

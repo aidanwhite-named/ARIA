@@ -90,29 +90,51 @@ def test_prompt_catalog_contains_analysis_and_search_prompts(client) -> None:
         assert by_id[analysis["id"]]["kind"] == "analysis"
         assert by_id[analysis["id"]]["deletable"] is True
         assert by_id["search_prompt.md"]["kind"] == "search"
-        assert by_id["search_prompt.md"]["name"] == "검색 프롬프트"
+        assert by_id["search_prompt.md"]["name"] == "기본 검색 전략"
         assert by_id["search_prompt.md"]["deletable"] is False
     finally:
         client.delete(f"/api/prompts/{analysis['id']}")
 
 
 def test_search_prompt_catalog_edit_validates_execution_contract(client) -> None:
+    """검색 전략 본문에는 요구하는 표시가 없다. 반쯤 옮긴 옛 본문만 거절한다.
+
+    데이터 구간(청구항·명세서·미대응 구성)은 ARIA 가 전략 본문 뒤에 붙인다.
+    그래서 전략만 적은 본문은 **정상**이다. 다만 옛 방식으로 placeholder 를
+    직접 든 본문은 경계까지 온전해야 한다 — 반쯤 옮겨 적은 본문으로 실행하면
+    청구항이 경계 밖에 놓인다.
+    """
     current = next(
         item
         for item in client.get("/api/prompts/catalog").json()
         if item["id"] == "search_prompt.md"
     )
+    original_body = current["body"]
     unchanged = client.put(
         "/api/prompts/reserved/search_prompt.md", json={"name": current["name"]}
     )
     assert unchanged.status_code == 200
 
-    invalid = client.put(
-        "/api/prompts/reserved/search_prompt.md",
-        json={"body": "청구항 placeholder와 경계가 없는 잘못된 검색 프롬프트"},
-    )
-    assert invalid.status_code == 422
-    assert "{{CLAIM_TEXT}}" in invalid.json()["detail"]
+    try:
+        strategy_only = client.put(
+            "/api/prompts/reserved/search_prompt.md",
+            json={"body": "핵심 특징을 중심으로 넓게 검색해줘."},
+        )
+        assert strategy_only.status_code == 200
+        assert strategy_only.json()["kind"] == "search"
+
+        half_migrated = client.put(
+            "/api/prompts/reserved/search_prompt.md",
+            json={"body": "경계 없이 {{CLAIM_TEXT}} 만 남긴 본문"},
+        )
+        assert half_migrated.status_code == 422
+        assert "<CLAIM_TEXT>" in half_migrated.json()["detail"]
+    finally:
+        # 이 파일은 세션 전체가 공유한다. 되돌리지 않으면 뒤따르는 테스트가
+        # 여기서 바꾼 본문으로 돌게 된다.
+        client.put(
+            "/api/prompts/reserved/search_prompt.md", json={"body": original_body}
+        )
 
     assert (
         client.get("/api/prompts/reserved/search_prompt.md/versions").status_code

@@ -604,7 +604,9 @@ class RetrievalAgent:
             payload = {"action": getattr(item, "action", "?")}
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
-    def _action_priority(self, item, *, deferred: bool = False) -> int:
+    def _action_priority(
+        self, item, *, deferred: bool = False, deferred_attempts: int = 0
+    ) -> int:
         action_name = getattr(item, "action", "")
         component = self._component(getattr(item, "component_id", ""))
         level = component.current_priority if component else IMPORTANCE_MEDIUM
@@ -639,6 +641,10 @@ class RetrievalAgent:
             score = -10_000
         if deferred:
             score += 40
+            # 반환 예산에 여러 번 밀린 요청은 새 요청만 계속 처리하면 영구히
+            # 굶을 수 있다. 이월 횟수에 비례해 우선순위를 올려 다음 라운드에
+            # 반드시 실행 기회를 얻도록 한다.
+            score += min(deferred_attempts, 5) * 100
         return score
 
     def _enqueue_deferred(
@@ -689,7 +695,11 @@ class RetrievalAgent:
             position += 1
         scheduled.sort(
             key=lambda row: (
-                -self._action_priority(row[0], deferred=row[1] is not None),
+                -self._action_priority(
+                    row[0],
+                    deferred=row[1] is not None,
+                    deferred_attempts=row[1].attempts if row[1] is not None else 0,
+                ),
                 row[2],
             )
         )
@@ -708,9 +718,13 @@ class RetrievalAgent:
 
     def _has_blocking_deferred(self) -> bool:
         for deferred in self._deferred_actions:
-            component = self._component(
-                getattr(deferred.item, "component_id", "")
-            )
+            component_id = str(getattr(deferred.item, "component_id", "") or "").strip()
+            # get_document_status 같은 전역 action 은 특정 구성의 검토 미완료를
+            # 뜻하지 않는다. 구성 id 가 없다는 이유만으로 finalize 를 막으면
+            # 반환 예산에 밀린 상태 조회가 영구 교착을 만든다.
+            if not component_id:
+                continue
+            component = self._component(component_id)
             if component is None or component.current_priority == IMPORTANCE_HIGH:
                 return True
         return False
@@ -743,6 +757,7 @@ class RetrievalAgent:
         run = RetrievalRun()
         pending_error = ""
         results_payload: list[dict] = []
+        last_deferred_blocked_finalize: FinalizeEvidence | None = None
 
         for round_no in range(1, self.budget.max_rounds + 1):
             if self.is_cancelled():
@@ -914,6 +929,10 @@ class RetrievalAgent:
                         "검색·열람 action 이 남아 있습니다. 이월된 action 을 먼저 "
                         "실행하고, 각 문헌을 최소 한 번씩 확인한 뒤 finalize 하십시오."
                     )
+                    # 구조적으로 완전한 finalize 는 버리지 않는다. 라운드 상한에
+                    # 닿으면 마지막 유효안을 예산 소진 상태로 채택해, 이미 확인한
+                    # 근거까지 빈 패키지로 잃지 않게 한다.
+                    last_deferred_blocked_finalize = finalize
                 if problem:
                     # 마무리 요청을 받아 주지 않는다. 구성이 빠진 채로 확정하면
                     # 그 구성은 근거도 상태 사유도 없이 조용히 사라진다.
@@ -962,6 +981,20 @@ class RetrievalAgent:
                 "이 실행의 검토 범위에 포함하지 않았습니다."
             )
         self._sync_deferred_pending(run)
+        if last_deferred_blocked_finalize is not None:
+            run.finalize = last_deferred_blocked_finalize
+            run.notes.append(
+                "라운드 상한에 도달해, 이월 action 때문에 보류했던 마지막 유효 "
+                "finalize_evidence 를 예산 소진 상태로 채택했습니다."
+            )
+            self.trace.write(
+                "finalize_fallback",
+                {
+                    "components": len(last_deferred_blocked_finalize.components),
+                    "reason": "round_budget_exhausted_with_blocking_deferred",
+                },
+                round_no=self.budget.max_rounds,
+            )
         if not self._order:
             run.error_code = ErrorCode.RETRIEVAL_FAILED
             run.error = (

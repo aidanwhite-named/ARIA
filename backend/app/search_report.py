@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from html import unescape
 
-from . import search_manifest, search_verification
+from . import search_channels, search_manifest
 from .search_manifest import (
     CLASSIFICATION_LEGACY,
     CLASSIFICATION_NONE,
@@ -50,11 +50,6 @@ from .search_manifest import (
     SUPPORT_PAGE,
     SUPPORT_SNIPPET,
     classification_view,
-)
-
-DISCLAIMER = (
-    "현재 검색 결과는 문헌 검토 후보 탐색 자료이며 A/B는 AI 분류입니다. "
-    "원문 직접 인용과 법적 판단을 보장하지 않습니다."
 )
 
 # 후보 식별 게이트와 행별 근거 게이트가 들어간 매니페스트 버전. 이보다 낮은
@@ -186,10 +181,9 @@ _MAPPING_HEADERS = (
 )
 
 
-def _cell(value: str) -> str:
-    """표 한 칸. 파이프와 줄바꿈이 표를 깨지 않게 한다."""
-    text = str(value or "").replace("|", "\\|")
-    return " ".join(text.split()) or "-"
+#: 표 한 칸을 다듬는 함수. 채널 상태 사유도 같은 규칙으로 다듬어야 하므로
+#: search_channels 가 소유하고 여기서는 이름만 빌린다.
+_cell = search_channels.cell
 
 
 def _link(url) -> str:
@@ -709,76 +703,55 @@ def _focus_section(focus: dict | None) -> list[str]:
 
 
 #: 채널 상태 표에 쓰는 표시. 값이 늘어나면 프런트도 같은 말을 써야 한다.
+#: 저장되는 값은 search_channels 의 canonical 상태이고, 여기 있는 것은 그 값을
+#: 사람이 읽는 말로 옮기는 표뿐이다. 두 축을 한 문자열로 합치면 옛 기록을 다시
+#: 읽을 때 표시 문구가 바뀔 때마다 상태 판정이 함께 흔들린다.
 _STATUS_OK = "성공"
 _STATUS_PARTIAL = "부분 성공"
 _STATUS_FAILED = "실패"
 _STATUS_SKIPPED = "미실행"
 
+_STATUS_LABEL = {
+    search_channels.STATUS_SUCCEEDED: _STATUS_OK,
+    search_channels.STATUS_PARTIAL: _STATUS_PARTIAL,
+    search_channels.STATUS_FAILED: _STATUS_FAILED,
+    search_channels.STATUS_SKIPPED: _STATUS_SKIPPED,
+}
+
 
 def _channel_status_section(manifest: dict) -> list[str]:
     """보고서 맨 위의 채널별 성공·실패.
 
-    왜 맨 위인가
-    ------------
-    "EPO 검색이 됐나"를 알아내려면 예전에는 접힌 감사 블록을 펼쳐 종료 사유를
-    읽어야 했다. 그런데 그것은 결과를 읽기 **전에** 알아야 하는 사실이다 —
-    EPO 가 한 건도 못 찾은 실행과 EPO 검색이 실패한 실행은 후보 목록이 똑같이
-    보이지만 전혀 다른 실행이다.
+    판정은 search_channels 하나가 한다. 실행 시점에는 그 결과를 매니페스트에
+    저장하고(channel_status), 보고서는 **같은 함수로 다시 계산해서** 그린다.
+    렌더러가 자기 판정을 들고 있으면 저장된 기록과 화면이 갈라지는데, 같은
+    순수 함수를 부르면 그럴 여지가 없다.
 
-    검색 채널과 문헌조회 채널을 나눠 적는다. EPO 검색이 실패했는데 문헌번호
-    조회가 성공한 실행을 "EPO 검색 성공"으로 읽으면 안 된다.
+    저장된 행을 그대로 쓰지 않는 이유는 하나다. 매니페스트를 만든 뒤에 그
+    안의 채널 절을 고치는 경로가 있으면(테스트·이관·후처리) 저장된 행만 옛
+    상태로 남아, 보고서가 바로 아래에 인쇄하는 내용과 표의 상태가 어긋난다.
+    이 기록에서 계산하면 표는 언제나 이 기록을 설명한다.
+
+    상태를 저장하지 않던 옛 기록도 같은 경로로 그려진다.
     """
-    reported = manifest.get("reported") or {}
-    observed = manifest.get("observed") or {}
-    candidates = reported.get("candidates") or []
-    rows: list[tuple[str, str, str]] = []
-    states: list[str] = []
+    rows = search_channels.status_rows(manifest)
 
-    # --- 웹 검색 ---------------------------------------------------------
-    web_error = str(reported.get("web_report_error") or "")
-    queries = list(observed.get("search_queries") or [])
-    if not queries:
-        for origin_queries in (observed.get("search_queries_by_origin") or {}).values():
-            queries += list(origin_queries or [])
-    web_candidates = sum(
-        1
-        for item in candidates
-        if search_manifest.DISCOVERY_WEB in search_manifest.discovery_origins(item)
+    overall = _STATUS_LABEL.get(
+        search_channels.overall_status(rows), _STATUS_FAILED
     )
-    web_state = _STATUS_FAILED if web_error else _STATUS_OK
-    states.append(web_state)
-    rows.append((
-        "웹 검색",
-        web_state,
-        web_error or f"검색어 {len(queries)}개 · 후보 {web_candidates}건",
-    ))
 
-    # --- 웹페이지 확인 ----------------------------------------------------
-    #
-    # 검색과 열람은 다른 일이다. 검색어가 나갔다고 문헌 본문을 본 것이 아니고,
-    # 403·유료 장벽으로 한 건도 못 열어도 "웹 검색 성공"으로 보이면 후보의
-    # 근거 등급이 왜 낮은지 설명되지 않는다.
-    attempted_pages = list(observed.get("attempted_fetch_urls") or [])
-    opened_pages = list(observed.get("succeeded_fetch_urls") or [])
-    if not attempted_pages:
-        page_state = _STATUS_SKIPPED
-        page_detail = "페이지를 연 기록이 없습니다."
-    elif not opened_pages:
-        page_state = _STATUS_FAILED
-        page_detail = f"시도 {len(attempted_pages)}건 · 본문 확인 0건"
-    else:
-        page_state = (
-            _STATUS_OK
-            if len(opened_pages) >= len(attempted_pages)
-            else _STATUS_PARTIAL
-        )
-        page_detail = (
-            f"시도 {len(attempted_pages)}건 · 본문 확인 {len(opened_pages)}건"
-        )
-    states.append(page_state)
-    rows.append(("웹페이지 확인", page_state, page_detail))
+    lines = [
+        "## 채널별 실행 결과",
+        "",
+        "| 채널 | 상태 | 내용 |",
+        "| --- | --- | --- |",
+    ]
+    for row in rows:
+        label = str(row.get("label") or row.get("id") or "채널")
+        state = _STATUS_LABEL.get(str(row.get("status") or ""), _STATUS_SKIPPED)
+        lines.append(f"| {label} | {state} | {_cell(row.get('detail'))} |")
+    lines += ["", f"**전체 실행 상태: {overall}**", ""]
 
-    # --- EPO 독립 검색 ----------------------------------------------------
     epo = manifest.get("epo") or {}
     lanes = [lane for lane in (epo.get("lanes") or []) if isinstance(lane, dict)]
     epo_queries = [
@@ -787,130 +760,6 @@ def _channel_status_section(manifest: dict) -> list[str]:
         for query in (lane.get("queries") or [])
         if isinstance(query, dict) and query.get("cql")
     ]
-    if not epo.get("enabled"):
-        epo_state = _STATUS_SKIPPED
-        epo_detail = str(epo.get("reason") or "EPO 연동이 꺼져 있습니다.")
-    elif not lanes:
-        epo_state = _STATUS_SKIPPED
-        epo_detail = str(epo.get("reason") or "실행된 레인이 없습니다.")
-    else:
-        failed = [lane for lane in lanes if search_manifest.epo_lane_failed(lane)]
-        ok_lanes = [lane for lane in lanes if lane not in failed]
-        epo_candidates = sum(len(lane.get("candidates") or []) for lane in lanes)
-        if not ok_lanes:
-            epo_state = _STATUS_FAILED
-        elif failed:
-            epo_state = _STATUS_PARTIAL
-        else:
-            epo_state = _STATUS_OK
-        reasons = [
-            f"{lane.get('id') or '레인'}: "
-            + str(
-                lane.get("error")
-                or lane.get("termination_detail")
-                or lane.get("termination_reason")
-                or "사유 미기록"
-            )
-            for lane in failed
-        ]
-        epo_detail = (
-            f"검색식 {len(epo_queries)}개 · 결과 {epo_candidates}건"
-            + ("" if not reasons else " · " + " / ".join(reasons))
-        )
-    states.append(epo_state)
-    rows.append(("EPO 독립 검색", epo_state, epo_detail))
-
-    # --- EPO 공식 문헌조회 -------------------------------------------------
-    verification = manifest.get("verification") or {}
-    counts = verification.get("counts") or {}
-    documents = [
-        item for item in (verification.get("documents") or []) if isinstance(item, dict)
-    ]
-    # 무엇을 불렀는가가 아니라 무엇을 **가졌는가**로 센다. 검색 레인이 받아 둔
-    # 응답을 재사용하면 그 호출의 이름은 구성요소가 아니다.
-    held: set[str] = set()
-    for document in documents:
-        held.update(
-            search_verification.constituents_present(document.get("fields") or [])
-        )
-    scopes = [name for name in ("biblio", "abstract", "claims") if name in held]
-    targets = int(counts.get("targets") or 0)
-    verified_docs = int(counts.get("verified") or 0)
-    if not verification.get("attempted"):
-        fetch_state = _STATUS_SKIPPED
-        fetch_detail = str(verification.get("reason") or "실행하지 않았습니다.")
-    elif verified_docs == 0:
-        fetch_state = _STATUS_FAILED
-        fetch_detail = f"대상 {targets}건 · 확보 0건"
-    else:
-        fetch_state = _STATUS_OK if verified_docs >= targets else _STATUS_PARTIAL
-        fetch_detail = (
-            f"대상 {targets}건 · 확보 {verified_docs}건 · 조회 범위 "
-            + (", ".join(scopes) or "기록 없음")
-        )
-    states.append(fetch_state)
-    rows.append(("EPO 공식 문헌조회", fetch_state, fetch_detail))
-
-    # --- 논문 전용 API ----------------------------------------------------
-    #
-    # 켜져 있다는 것과 질의가 나갔다는 것, 질의가 성공했다는 것은 서로 다른
-    # 사실이다. enabled 만 보고 '정상'으로 적으면 서지 DB 가 전부 오류를
-    # 돌려준 실행도 성공으로 보인다.
-    literature = manifest.get("literature") or {}
-    paper_queries = [
-        row for row in (literature.get("queries") or []) if isinstance(row, dict)
-    ]
-    failed_queries = [row for row in paper_queries if row.get("error")]
-    if not literature.get("enabled"):
-        paper_state = _STATUS_SKIPPED
-        paper_detail = str(literature.get("reason") or "꺼져 있습니다.")
-    elif not paper_queries:
-        paper_state = _STATUS_SKIPPED
-        paper_detail = str(literature.get("reason") or "질의가 나가지 않았습니다.")
-    else:
-        found = sum(int(row.get("found") or 0) for row in paper_queries)
-        errors = " / ".join(
-            f"{_cell(str(row.get('query') or '질의'))}: {_cell(str(row.get('error')))}"
-            for row in failed_queries[:3]
-        )
-        if len(failed_queries) == len(paper_queries):
-            paper_state = _STATUS_FAILED
-            paper_detail = f"질의 {len(paper_queries)}개 전부 실패 · {errors}"
-        elif failed_queries:
-            paper_state = _STATUS_PARTIAL
-            paper_detail = (
-                f"질의 {len(paper_queries)}개 중 {len(failed_queries)}개 실패 · "
-                f"결과 {found}건 · 후보 "
-                f"{len(literature.get('candidates') or [])}건 · {errors}"
-            )
-        else:
-            paper_state = _STATUS_OK
-            paper_detail = (
-                f"질의 {len(paper_queries)}개 · 결과 {found}건 · 후보 "
-                f"{len(literature.get('candidates') or [])}건"
-            )
-    states.append(paper_state)
-    rows.append(("논문 전용 API 검색", paper_state, paper_detail))
-
-    # --- 전체 -------------------------------------------------------------
-    graded = [state for state in states if state != _STATUS_SKIPPED]
-    if not graded or all(state == _STATUS_FAILED for state in graded):
-        overall = _STATUS_FAILED
-    elif all(state == _STATUS_OK for state in graded):
-        overall = _STATUS_OK
-    else:
-        overall = _STATUS_PARTIAL
-
-    lines = [
-        "## 채널별 실행 결과",
-        "",
-        "| 채널 | 상태 | 내용 |",
-        "| --- | --- | --- |",
-    ]
-    for name, state, detail in rows:
-        lines.append(f"| {name} | {state} | {_cell(detail)} |")
-    lines += ["", f"**전체 실행 상태: {overall}**", ""]
-
     if epo_queries:
         lines += ["실제로 실행된 EPO 검색식", ""]
         lines += [f"- `{_cell(query)}`" for query in epo_queries]
@@ -1019,20 +868,6 @@ def render(manifest: dict) -> str:
     )
 
     lines = [
-        (
-            "# 미대응 구성 보완 검색 후보"
-            if focus
-            else "# 유사 특허·논문 검토 후보"
-        ),
-        "",
-        f"> {DISCLAIMER}",
-        "",
-        "이 보고서는 ARIA 가 검증한 구조화 기록에서 생성했습니다. 모델이 작성한 "
-        "산문은 보고서 본문으로 사용하지 않으며, 실행 기록에 원문 그대로 "
-        "보관합니다.",
-        "",
-        # 채널별 성공·실패는 결과를 읽기 **전에** 알아야 한다. EPO 검색이 실패한
-        # 실행과 EPO 가 한 건도 못 찾은 실행은 후보 목록이 똑같이 보인다.
         *_channel_status_section(manifest),
         "## 요약",
         "",
@@ -1160,6 +995,12 @@ def render(manifest: dict) -> str:
     lines += _focus_section(focus)
     lines += _expansion_section(manifest, reported)
 
+    # 사용자가 가장 먼저 읽어야 하는 것은 실행 과정이 아니라 분류 결과다.
+    # 지금까지 만든 채널 상태·요약·검증 설명은 잠시 보관하고, A/B/C와 잠정
+    # 분류 및 기준 미달 후보를 먼저 만든 뒤 그 아래에 붙인다.
+    context_lines = lines
+    lines = []
+
     if not candidates:
         lines += ["## 후보", "", "제시된 후보가 없습니다.", ""]
 
@@ -1196,6 +1037,7 @@ def render(manifest: dict) -> str:
 
     lines += _below_threshold_section(below_threshold)
     lines += _isolated_section(isolated)
+    lines += context_lines
     # 웹/EPO 교차 발견표, EPO 청구항 분해, 도구 격리 내부 상태, 최종 선택 턴의
     # 진행 과정은 사용자 보고서에서 뺐다. 전부 매니페스트에 그대로 남아 있고
     # 화면의 감사 패널에서 볼 수 있다 — 이 보고서는 "무엇을 찾았나"를 읽는

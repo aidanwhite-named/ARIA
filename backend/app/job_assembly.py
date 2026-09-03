@@ -144,6 +144,14 @@ class AssemblyResult:
     # 그때 EPO 는 청구항 단독 레인만 돈다.
     spec_text: str = ""
     search_prompt_sha: str = ""
+    # 검색 전략 프롬프트의 신원. 예약 프롬프트 하나로 고정되어 있던 시절에는
+    # 러너가 상수를 적었지만, 이제 실행마다 다르므로 조립본이 들고 다닌다.
+    search_prompt_id: str = ""
+    # 사용자 전략 뒤에 데이터 구간을 붙였는가(appended_sections), 아니면 옛
+    # placeholder 를 치환했는가(legacy_placeholders).
+    search_prompt_mode: str = ""
+    # 전략 본문 자체에 경계 표시가 있어 중화했는가.
+    strategy_boundary_neutralized: bool = False
     # 런타임 컨텍스트의 해시. 템플릿이 그대로여도 이것이 바뀌면 모델이 받은
     # 프롬프트가 달라진다 — Provider 별 파생 컨텍스트가 여기에 들어간다.
     search_runtime_context_sha: str = ""
@@ -539,6 +547,9 @@ def assemble_job(
     max_chars: int | None,
     claim_text: str = "",
     focus_text: str = "",
+    # 이 실행이 고른 검색 전략 프롬프트의 id. 오류 메시지와 감사 기록이 어떤
+    # 프롬프트였는지 말할 수 있어야 한다 — 이제 하나가 아니다.
+    search_prompt_id: str = search_prompt.SEARCH_PROMPT_ID,
     followup_instruction: str = "",
     prior_claim_text: str = "",
     prior_report: str = "",
@@ -690,7 +701,9 @@ def assemble_job(
     # 가장 중요한 불변조건: 기본 검색 프롬프트에는 명세서 본문이 단 한 글자도
     # 들어가지 않는다. 같은 호출 안에서 "먼저 청구항만 보라"고 부탁하는 대신
     # 컨텍스트 자체를 격리한다.
-    claim_rendered = search_prompt.render(master_prompt, claim_text, "", focus_text)
+    claim_rendered = search_prompt.compose(
+        master_prompt, claim_text, "", focus_text, prompt_id=search_prompt_id
+    )
     search_context = SEARCH_CONTEXT_BY_POLICY.get(
         tool_policy_name, SEARCH_RUNTIME_CONTEXT
     )
@@ -721,8 +734,12 @@ def assemble_job(
             "page_count": spec.page_count,
             "char_count": len(spec_text),
         }
-        assisted_rendered = search_prompt.render(
-            master_prompt, claim_text, spec_text, focus_text
+        assisted_rendered = search_prompt.compose(
+            master_prompt,
+            claim_text,
+            spec_text,
+            focus_text,
+            prompt_id=search_prompt_id,
         )
         spec_boundary_neutralized = assisted_rendered.spec_boundary_neutralized
         lanes[search_manifest.ORIGIN_SPEC_ASSISTED] = assemble_search(
@@ -737,6 +754,11 @@ def assemble_job(
         spec_document=spec_document,
         spec_text=spec_text,
         search_prompt_sha=search_prompt.sha256(master_prompt),
+        search_prompt_id=search_prompt_id,
+        search_prompt_mode=claim_rendered.mode,
+        strategy_boundary_neutralized=(
+            claim_rendered.strategy_boundary_neutralized
+        ),
         search_runtime_context_sha=hashlib.sha256(
             search_context.encode("utf-8")
         ).hexdigest(),

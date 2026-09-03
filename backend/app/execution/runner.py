@@ -25,7 +25,9 @@ from .. import (
     job_assembly,
     patent_search,
     retrieval,
+    search_channels,
     search_manifest,
+    search_plan,
     search_prompt,
     search_report,
     search_verification,
@@ -37,6 +39,7 @@ from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus, RetrievalMode
 from ..evaluation.evaluator import Verdict, evaluate
 from ..ingestion.service import IngestedFile, preprocessing_versions
 from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
+from .. import prompt_store
 from ..prompt_assembly import InputTooLarge
 from ..patent_search import retention as evidence_retention
 from ..providers.base import (
@@ -482,6 +485,7 @@ class JobRunner:
         *,
         job_id: str,
         values: dict,
+        policy: search_channels.ChannelPolicy,
         provider,
         model,
         timeout: int,
@@ -505,9 +509,11 @@ class JobRunner:
         """
         from ..patent_search import epo_agent
 
-        if not patent_search.is_enabled(values, "epo"):
+        if not policy.runs(search_channels.CHANNEL_EPO):
             return search_manifest.empty_epo_section(
-                enabled=False, reason="EPO OPS 연동이 꺼져 있습니다."
+                enabled=False,
+                reason=policy.reason(search_channels.CHANNEL_EPO)
+                or "EPO OPS 연동이 꺼져 있습니다.",
             ), []
 
         with session_scope() as session:
@@ -645,13 +651,47 @@ class JobRunner:
             "error": section_error,
         }, runs
 
+    def _kiwee_channel_record(
+        self, policy: search_channels.ChannelPolicy, values: dict
+    ) -> dict:
+        """Kiwee 채널의 기록을 만든다. **네트워크를 열지 않는다.**
+
+        정책이 이 채널을 돌지 않기로 했으면 사유만 적는다. 정책이 돌기로 했더라도
+        백엔드가 스스로 미구성이라고 답하면 그 사유를 적는다 — 어느 쪽이든 검색을
+        흉내 내지 않고, 후보를 만들지 않고, 요청을 보내지 않는다.
+
+        골격을 만든 목적이 '연동 지점을 모듈로 고정'하는 것이므로, 실행 경로에서도
+        그 지점이 눈에 보여야 한다. 채널이 아예 없는 것과 채널이 있는데 아직
+        구현되지 않은 것은 다른 상태다.
+        """
+        if not policy.runs(search_channels.CHANNEL_KIWEE):
+            section = search_manifest.empty_kiwee_section(
+                enabled=bool(values.get("kiwee_integration_enabled", False)),
+                reason=policy.reason(search_channels.CHANNEL_KIWEE),
+            )
+            section["skip_kind"] = (
+                policy.skip_kind(search_channels.CHANNEL_KIWEE)
+                or section["skip_kind"]
+            )
+            return section
+
+        # 여기 오는 경우는 지금 없다(UNIMPLEMENTED). 나중에 구현이 붙었을 때를
+        # 위해 백엔드의 자기 신고를 그대로 옮긴다.
+        status = patent_search.describe(values, "kiwee")
+        return search_manifest.empty_kiwee_section(
+            enabled=True,
+            reason=str(getattr(status, "detail", "") or "실행하지 않았습니다."),
+        )
+
     async def _run_literature_channel(
         self,
         *,
         job_id: str,
         values: dict,
+        policy: search_channels.ChannelPolicy,
         observed: dict | None,
         claim_text: str,
+        plan: search_plan.SearchPlan | None = None,
     ) -> tuple[dict, object]:
         """ARIA 가 직접 서지 DB 에 물어 **식별된** 논문 후보를 만든다.
 
@@ -674,23 +714,37 @@ class JobRunner:
         좁혀진다 — **같은 질문을 식별 가능한 곳에 다시 묻는 것.**
         """
         section = search_manifest.empty_literature_section()
-        if not patent_search.is_enabled(values, "literature"):
+        if not policy.runs(search_channels.CHANNEL_LITERATURE):
             return search_manifest.empty_literature_section(
-                reason=(
+                reason=policy.reason(search_channels.CHANNEL_LITERATURE)
+                or (
                     "비특허문헌(Crossref·Europe PMC) 연동이 꺼져 있어 ARIA "
                     "서지 검색을 하지 않았습니다."
                 )
             ), None
 
-        queries = _literature_queries(
-            observed, limit=_positive(values.get("literature_max_queries"), 6)
-        )
+        limit = _positive(values.get("literature_max_queries"), 6)
+        queries = _literature_queries(observed, limit=limit)
+        query_source = "observed"
+        if not queries and plan is not None:
+            # 웹 레인이 실패했거나 검색어를 한 건도 관측하지 못한 실행. 예전에는
+            # 여기서 채널을 통째로 건너뛰었고, 그 결과 웹 채널 하나의 실패가 논문
+            # 채널까지 함께 없앴다. 채널 격리를 지키려면 대체 입력이 있어야 한다.
+            #
+            # 대체 입력은 모델의 문장이 아니라 ARIA 의 내부 검색 계획이다. 계획은
+            # 청구항과 사용자 전략 본문에서 기계적으로 뽑은 것이므로, 이 경로가
+            # 모델 출력에 의존하지 않는다는 성질이 유지된다.
+            queries = [
+                {"query": text, "search_origins": [search_manifest.ORIGIN_CLAIM_ONLY]}
+                for text in plan.query_texts()[:limit]
+            ]
+            query_source = "plan"
         if not queries:
             return search_manifest.empty_literature_section(
                 enabled=True,
                 reason=(
-                    "모델이 실행한 검색어를 관측하지 못해 ARIA 서지 검색에 쓸 "
-                    "질의가 없습니다."
+                    "모델이 실행한 검색어를 관측하지 못했고 내부 검색 계획에서도 "
+                    "질의를 만들지 못해 ARIA 서지 검색을 하지 않았습니다."
                 ),
             ), None
 
@@ -702,6 +756,9 @@ class JobRunner:
             "max_queries": len(queries),
             "max_results_per_query": rows,
         }
+        # 이 채널이 무엇을 물었는지의 출처. 모델이 실제로 쓴 검색어인지, 모델
+        # 출력을 얻지 못해 ARIA 의 내부 계획으로 대체했는지는 다른 사실이다.
+        section["query_source"] = query_source
 
         await self._emit(
             job_id,
@@ -742,6 +799,15 @@ class JobRunner:
                 continue
             record["notes"] = list(response.notes)
             record["found"] = len(response.records)
+            # 두 서지 DB 가 모두 실패했으면 이 질의는 실패다. 예외가 올라오지
+            # 않았다는 이유로 성공이라고 적으면, 전부 죽은 실행이 "결과 0건"
+            # 으로 보인다 — 그 둘은 사용자가 할 일이 다르다.
+            record["failed_sources"] = list(response.failed_sources)
+            if response.failed_sources and not response.records:
+                record["error"] = "; ".join(
+                    note for note in response.notes if note
+                ) or ("서지 DB 조회에 모두 실패했습니다: "
+                      + ", ".join(response.failed_sources))
             section["queries"].append(record)
 
             for item in response.records:
@@ -1006,6 +1072,7 @@ class JobRunner:
         fetch_budget: int | None = None,
         epo_runs: list | None = None,
         literature_bundles: dict | None = None,
+        literature_dropped: list | None = None,
     ) -> tuple[dict | None, dict, ExecutionOutcome | None, list[str]]:
         """후보를 공식 문헌으로 확인하고 도구 없는 2차 분류를 돈다.
 
@@ -1050,6 +1117,12 @@ class JobRunner:
         # 묶음의 backend_id 와 아티팩트 참조가 들고 있다.
         bundles.update(literature_bundles)
         dropped = list(stage.dropped)
+        # 후보에게 사유를 적을 때만 논문 채널의 상한 제외를 함께 본다. EPO 검증
+        # 구간의 excluded_candidates 에 섞으면 특허 상한이 논문 후보를 잘라 낸
+        # 것처럼 읽힌다 — 두 상한은 다른 설정이고 다른 예산이다.
+        annotation_dropped = dropped + [
+            row for row in (literature_dropped or []) if isinstance(row, dict)
+        ]
         limits = dict(stage.limits)
         selection_order = list(stage.order)
         started_at = stage.started_at or _utcnow().isoformat()
@@ -1069,7 +1142,9 @@ class JobRunner:
         else:
             notes_prefix = []
 
-        reported = search_verification.annotate_bundles(reported, bundles, dropped)
+        reported = search_verification.annotate_bundles(
+            reported, bundles, annotation_dropped
+        )
 
         verified = [bundle for bundle in bundles.values() if bundle.verified]
         if job_id in self._cancel_requested:
@@ -1127,7 +1202,7 @@ class JobRunner:
                     f"({payload_bytes:,} > {byte_budget:,} bytes)."
                 )
                 reported = search_verification.annotate_classification_failure(
-                    reported, bundles, detail=detail, dropped=dropped
+                    reported, bundles, detail=detail, dropped=annotation_dropped
                 )
                 return reported, search_verification.section(
                     attempted=True,
@@ -1177,7 +1252,7 @@ class JobRunner:
         except Exception as exc:  # 1차 검색 결과는 보존하는 fail-soft 경로
             detail = f"2차 분류 실행 오류: {type(exc).__name__}: {exc}"
             reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=dropped
+                reported, bundles, detail=detail, dropped=annotation_dropped
             )
             return reported, search_verification.section(
                 attempted=True,
@@ -1199,7 +1274,7 @@ class JobRunner:
                 classification_outcome.error_message or "2차 분류 실행이 실패했습니다."
             )
             reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=dropped
+                reported, bundles, detail=detail, dropped=annotation_dropped
             )
             return reported, search_verification.section(
                 attempted=True,
@@ -1219,12 +1294,12 @@ class JobRunner:
                 classification_outcome.result_text
             )
             updated, notes = search_verification.apply_classification(
-                reported, payload, bundles, artifact_store, dropped=dropped
+                reported, payload, bundles, artifact_store, dropped=annotation_dropped
             )
         except search_verification.ClassificationError as exc:
             detail = str(exc)
             reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=dropped
+                reported, bundles, detail=detail, dropped=annotation_dropped
             )
             return reported, search_verification.section(
                 attempted=True,
@@ -1241,7 +1316,7 @@ class JobRunner:
         except Exception as exc:  # 증거 대조 오류도 1차 후보를 없애지 않는다
             detail = f"공식 근거 대조 오류: {type(exc).__name__}: {exc}"
             reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=dropped
+                reported, bundles, detail=detail, dropped=annotation_dropped
             )
             return reported, search_verification.section(
                 attempted=True,
@@ -1289,6 +1364,11 @@ class JobRunner:
             model = job.model
             job_kind = JobKind(job.job_kind or JobKind.PATENT_ANALYSIS)
             master_prompt = job.prompt_snapshot
+            # 실행 시점에 파일을 다시 읽지 않는다. 작업 생성 때 고른 프롬프트의
+            # 신원과 본문 스냅샷으로 돈다 — 큐에서 기다리는 사이 사용자가 그
+            # 전략을 고쳐도 이 실행의 계약은 흔들리지 않아야 한다.
+            prompt_id = job.prompt_id or ""
+            prompt_name = job.prompt_name or ""
             claim_text = job.claim_text
             followup_instruction = job.followup_instruction or ""
             # 생성 시점에 복사해 둔 값이다. 원본 실행을 여기서 다시 읽지 않는다.
@@ -1336,6 +1416,13 @@ class JobRunner:
         # Provider 를 만든 뒤 그 Provider 가 선언한 검색 정책으로 교체한다.
         tool_policy: ToolPolicy = NO_TOOLS
         search_budget = int(values.get("max_search_tool_calls", 40))
+
+        # --- 채널 실행 정책 --------------------------------------------------
+        #
+        # 프롬프트 본문을 보지 않는다. 어떤 채널이 도는지는 작업 종류와 설정이
+        # 정하며, 프롬프트에 "검색하지 마라"라고 적혀 있어도 이 판정은 바뀌지
+        # 않는다. 반대로 프롬프트가 채널을 켜지도 못한다.
+        channel_policy = search_channels.resolve(values)
 
         await self._emit(job_id, "stage", {"stage": "queued", "message": "실행 대기 중"})
 
@@ -1398,6 +1485,8 @@ class JobRunner:
             # --- 프롬프트 조립 -------------------------------------------
             search_prompt_sha = ""
             search_runtime_context_sha = ""
+            search_prompt_mode = ""
+            strategy_boundary_neutralized = False
             claim_boundary_neutralized = False
             spec_boundary_neutralized = False
             focus_boundary_neutralized = False
@@ -1416,6 +1505,7 @@ class JobRunner:
                     max_chars=max_chars,
                     claim_text=claim_text,
                     focus_text=render_search_focus(search_focus),
+                    search_prompt_id=prompt_id or search_prompt.SEARCH_PROMPT_ID,
                     followup_instruction=followup_instruction,
                     prior_claim_text=prior_claim_text,
                     prior_report=prior_report,
@@ -1442,6 +1532,10 @@ class JobRunner:
                     claim_boundary_neutralized = assembly.claim_boundary_neutralized
                     spec_boundary_neutralized = assembly.spec_boundary_neutralized
                     focus_boundary_neutralized = assembly.focus_boundary_neutralized
+                    search_prompt_mode = assembly.search_prompt_mode
+                    strategy_boundary_neutralized = (
+                        assembly.strategy_boundary_neutralized
+                    )
 
                     lane_budgets = _search_lane_budgets(
                         search_budget, spec_document is not None
@@ -1834,6 +1928,33 @@ class JobRunner:
 
                 return emit
 
+            # --- 내부 검색 계획 ------------------------------------------
+            #
+            # 검색을 시작하기 전에 ARIA 가 자기 스키마로 만든다. 사용자 전략
+            # 프롬프트와 청구항이 입력이고, 이 스키마는 그 프롬프트에 노출되지
+            # 않는다. 계획한 것과 실제로 실행된 검색어는 감사 기록에서 서로 다른
+            # 자리에 남는다(plan vs observed).
+            plan: search_plan.SearchPlan | None = None
+            if job_kind is JobKind.SIMILARITY_SEARCH:
+                plan = search_plan.build(
+                    claim_text=claim_text,
+                    strategy_body=master_prompt,
+                    strategy_prompt_id=prompt_id,
+                    strategy_prompt_sha256=search_prompt_sha,
+                    search_focus=search_focus,
+                    spec_provided=spec_document is not None,
+                )
+                await self._emit(
+                    job_id,
+                    "search_plan_ready",
+                    {
+                        "terms": len(plan.terms),
+                        "queries": len(plan.queries),
+                        "components": len(plan.components),
+                        "classifications": list(plan.classifications),
+                    },
+                )
+
             search_lane_outcomes: list[tuple[str, ExecutionOutcome]] = []
             search_lane_records: list[dict] = []
             lane_verdicts: list[Verdict] = []
@@ -1970,6 +2091,7 @@ class JobRunner:
                 epo_section, epo_runs = await self._run_epo_channel(
                     job_id=job_id,
                     values=values,
+                    policy=channel_policy,
                     provider=provider,
                     model=model,
                     timeout=timeout,
@@ -2160,8 +2282,10 @@ class JobRunner:
                     await self._run_literature_channel(
                         job_id=job_id,
                         values=values,
+                        policy=channel_policy,
                         observed=observed,
                         claim_text=claim_text,
+                        plan=plan,
                     )
                 )
                 reported, literature_notes = (
@@ -2182,24 +2306,49 @@ class JobRunner:
                 literature_bundles: dict = {}
                 literature_dropped: list = []
                 literature_order: list = []
+                literature_found: list = []
                 if literature_backend is not None and reported is not None:
+                    # 확보 목표와 시도 상한은 다른 축이다. 목표는 "대조 가능한
+                    # 문헌을 몇 건 확보할 것인가"이고, shortlist 상한은 그것을
+                    # 채우려고 **최대 몇 명까지 불러 볼 수 있는가**이다. 초록을
+                    # 등록하지 않는 발행사가 흔해서 둘을 같은 수로 두면 목표가
+                    # 실패 건수만큼 조용히 깎인다.
+                    literature_goal = _positive(
+                        values.get("literature_verification_targets"), 8
+                    )
+                    literature_shortlist = _positive(
+                        values.get("literature_shortlist_limit"), 10
+                    )
                     literature_found = search_verification.literature_targets(
                         reported,
-                        limit=_positive(
-                            values.get("literature_verification_targets"), 8
-                        ),
+                        limit=literature_goal,
+                        shortlist_limit=literature_shortlist,
                         dropped=literature_dropped,
                         order=literature_order,
                     )
+                    # 후보 하나에 초록·서지 두 번이 상한이다. shortlist 가 상한을
+                    # 함께 묶으므로 이월이 예산을 늘리지 않는다.
+                    literature_fetch_budget = 2 * len(literature_found)
                     if literature_found:
+                        reserve = sum(
+                            1
+                            for target in literature_found
+                            if target.selection_role
+                            == search_verification.ROLE_BACKFILL
+                        )
                         await self._emit(
                             job_id,
                             "stage",
                             {
                                 "stage": "verifying",
                                 "message": (
-                                    f"논문 후보 {len(literature_found)}건의 공식 "
-                                    "초록을 Crossref·Europe PMC 에서 확인하는 중"
+                                    f"논문 후보 {len(literature_found) - reserve}건의 "
+                                    "공식 초록을 Crossref·Europe PMC 에서 확인하는 중"
+                                    + (
+                                        f" (조회 실패 시 예비 {reserve}건으로 이월)"
+                                        if reserve
+                                        else ""
+                                    )
                                 ),
                             },
                         )
@@ -2208,7 +2357,8 @@ class JobRunner:
                                 search_verification.fetch_literature,
                                 literature_found,
                                 literature_backend,
-                                max_fetches=2 * len(literature_found),
+                                max_fetches=literature_fetch_budget,
+                                verification_targets=literature_goal,
                                 is_cancelled=(
                                     lambda: job_id in self._cancel_requested
                                 ),
@@ -2219,15 +2369,24 @@ class JobRunner:
                                 "논문 공식 서지 확보 단계 오류: "
                                 f"{type(exc).__name__}: {exc}"
                             )
+                    literature_summary = (
+                        search_verification.literature_verification_summary(
+                            literature_found,
+                            literature_bundles,
+                            verification_targets=literature_goal,
+                            shortlist_limit=literature_shortlist,
+                            max_fetches=literature_fetch_budget,
+                            order=literature_order,
+                        )
+                    )
                     literature_section["verification"] = {
-                        "target_count": len(literature_found),
+                        **literature_summary,
+                        # 옛 기록을 읽는 코드를 위해 남긴다. 다만 이 값이 "고른
+                        # 수"인지 "부른 수"인지 모호했던 것이 이번 문제의 절반이라,
+                        # 새 코드는 selected/attempted 를 쓴다.
+                        "target_count": literature_summary["selected"],
                         "excluded_candidates": literature_dropped,
                         "selection_order": literature_order,
-                        "verified": sum(
-                            1
-                            for bundle in literature_bundles.values()
-                            if bundle.verified
-                        ),
                     }
                     literature_section["usage"] = literature_backend.usage()
 
@@ -2265,6 +2424,7 @@ class JobRunner:
                     fetch_budget=remaining_fetches,
                     epo_runs=epo_runs,
                     literature_bundles=literature_bundles,
+                    literature_dropped=literature_dropped,
                 )
                 notes.extend(verification_notes)
                 if verification_outcome is not None:
@@ -2280,9 +2440,22 @@ class JobRunner:
                         ErrorCode.CANCELLED,
                         list(verdict.errors),
                     )
+                # --- Kiwee 채널 ---------------------------------------
+                #
+                # 접속·인증이 구현되지 않았다. 검색을 흉내 내지 않고, 네트워크도
+                # 열지 않고, 기록에 사유만 남긴다. 이 줄이 없으면 "Kiwee 를 봤나"에
+                # 기록이 답할 수 없다.
+                kiwee_section = self._kiwee_channel_record(channel_policy, values)
+
                 manifest = search_manifest.build(
                     claim_text=claim_text,
-                    prompt_id=search_prompt.SEARCH_PROMPT_ID,
+                    # 이 실행이 실제로 고른 검색 전략 프롬프트. 예약 상수를
+                    # 적으면 어떤 전략으로 돌았는지가 기록에서 사라진다.
+                    prompt_id=prompt_id or search_prompt.SEARCH_PROMPT_ID,
+                    prompt_name=prompt_name,
+                    prompt_kind=prompt_store.KIND_SEARCH,
+                    prompt_template_mode=search_prompt_mode,
+                    strategy_boundary_neutralized=strategy_boundary_neutralized,
                     prompt_sha256=search_prompt_sha,
                     runtime_context_sha256=search_runtime_context_sha,
                     reasoning_effort=reasoning_effort,
@@ -2318,7 +2491,10 @@ class JobRunner:
                     + list((epo_section or {}).get("lanes") or []),
                     epo=epo_section,
                     literature=literature_section,
+                    kiwee=kiwee_section,
                     verification=verification_section,
+                    channel_policy=channel_policy.as_dict(),
+                    plan=plan.as_dict() if plan is not None else None,
                     max_tool_calls_total=search_budget,
                     lane_budgets=lane_budgets,
                     max_content_reads_total=content_budget or None,

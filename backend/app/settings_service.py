@@ -28,6 +28,7 @@ EDITABLE_KEYS = frozenset(
         "runtime_context",
         "runtime_context_enabled",
         "default_prompt_id",
+        "default_search_prompt_id",
         "default_provider",
         "provider_paths",
         "default_models",

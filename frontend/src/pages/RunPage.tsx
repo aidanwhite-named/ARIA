@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import GapSearchPanel from "../components/GapSearchPanel";
+import AnalysisDegreeOverview from "../components/AnalysisDegreeOverview";
 import ResultView from "../components/ResultView";
 import DeliverySummary from "../components/DeliverySummary";
 import RetrievalManifestView from "../components/RetrievalManifestView";
@@ -16,6 +24,7 @@ import {
 } from "../lib/attachmentSelection";
 import { useRunSession } from "../lib/runSession";
 import { DELIVERY_LABEL, isNarrowed } from "../lib/types";
+import { WORKSPACE_BY_ID, workspacePath } from "../lib/workspaces";
 import type {
   AttachmentAnalysis,
   AttachmentRole,
@@ -204,11 +213,22 @@ const LANE_LABEL: Record<string, string> = {
 };
 
 
-export default function RunPage() {
+/** 한 작업의 화면.
+ *
+ *  구성대비 분석과 유사문헌 검색은 이 컴포넌트를 함께 쓰지만 같은 화면이 아니다.
+ *  어느 쪽인지는 주소가 정한다(kind) — 화면 안의 상태가 정하면 두 작업이 한
+ *  화면의 두 모드가 되고, 주소 하나를 나눠 쓰는 동안은 뒤로 가기도 즐겨찾기도
+ *  둘을 구분하지 못한다.
+ */
+export default function RunPage({ kind }: { kind: JobKind }) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const historyJobId = searchParams.get("job");
   const [prompts, setPrompts] = useState<Prompt[]>([]);
+  // 검색 전략 프롬프트는 분석 프롬프트와 다른 목록이다. 한 목록에 담으면
+  // 어느 쪽 화면에서든 상대 작업의 프롬프트를 고를 수 있게 된다.
+  const [searchPrompts, setSearchPrompts] = useState<Prompt[]>([]);
+  const [searchPromptId, setSearchPromptId] = useState("");
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [promptId, setPromptId] = useState("");
   // 빈 문자열 = 지정 안 함. 제한된 안전성 Provider 가 자동으로 선택되면
@@ -236,7 +256,7 @@ export default function RunPage() {
   // 실행 상태와 결과는 이 화면 밖(RunSessionProvider)에 있다. 메뉴를 옮기면
   // 이 컴포넌트는 언마운트되지만 보고서와 진행 중인 스트림은 그대로 남는다.
   const {
-    job,
+    jobs,
     setJob,
     activeTab,
     setActiveTab,
@@ -268,10 +288,43 @@ export default function RunPage() {
     restoring,
   } = useRunSession();
 
+  // 세션이 들고 있는 축을 주소에 맞춘다. 전환기 링크는 누를 때 이미 맞춰 두지만,
+  // 즐겨찾기·뒤로 가기로 들어오면 여기가 유일한 기회다. layout effect 로 두는
+  // 이유는 그리기 전에 맞추기 위해서다 — 한 프레임이라도 어긋나면 다른 작업의
+  // 탭과 보고서가 스쳐 지나간다.
+  useLayoutEffect(() => {
+    if (jobKind !== kind) setJobKind(kind);
+  }, [kind, jobKind, setJobKind]);
+
+  // 이 화면이 다루는 실행은 주소가 가리키는 축의 것 하나뿐이다.
+  const job = jobs[kind];
+  const workspace = WORKSPACE_BY_ID[kind];
+  const otherWorkspace =
+    WORKSPACE_BY_ID[
+      kind === "patent_analysis" ? "similarity_search" : "patent_analysis"
+    ];
+
   useEffect(() => {
-    Promise.all([api.listPrompts(), api.listProviders(), api.settings()])
-      .then(([promptList, providerList, appSettings]) => {
+    Promise.all([
+      api.listPrompts(),
+      api.listPrompts({ kind: "search" }),
+      api.listProviders(),
+      api.settings(),
+    ])
+      .then(([promptList, searchPromptList, providerList, appSettings]) => {
         setPrompts(promptList);
+        setSearchPrompts(searchPromptList);
+        // 설정에 고른 전략이 있으면 그것을, 없으면 첫 활성 전략을 쓴다.
+        // 백엔드도 같은 순서로 고르므로 화면과 실행이 어긋나지 않는다.
+        const configuredSearchPrompt = searchPromptList.find(
+          (p) => p.id === appSettings.values.default_search_prompt_id && p.enabled,
+        );
+        setSearchPromptId(
+          configuredSearchPrompt?.id ||
+            searchPromptList.find((p) => p.enabled)?.id ||
+            searchPromptList[0]?.id ||
+            "",
+        );
         setProviders(providerList);
         // 0 = 제한 없음. 화면에서는 null 로 다룬다.
         setInlineCharBudget(appSettings.values.max_inline_chars || null);
@@ -305,11 +358,21 @@ export default function RunPage() {
       .historyItem(historyJobId)
       .then((storedJob) => {
         if (cancelled) return;
+        if (storedJob.job_kind !== kind) {
+          // 다른 작업의 실행이다. 그 작업의 주소로 넘긴다 — 검색 결과가 분석
+          // 화면에 열리면 두 작업이 한 화면인 것처럼 보인다.
+          navigate(
+            workspacePath(storedJob.job_kind) +
+              "?job=" +
+              encodeURIComponent(historyJobId),
+            { replace: true },
+          );
+          return;
+        }
         setJob(storedJob);
         setLineage(null);
         setFollowupInstruction("");
-        // 어떤 종류의 실행을 열었는지에 따라 준비 화면도 그 모드로 맞춘다.
-        setJobKind(storedJob.job_kind);
+        // 청구항 칸은 두 작업이 따로 쓴다. 이 화면의 칸에 채운다.
         if (storedJob.job_kind === "similarity_search") {
           setSearchClaimText(storedJob.claim_text);
         } else {
@@ -331,22 +394,24 @@ export default function RunPage() {
     return () => {
       cancelled = true;
     };
-  }, [historyJobId]);
+  }, [historyJobId, kind]);
 
   const selectedPrompt = useMemo(
     () => prompts.find((p) => p.id === promptId) ?? null,
     [prompts, promptId],
+  );
+  const selectedSearchPrompt = useMemo(
+    () => searchPrompts.find((p) => p.id === searchPromptId) ?? null,
+    [searchPrompts, searchPromptId],
   );
   const selectedProvider = useMemo(
     () => providers.find((p) => p.provider === providerId) ?? null,
     [providers, providerId],
   );
 
-  const searching = jobKind === "similarity_search";
-  const jobKindLabel = JOB_KIND_LABEL[jobKind];
+  const searching = kind === "similarity_search";
+  const jobKindLabel = JOB_KIND_LABEL[kind];
   const searchAvailable = supportsSearch(selectedProvider);
-  const detectOnlySearch =
-    searching && selectedProvider?.capabilities?.search_tool_control === "detect_only";
   const eligibleGapComponents = useMemo(
     () =>
       job?.job_kind === "patent_analysis"
@@ -407,9 +472,9 @@ export default function RunPage() {
     const timer = setTimeout(() => {
       api
         .preflight({
-          job_kind: jobKind,
+          job_kind: kind,
           provider: providerId,
-          prompt_id: searching ? null : promptId || null,
+          prompt_id: (searching ? searchPromptId : promptId) || null,
           claim_text: activeClaim,
           batch_id: activeBatchId,
           selected_attachment_ids: activeSelection,
@@ -430,9 +495,10 @@ export default function RunPage() {
       clearTimeout(timer);
     };
   }, [
-    jobKind,
+    kind,
     providerId,
     promptId,
+    searchPromptId,
     searching,
     activeClaim,
     activeBatchId,
@@ -548,11 +614,14 @@ export default function RunPage() {
         job_kind: "similarity_search",
         provider: providerId || null,
         model: model || null,
+        // 고른 검색 전략. 보내지 않으면 백엔드가 설정 기본값을 쓰지만, 화면이
+        // 보여 준 전략과 실행한 전략이 달라질 수 있으므로 명시해서 보낸다.
+        prompt_id: searchPromptId || null,
         claim_text: searchClaimText,
         batch_id: prepared?.batch_id ?? null,
       });
       setJob(created);
-      navigate("/run", { replace: true });
+      navigate(workspacePath("similarity_search"), { replace: true });
       // 이 batch 는 방금 만든 작업에 귀속됐다. 그대로 다시 보내면 백엔드가
       // 거절한다. 고른 File 은 남겨 두므로 다시 실행하면 새 batch 로 올라간다.
       setSearchUpload(null);
@@ -578,16 +647,19 @@ export default function RunPage() {
         job_kind: "similarity_search",
         provider: providerId || null,
         model: model || null,
+        prompt_id: searchPromptId || null,
         source_job_id: job.id,
         search_component_ids: selectedGapIds,
       });
-      setJobKind("similarity_search");
       setSearchClaimText(created.claim_text);
       setJob(created);
       setGapSearchOpen(false);
       setSelectedGapIds([]);
-      setActiveTab("result");
-      navigate("/run", { replace: true });
+      // 이 실행은 검색 작업이다. 분석 화면에서 시작했더라도 결과는 검색 화면에
+      // 열린다 — 두 작업은 결과물이 다르고, 각자의 자리에 남아야 한다.
+      setActiveTab("result", "similarity_search");
+      setJobKind("similarity_search");
+      navigate(workspacePath("similarity_search"));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -669,7 +741,7 @@ export default function RunPage() {
         followup_instruction: lineage ? followupInstruction : "",
       });
       setJob(created);
-      navigate("/run", { replace: true });
+      navigate(workspacePath("patent_analysis"), { replace: true });
       // 전처리 결과와 체크 상태는 지우지 않는다. 결과를 보고 「분석 준비」로
       // 돌아왔을 때 그대로 있어야, 선택만 다른 부분집합으로 바꿔 곧바로 다시
       // 돌릴 수 있다. 다만 이 batch 는 방금 만든 작업에 귀속됐으므로 다시 보내면
@@ -719,7 +791,7 @@ export default function RunPage() {
     setGapSearchOpen(false);
     setSelectedGapIds([]);
     setActiveTab("input");
-    navigate("/run", { replace: true });
+    navigate(workspacePath(kind), { replace: true });
   };
 
   /** 방금 본 실행을 원본으로 삼아 다음 실행을 준비한다.
@@ -762,8 +834,120 @@ export default function RunPage() {
   const displayText = job?.result_text ?? stream.streamText;
   const errors = job?.errors ?? stream.errors;
 
+  const searchSpecPanel = (
+    <section className="search-spec-panel">
+      <div className="input-panel-head">
+        <span className="input-step">2</span>
+        <div>
+          <strong>출원발명 문서 (선택)</strong>
+          <div className="hint">PDF를 더하면 검색어를 넓혀 결과를 합칩니다.</div>
+        </div>
+      </div>
+      <input
+        ref={searchSpecInput}
+        type="file"
+        accept=".pdf,application/pdf"
+        aria-label="출원발명 문서"
+        onChange={(e) => {
+          setSearchSpecFile(e.target.files?.[0] ?? null);
+          setSearchUpload(null);
+        }}
+        disabled={running || uploading}
+      />
+      {searchSpecFile && (
+        <>
+          <div className="selected-file">
+            <span className="pill accent">출원발명 문서</span>
+            <span>{searchSpecFile.name}</span>
+            <span className="faint">{formatBytes(searchSpecFile.size)}</span>
+          </div>
+          <div className="btn-row file-prepare-row">
+            <button
+              type="button"
+              className="btn"
+              onClick={prepareSearchSpec}
+              disabled={running || uploading || Boolean(searchUpload)}
+            >
+              {searchUpload
+                ? "본문 확인 완료"
+                : uploading
+                  ? "본문 확인 중…"
+                  : "본문 미리 확인"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={clearSearchSpec}
+              disabled={running || uploading}
+            >
+              빼기
+            </button>
+          </div>
+        </>
+      )}
+      {searchSpec && (
+        <div
+          className={`notice ${searchSpec.read_ok ? "info" : "danger"}`}
+          style={{ marginTop: 10 }}
+        >
+          {searchSpec.read_ok ? (
+            <>
+              본문 {searchSpec.char_count.toLocaleString()}자
+              {searchSpec.page_count ? ` · ${searchSpec.page_count}페이지` : ""} · 청구항{" "}
+              {searchClaimText.trim().length.toLocaleString()}자
+              {specOutweighsClaim && (
+                <div style={{ marginTop: 4 }}>
+                  명세서가 길어 용어 확장이 실시예에 쏠릴 수 있습니다. 결과의 보조
+                  검색 절을 확인하세요.
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <strong>본문을 읽지 못했습니다</strong>
+              <div style={{ marginTop: 4 }}>
+                {searchSpec.error ?? "알 수 없는 오류"} — 다른 PDF를 선택하거나 문서를
+                빼주세요.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+
   return (
-    <div className="page page-run" data-mode={jobKind}>
+    <div className="page page-run" data-mode={kind}>
+      {/* 작업 이름과 소개는 상단 작업 전환기에 이미 보인다. 본문은 바로
+          준비/결과 전환부터 시작해 같은 내용을 반복하지 않는다. */}
+      <div className="workspace-head no-print">
+        <div
+          className="run-tabs"
+          role="tablist"
+          aria-label={`${workspace.label} 화면`}
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "input"}
+            className={`run-tab ${activeTab === "input" ? "active" : ""}`}
+            onClick={() => setActiveTab("input")}
+          >
+            {searching ? "검색 준비" : "분석 준비"}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "result"}
+            className={`run-tab ${activeTab === "result" ? "active" : ""}`}
+            onClick={() => setActiveTab("result")}
+          >
+            결과 보기
+            {running && <span className="spinner" aria-label="실행 중" />}
+          </button>
+        </div>
+      </div>
+
       {error && <div className="notice danger">{error}</div>}
 
       {!providerId && (
@@ -775,44 +959,16 @@ export default function RunPage() {
         </div>
       )}
 
-      <div className="run-tabs no-print" role="tablist" aria-label="실행 화면">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === "input"}
-          className={`run-tab ${activeTab === "input" ? "active" : ""}`}
-          onClick={() => setActiveTab("input")}
-        >
-          {searching ? "검색 준비" : "분석 준비"}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === "result"}
-          className={`run-tab ${activeTab === "result" ? "active" : ""}`}
-          onClick={() => setActiveTab("result")}
-        >
-          결과 보기
-          {running && <span className="spinner" aria-label="실행 중" />}
-        </button>
-      </div>
-
       {activeTab === "input" && (
         <>
       <div className="card no-print run-input-card">
-        <h2 className="card-head-mode">
-          {searching ? "검색 준비" : "분석 자료 준비"}
-          <span className="mode-chip">
-            <i aria-hidden="true" />
-            {jobKindLabel}
-          </span>
-        </h2>
+        <h2>{searching ? "검색 준비" : "분석 자료 준비"}</h2>
 
         <div className="run-config-summary">
           <span>
             <strong>프롬프트</strong>{" "}
             {searching
-              ? "검색 프롬프트 (search_prompt.md)"
+              ? (selectedSearchPrompt?.name ?? "설정 필요")
               : selectedPrompt
                 ? selectedPrompt.name
                 : "설정 필요"}
@@ -840,15 +996,53 @@ export default function RunPage() {
               </div>
             )}
 
-            <section className="input-panel claim-panel search-panel-input">
+            <section className="input-panel search-panel-input">
               <div className="input-panel-head">
                 <span className="input-step">1</span>
                 <div>
+                  <strong>검색 전략</strong>
+                  <div className="hint">
+                    무엇을 중시하고 어디까지 넓힐지를 정하는 프롬프트입니다.
+                    검색 실행·보안·감사 규칙은 ARIA가 갖고 있으므로 전략을
+                    바꿔도 감사 기록과 보고서 형식은 그대로입니다.
+                  </div>
+                </div>
+              </div>
+              <select
+                id="searchPromptId"
+                aria-label="검색 전략 프롬프트"
+                value={searchPromptId}
+                onChange={(e) => setSearchPromptId(e.target.value)}
+                disabled={running}
+              >
+                {searchPrompts.length === 0 && (
+                  <option value="">검색 전략 프롬프트가 없습니다</option>
+                )}
+                {searchPrompts.map((p) => (
+                  <option key={p.id} value={p.id} disabled={!p.enabled}>
+                    {p.name}
+                    {p.enabled ? "" : " (비활성)"}
+                  </option>
+                ))}
+              </select>
+              {selectedSearchPrompt?.description && (
+                <div className="hint" style={{ marginTop: 6 }}>
+                  {selectedSearchPrompt.description}
+                </div>
+              )}
+              <div className="hint" style={{ marginTop: 6 }}>
+                <a href="#/prompts">프롬프트 관리</a>에서 검색 전략을 새로
+                만들거나 고칠 수 있습니다.
+              </div>
+            </section>
+
+            <section className="input-panel claim-panel search-panel-input">
+              <div className="input-panel-head">
+                <span className="input-step">2</span>
+                <div>
                   <strong>검색할 청구항</strong>
                   <div className="hint">
-                    청구항 전문을 그대로 붙여넣으십시오. 입력한 문장은 실행 지시가
-                    아니라 검색 대상 데이터로만 전달됩니다. 검색 범위는 여기 적은
-                    청구항이 정합니다.
+                    청구항 전문을 붙여넣으세요. 입력 내용이 검색 범위를 정합니다.
                   </div>
                 </div>
               </div>
@@ -864,125 +1058,6 @@ export default function RunPage() {
                 disabled={running}
               />
             </section>
-
-            <section className="input-panel application search-spec-panel">
-              <div className="input-panel-head">
-                <span className="input-step">2</span>
-                <div>
-                  <strong>출원발명 문서 (선택)</strong>
-                  <div className="hint">
-                    명세서 PDF 를 1건 넣으면 청구항 단독 검색과 완전히 분리된 확장
-                    검색을 추가로 실행합니다. 가능한 의미·동의어·영문 용어를 넓힌
-                    뒤 두 후보 집합을 합집합으로 병합합니다.
-                  </div>
-                </div>
-              </div>
-              <input
-                ref={searchSpecInput}
-                type="file"
-                accept=".pdf,application/pdf"
-                aria-label="출원발명 문서"
-                onChange={(e) => {
-                  setSearchSpecFile(e.target.files?.[0] ?? null);
-                  setSearchUpload(null);
-                }}
-                disabled={running || uploading}
-              />
-              {searchSpecFile && (
-                <>
-                  <div className="selected-file">
-                    <span className="pill accent">출원발명 문서</span>
-                    <span>{searchSpecFile.name}</span>
-                    <span className="faint">{formatBytes(searchSpecFile.size)}</span>
-                  </div>
-                  <div className="btn-row file-prepare-row">
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={prepareSearchSpec}
-                      disabled={running || uploading || Boolean(searchUpload)}
-                    >
-                      {searchUpload
-                        ? "본문 확인 완료"
-                        : uploading
-                          ? "본문 확인 중…"
-                          : "본문 미리 확인"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={clearSearchSpec}
-                      disabled={running || uploading}
-                    >
-                      빼기
-                    </button>
-                  </div>
-                </>
-              )}
-              {searchSpec && (
-                <div
-                  className={`notice ${searchSpec.read_ok ? "info" : "danger"}`}
-                  style={{ marginTop: 10 }}
-                >
-                  {searchSpec.read_ok ? (
-                    <>
-                      본문 {searchSpec.char_count.toLocaleString()}자
-                      {searchSpec.page_count
-                        ? ` · ${searchSpec.page_count}페이지`
-                        : ""}{" "}
-                      · 청구항 {searchClaimText.trim().length.toLocaleString()}자
-                      {specOutweighsClaim && (
-                        <div style={{ marginTop: 4 }}>
-                          명세서가 청구항보다 훨씬 깁니다. 청구항 단독 검색에는
-                          영향이 없지만 보조 검색의 용어 확장이 실시예에 쏠릴 수
-                          있으니, 결과의 「출원발명 문서를 이용한 별도 검색 확장」
-                          절을 확인하십시오.
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <strong>본문을 읽지 못했습니다</strong>
-                      <div style={{ marginTop: 4 }}>
-                        {searchSpec.error ?? "알 수 없는 오류"} — 이 상태로는
-                        실행이 거절됩니다. 텍스트가 들어 있는 PDF 로 바꾸거나
-                        명세서를 빼고 검색하십시오.
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-            </section>
-
-            <div className="notice info" style={{ marginTop: 12 }}>
-              <strong>실행 방식</strong>
-              <ul className="lineage-inherits">
-                <li>
-                  {detectOnlySearch
-                    ? "agy의 search_web와 read_url_content만 정상 호출로 인정합니다. 다른 실제 도구 호출은 탐지되는 즉시 작업을 실패 처리합니다."
-                    : "웹 검색과 페이지 열람(WebSearch, WebFetch)만 허용합니다. 파일 읽기·쓰기와 명령 실행은 허용하지 않으며, 다른 도구가 호출되면 실행이 실패합니다."}
-                </li>
-                <li>
-                  각 독립 검색의 확장은 최대 2라운드입니다. 검색을 한 번도 하지
-                  않고 작성된 답변은 실패로 처리합니다.
-                </li>
-                <li>
-                  페이지 열람 결과는 원문이 아니라 요약입니다. 후보의 발췌와 대응
-                  관계는 <strong>원문에서 직접 확인해야</strong> 합니다.
-                </li>
-                {searchSpecFile && (
-                  <li>
-                    먼저 명세서가 전혀 없는 컨텍스트에서 청구항 단독 검색을
-                    실행합니다. 그 다음 명세서 보조 검색을 별도로 실행하고 후보를
-                    합집합으로 병합하므로 단독 검색 후보는 삭제되지 않습니다.{" "}
-                    <strong>
-                      명세서에서 얻은 대안 의미·추가 검색어·사용하지 않은 한정은
-                      결과 보고서에 표시됩니다.
-                    </strong>
-                  </li>
-                )}
-              </ul>
-            </div>
 
             <SizeNotice
               preflight={preflight}
@@ -1130,6 +1205,26 @@ export default function RunPage() {
                 </div>
               </div>
             )}
+            <div className="btn-row file-prepare-row citation-prepare-row">
+              <button
+                type="button"
+                className="btn"
+                onClick={prepareFiles}
+                disabled={
+                  running ||
+                  uploading ||
+                  selectedUploadItems.length === 0 ||
+                  Boolean(upload)
+                }
+              >
+                {upload
+                  ? "PDF 처리 완료"
+                  : uploading
+                    ? "자료 처리 중…"
+                    : "선택한 PDF 미리 확인"}
+              </button>
+              <span className="hint">미처리 PDF는 실행할 때 자동 업로드됩니다.</span>
+            </div>
           </section>
 
           </div>
@@ -1160,26 +1255,6 @@ export default function RunPage() {
             />
           </section>
         )}
-
-        <div className="btn-row file-prepare-row">
-          <button
-            type="button"
-            className="btn"
-            onClick={prepareFiles}
-            disabled={
-              running || uploading || selectedUploadItems.length === 0 || Boolean(upload)
-            }
-          >
-            {upload
-              ? "PDF 처리 완료"
-              : uploading
-                ? "자료 처리 중…"
-                : "선택한 PDF 미리 확인"}
-          </button>
-          <span className="hint">
-            실행 버튼을 눌러도 아직 처리하지 않은 PDF는 자동으로 업로드됩니다.
-          </span>
-        </div>
 
         {uploading && (
           <p className="faint">
@@ -1268,7 +1343,11 @@ export default function RunPage() {
         )}
       </div>
 
-      <div className="card no-print run-action-card">
+      <div className="run-side-rail no-print">
+      {searching && (
+        <div className="card search-spec-card">{searchSpecPanel}</div>
+      )}
+      <div className="card run-action-card">
         <h2>
           {searching
             ? "3. 검색 시작"
@@ -1302,6 +1381,12 @@ export default function RunPage() {
           )}
           {searching && (
             <div className="run-ready-row">
+              <span>검색 전략</span>
+              <strong>{selectedSearchPrompt?.name ?? "설정 필요"}</strong>
+            </div>
+          )}
+          {searching && (
+            <div className="run-ready-row">
               <span>출원발명 문서</span>
               <strong>
                 {searchSpecFile
@@ -1313,6 +1398,16 @@ export default function RunPage() {
             </div>
           )}
         </div>
+
+        {searching && searchPrompts.length === 0 && (
+          <div className="notice danger" style={{ marginBottom: 12 }}>
+            <strong>검색 전략 프롬프트가 없습니다</strong>
+            <div style={{ marginTop: 4 }}>
+              <a href="#/prompts">프롬프트 관리</a>에서 검색 전략을 하나
+              만드십시오.
+            </div>
+          </div>
+        )}
 
         {!searching && !claimText.trim() && (
           <div className="notice danger" style={{ marginBottom: 12 }}>
@@ -1340,6 +1435,17 @@ export default function RunPage() {
           </div>
         )}
 
+        {busy && !running && (
+          <div className="notice info" style={{ marginBottom: 12 }}>
+            <strong>{otherWorkspace.label}이 실행 중입니다</strong>
+            <div style={{ marginTop: 4 }}>
+              두 작업은 서로를 기다리지 않지만 실행 도구는 하나뿐이라 한 번에
+              하나씩 끝냅니다.{" "}
+              <a href={`#${otherWorkspace.path}`}>진행 상황 보기</a>
+            </div>
+          </div>
+        )}
+
         <div className="btn-row">
           <button
             className="btn primary"
@@ -1353,7 +1459,7 @@ export default function RunPage() {
               !providerId ||
               !selectedProvider?.usable ||
               (searching
-                ? !searchClaimText.trim() || !searchAvailable
+                ? !searchClaimText.trim() || !searchAvailable || !searchPromptId
                 : !promptId || !claimText.trim() || !analysisMaterialReady)
             }
           >
@@ -1388,6 +1494,7 @@ export default function RunPage() {
             </span>
           )}
         </div>
+      </div>
       </div>
 
         </>
@@ -1536,6 +1643,12 @@ export default function RunPage() {
                 ))}
             </div>
           )}
+
+          {job.job_kind === "patent_analysis" &&
+            !running &&
+            job.analysis_manifest && (
+              <AnalysisDegreeOverview components={job.analysis_manifest.items} />
+            )}
 
           {(displayText || running) && (
             <ResultView

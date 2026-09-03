@@ -72,6 +72,9 @@ export default function SettingsPage() {
   const [error, setError] = useState("");
   const [paths, setPaths] = useState<Record<string, string>>({});
   const [defaultPromptId, setDefaultPromptId] = useState("");
+  // 검색 전략 프롬프트의 기본값. 분석 프롬프트와 다른 목록이고 다른 계약이다.
+  const [searchPrompts, setSearchPrompts] = useState<Prompt[]>([]);
+  const [defaultSearchPromptId, setDefaultSearchPromptId] = useState("");
   const [defaultProvider, setDefaultProvider] = useState("agy");
   const [defaultModels, setDefaultModels] = useState<Record<string, string>>({});
   // 빈 값 = 모델 기본값. 그때 ARIA 는 CLI 에 추론강도를 넘기지 않는다.
@@ -103,10 +106,16 @@ export default function SettingsPage() {
   const [epoCheck, setEpoCheck] = useState<CredentialCheck | null>(null);
 
   useEffect(() => {
-    Promise.all([api.settings(), api.listPrompts(), api.listProviders()])
-      .then(([s, promptList, providerList]) => {
+    Promise.all([
+      api.settings(),
+      api.listPrompts(),
+      api.listPrompts({ kind: "search" }),
+      api.listProviders(),
+    ])
+      .then(([s, promptList, searchPromptList, providerList]) => {
         setSettings(s);
         setPrompts(promptList);
+        setSearchPrompts(searchPromptList);
         setProviders(providerList);
         setPaths(s.values.provider_paths ?? {});
         const configuredPromptId = s.values.default_prompt_id ?? "";
@@ -115,6 +124,7 @@ export default function SettingsPage() {
         );
         const fallbackPrompt = promptList.find((prompt) => prompt.enabled);
         setDefaultPromptId(configuredPrompt?.id ?? fallbackPrompt?.id ?? "");
+        setDefaultSearchPromptId(s.values.default_search_prompt_id ?? "");
         setDefaultProvider(s.values.default_provider ?? "agy");
         setDefaultModels(s.values.default_models ?? {});
         setReasoningEffort(s.values.reasoning_effort ?? {});
@@ -277,6 +287,7 @@ export default function SettingsPage() {
     try {
       const updated = await api.updateSettings({
         default_prompt_id: defaultPromptId,
+        default_search_prompt_id: defaultSearchPromptId,
         default_provider: defaultProvider,
         default_models: defaultModels,
         reasoning_effort: reasoningEffort,
@@ -412,7 +423,7 @@ export default function SettingsPage() {
     return (
       <div className="page page-settings">
         <div className="page-head">
-          <span className="eyebrow">05 / 환경 설정</span>
+          <span className="eyebrow">환경 설정</span>
           <h1>분석 환경을 설정합니다</h1>
         </div>
         {error ? <div className="notice danger">{error}</div> : <p className="faint">불러오는 중…</p>}
@@ -470,7 +481,7 @@ export default function SettingsPage() {
   return (
     <div className="page page-settings">
       <div className="page-head">
-        <span className="eyebrow">05 / 환경 설정</span>
+        <span className="eyebrow">환경 설정</span>
         <h1>분석 환경을 설정합니다</h1>
         <p>
           분석에 사용할 기준과 AI 실행 도구, 로컬 실행의 안전 범위를 관리합니다. ARIA는 API Key를 수집하거나 저장하지 않습니다.
@@ -505,6 +516,26 @@ export default function SettingsPage() {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="field">
+            <label htmlFor="default-search-prompt">기본 검색 전략 프롬프트</label>
+            <select
+              id="default-search-prompt"
+              value={defaultSearchPromptId}
+              onChange={(e) => setDefaultSearchPromptId(e.target.value)}
+            >
+              <option value="">기본 제공 검색 전략 사용</option>
+              {searchPrompts.map((prompt) => (
+                <option key={prompt.id} value={prompt.id} disabled={!prompt.enabled}>
+                  {prompt.name}
+                  {prompt.enabled ? "" : " · 비활성"}
+                </option>
+              ))}
+            </select>
+            <span className="hint">
+              검색 화면이 처음 고르는 전략입니다. 실행마다 화면에서 바꿀 수
+              있으며, 검색 실행·감사·보고서 계약은 어느 전략을 골라도 같습니다.
+            </span>
           </div>
           <div className="field">
             <label htmlFor="default-provider">AI 실행 도구 (Provider)</label>
@@ -913,9 +944,9 @@ export default function SettingsPage() {
                 onSave={(n) => saveValue("literature_http_budget_seconds", n)}
               />
               <NumberField
-                label="논문 공식 검증 후보 수 상한"
+                label="논문 공식 검증 확보 목표"
                 value={v.literature_verification_targets}
-                hint="초록을 받아 대조할 논문 후보 수입니다. EPO 공식 검증 상한과 다른 축이라 서로 예산을 빼앗지 않습니다."
+                hint="초록을 받아 실제로 대조할 논문 수입니다. 앞 후보의 초록 확보가 실패하면 후보 목록 상한 안에서 다음 후보로 이월해 이 수를 채웁니다. EPO 공식 검증 상한과 다른 축이라 서로 예산을 빼앗지 않습니다."
                 onSave={(n) =>
                   saveValue("literature_verification_targets", n)
                 }

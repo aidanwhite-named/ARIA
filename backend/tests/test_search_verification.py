@@ -1094,6 +1094,53 @@ def test_the_verification_slots_are_shared_between_both_channels() -> None:
     assert all("selection_bucket" in row for row in dropped)
 
 
+def test_the_paper_priority_does_not_reach_the_patent_channel() -> None:
+    """논문 채널에 넣은 '페이지 근거 우선' 규칙이 EPO 선택을 흔들지 않는다.
+
+    두 채널은 다른 자원을 쓴다(OPS 대 Crossref·Europe PMC). 논문 쪽 순위를 고치면서
+    특허 쪽 균형 정책까지 함께 움직이면, 2026-09-02 에 고친 "한 채널이 상한을
+    통째로 가져가지 않는다"가 조용히 되돌아간다. DOI 후보를 배열 맨 앞에 놓아도
+    EPO 선택 결과와 묶음 배분이 그대로여야 한다.
+    """
+    baseline_order: list = []
+    baseline = search_verification.targets(
+        {"candidates": _recorded_candidates()},
+        limit=4,
+        reuse=_recorded_reuse(),
+        order=baseline_order,
+    )
+
+    paper = {
+        "index": 999,
+        "doc_number": "10.48550/arXiv.2409.17106",
+        "doi": "10.48550/arXiv.2409.17106",
+        "group": None,
+        "provisional_group": "B",
+        "classification_basis": search_manifest.CLASSIFICATION_SEARCH,
+        "group_eligible": False,
+        "page_fetch_succeeded": True,
+        "page_supported_rows": 4,
+        "evidence_status": search_manifest.EVIDENCE_REVIEWED,
+        "official_evidence": {},
+        "mapping": [],
+        "discovery_origins": [search_manifest.DISCOVERY_WEB],
+    }
+    order: list = []
+    found = search_verification.targets(
+        {"candidates": [paper] + _recorded_candidates()},
+        limit=4,
+        reuse=_recorded_reuse(),
+        order=order,
+    )
+
+    assert [t.doc_number for t in found] == [t.doc_number for t in baseline]
+    assert [row["selection_bucket"] for row in order] == [
+        row["selection_bucket"] for row in baseline_order
+    ]
+    # DOI 는 OPS 번호로 정규화되지 않는다. 이 채널의 대상이 아니다.
+    assert "10.48550/arXiv.2409.17106" not in {t.doc_number for t in found}
+
+
 def test_the_epo_bucket_keeps_its_own_reuse_order() -> None:
     """묶음 안의 순서는 건드리지 않는다. 재사용 가능한 후보가 먼저다."""
     candidates = _recorded_candidates()

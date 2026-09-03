@@ -243,6 +243,30 @@ def test_epo_failure_does_not_break_the_web_result(client, epo_on) -> None:
     assert lane["termination_reason"] == "invalid_response_limit"
 
 
+def test_channel_status_records_a_failed_epo_beside_a_working_web(
+    client, epo_on
+) -> None:
+    """한 채널이 실패해도 다른 채널의 결과와 실패 사유가 함께 남는다.
+
+    상태를 채널별 canonical 값으로 적는다. 하나로 뭉친 성공/실패만 남기면,
+    EPO 가 통째로 실패한 실행과 EPO 가 한 건도 못 찾은 실행이 같아 보인다.
+    """
+    fake_provider.EPO_SCRIPT["epo:claim_only"] = ["__RAISE__"]
+
+    job = start_search(client)
+    manifest = manifest_of(client, job)
+    rows = {row["id"]: row for row in manifest["channel_status"]}
+
+    assert rows["epo_search"]["status"] == "FAILED"
+    assert "테스트용 레인 실패" in rows["epo_search"]["detail"]
+    assert rows["web_search"]["status"] == "SUCCEEDED"
+    # 전체는 부분 성공이다. 한쪽 실패로 전체를 실패라고 적지 않는다.
+    assert manifest["channel_status_overall"] == "PARTIAL"
+    # 웹 후보는 그대로 남아 있다.
+    assert manifest["reported"] is not None
+    assert manifest["reported"]["candidates"]
+
+
 def test_raising_epo_lane_is_isolated(client, epo_on) -> None:
     """레인이 예외로 죽어도 작업은 계속되고 그 사실이 기록에 남는다.
 

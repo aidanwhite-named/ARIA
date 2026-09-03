@@ -150,13 +150,13 @@ def test_report_marks_unverified_original_excerpt_separately() -> None:
     assert "원문 대조 안 됨" in report
 
 
-def test_report_states_the_disclaimer() -> None:
+def test_report_omits_redundant_heading_and_introductory_disclaimer() -> None:
     reported, notes = _parsed(_hostile_candidate())
     report = search_report.render(_manifest(reported["candidates"], notes))
-    assert search_report.DISCLAIMER in report
-    assert "선행기술" not in report.split("## 요약")[0].replace(
-        search_report.DISCLAIMER, ""
-    )
+    assert "유사 특허·논문 검토 후보" not in report
+    assert "현재 검색 결과는 문헌 검토 후보 탐색 자료" not in report
+    assert "이 보고서는 ARIA 가 검증한 구조화 기록에서 생성했습니다" not in report
+    assert report.index("## A") < report.index("## 채널별 실행 결과")
 
 
 def test_report_keeps_normalization_notes_out_of_user_report() -> None:
@@ -256,7 +256,7 @@ def test_pipes_and_newlines_cannot_break_the_evidence_table() -> None:
     )
     report = search_report.render(_manifest(reported["candidates"], notes))
     # 맨 위 채널 상태 표는 칸 수가 다른 별개의 표다. 후보 본문만 본다.
-    body = report.split("## 요약", 1)[-1]
+    body = report.split("## 채널별 실행 결과", 1)[0]
     table_rows = [
         line
         for line in body.splitlines()
@@ -272,7 +272,6 @@ def test_pipes_and_newlines_cannot_break_the_evidence_table() -> None:
 def test_empty_candidate_list_still_renders() -> None:
     report = search_report.render(_manifest([]))
     assert "제시된 후보가 없습니다" in report
-    assert search_report.DISCLAIMER in report
 
 
 def test_report_says_when_nothing_was_verified() -> None:
@@ -777,3 +776,58 @@ def test_a_disabled_literature_channel_is_not_run_not_failed() -> None:
     head = search_report.render(manifest).split("## 요약", 1)[0]
 
     assert "| 논문 전용 API 검색 | 미실행 | 설정에서 꺼져 있습니다. |" in head
+
+
+def test_the_paper_verification_row_separates_selected_from_attempted() -> None:
+    """'대상 8건'이 고른 8건인지 부른 8건인지 읽을 수 있어야 한다.
+
+    2026-09-02 실행이 고른 8 · 부른 8 · 확보 4 였는데, 보고서에는 그 셋을 나눌
+    자리가 없었다.
+    """
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=True,
+        queries=[{"query": "robot arm", "found": 4, "error": ""}],
+        candidates=2,
+    )
+    manifest["literature"]["verification"] = {
+        "selected": 4,
+        "shortlisted": 6,
+        "attempted": 6,
+        "verified": 4,
+        "fetch_failed": 2,
+        "backfill_attempted": 2,
+        "backfill_verified": 2,
+        "not_attempted": 0,
+        "target_count": 4,
+    }
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 공식 서지 대조 | 성공 |" in head
+    assert "선택 4건 · 시도 6건 · 확보 4건" in head
+    assert "조회 실패 2건" in head
+    assert "대체 확보 2건" in head
+
+
+def test_the_paper_verification_row_reads_old_records() -> None:
+    """옛 기록에는 selected/attempted 가 없다. target_count 하나로 읽는다."""
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=True,
+        queries=[{"query": "robot arm", "found": 4, "error": ""}],
+        candidates=2,
+    )
+    manifest["literature"]["verification"] = {"target_count": 8, "verified": 4}
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 공식 서지 대조 | 부분 성공 | 선택 8건 · 시도 8건 · 확보 4건 |" in head
+
+
+def test_a_paper_channel_without_verification_is_not_a_failure() -> None:
+    manifest = _manifest([])
+    manifest["literature"] = _literature(
+        enabled=False, queries=[], reason="설정에서 꺼져 있습니다."
+    )
+    head = search_report.render(manifest).split("## 요약", 1)[0]
+
+    assert "| 논문 공식 서지 대조 | 미실행 | 설정에서 꺼져 있습니다. |" in head

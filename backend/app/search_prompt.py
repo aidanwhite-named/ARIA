@@ -1,8 +1,21 @@
-"""검색 프롬프트 로딩과 청구항·명세서 삽입.
+"""검색 전략 프롬프트 로딩과 데이터 구간 조립.
 
 분석 프롬프트와 같은 저장 방식(prompt/ 폴더의 UTF-8 파일 + ARIA 메타데이터
-헤더)을 쓰지만, 파일은 따로다. 검색 작업에서만 이 파일을 읽고, 분석 작업은
-이 파일을 보지 않는다.
+헤더)을 쓰지만, 종류(kind)가 다르다. 검색 작업만 kind=search 프롬프트를 읽고,
+분석 작업은 그것을 보지 않는다. 검색 전략 프롬프트는 여러 개일 수 있고 실행마다
+고른다.
+
+두 가지 조립 방식
+-----------------
+    appended_sections   기본값. 사용자는 검색 전략만 쓰고, ARIA 가 그 뒤에
+                        데이터 구간(청구항·미대응 구성·명세서)을 붙인다.
+                        경계 표시와 placeholder 를 사용자가 관리하지 않는다.
+    legacy_placeholders 본문에 ``{{CLAIM_TEXT}}`` 가 있는 옛 프롬프트. 예전
+                        계약 그대로 치환한다. 이미 만들어 둔 프롬프트와 이미
+                        실행한 작업의 스냅샷이 계속 돌아야 한다.
+
+어느 쪽이든 청구항·명세서·미대응 구성은 서로 다른 경계 안에 격리되고, 입력에
+들어 있는 경계 표시는 삽입 전에 중화된다.
 
 프롬프트 본문을 파이썬 소스에 넣지 않는다. 본문은 사용자가 읽고 고칠 수 있는
 파일이어야 하고, 실행마다 어떤 본문으로 돌았는지 해시로 남아야 한다.
@@ -51,9 +64,20 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from .prompt_store import PROMPT_STORE, PromptFile, PromptStoreError
+from . import search_contract
+from .prompt_store import (
+    KIND_SEARCH,
+    PROMPT_STORE,
+    PromptFile,
+    PromptStoreError,
+)
 
 SEARCH_PROMPT_ID = "search_prompt.md"
+
+# 조립 방식. 감사 기록에 남는다 — 같은 청구항이라도 어느 방식으로 조립했는지에
+# 따라 모델이 받은 본문이 다르다.
+MODE_APPENDED = "appended_sections"
+MODE_LEGACY = "legacy_placeholders"
 
 PLACEHOLDER = "{{CLAIM_TEXT}}"
 OPEN_TAG = "<CLAIM_TEXT>"
@@ -104,18 +128,46 @@ class RenderedPrompt:
     spec_included: bool
     focus_boundary_neutralized: bool
     focus_included: bool
+    # 어느 조립 방식으로 만들었는가.
+    mode: str = MODE_LEGACY
+    # 사용자 전략 본문에 경계 표시가 들어 있어 중화했는가. 옛 방식에는 없던
+    # 사실이다 — 그때는 경계가 본문의 일부였다.
+    strategy_boundary_neutralized: bool = False
 
 
-def load() -> PromptFile:
-    """prompt/search_prompt.md 를 읽고 실행 계약을 검사한다."""
+def load(prompt_id: str = SEARCH_PROMPT_ID) -> PromptFile:
+    """검색 전략 프롬프트 하나를 읽고 조립 계약을 검사한다.
+
+    id 를 주지 않으면 배포본을 읽는다. 옛 호출부(검색 프롬프트가 하나뿐이던
+    시절)가 그대로 돌아야 하기 때문이다.
+    """
+    target = str(prompt_id or SEARCH_PROMPT_ID)
     try:
-        prompt = PROMPT_STORE.get_reserved(SEARCH_PROMPT_ID)
+        prompt = PROMPT_STORE.get_for_kind(target, KIND_SEARCH)
     except PromptStoreError as exc:
         raise SearchPromptError(
-            f"검색 프롬프트 파일을 읽지 못했습니다({SEARCH_PROMPT_ID}): {exc}"
+            f"검색 전략 프롬프트를 읽지 못했습니다({target}): {exc}"
         ) from exc
-    validate_body(prompt.body)
+    validate_strategy_body(prompt.body, prompt_id=target)
     return prompt
+
+
+def is_legacy_template(body: str) -> bool:
+    """이 본문이 placeholder 를 직접 관리하는 옛 프롬프트인가."""
+    return PLACEHOLDER in body
+
+
+def validate_strategy_body(body: str, *, prompt_id: str = SEARCH_PROMPT_ID) -> None:
+    """조립 전에 본문이 성립하는지 본다.
+
+    새 방식에는 요구하는 표시가 없다. 사용자는 전략만 쓰고 경계는 ARIA 가
+    붙이므로, 검사할 계약이 "비어 있지 않다" 하나뿐이다. 옛 방식 본문만 예전
+    계약(placeholder 하나 + 경계 안)을 그대로 통과해야 한다.
+    """
+    if not body.strip():
+        raise SearchPromptError(f"{prompt_id} 의 검색 전략 본문이 비어 있습니다.")
+    if is_legacy_template(body):
+        validate_body(body, prompt_id=prompt_id)
 
 
 def has_spec_section(body: str) -> bool:
@@ -132,7 +184,7 @@ def has_focus_section(body: str) -> bool:
     return FOCUS_BLOCK_OPEN in body and FOCUS_BLOCK_CLOSE in body
 
 
-def validate_body(body: str) -> None:
+def validate_body(body: str, *, prompt_id: str = SEARCH_PROMPT_ID) -> None:
     """본문이 실행 계약(placeholder 하나 + 경계 안)을 만족하는지 확인한다.
 
     파일에서 막 읽은 본문과 작업에 스냅샷된 본문 둘 다 이 검사를 거친다.
@@ -140,7 +192,7 @@ def validate_body(body: str) -> None:
     """
     if body.count(PLACEHOLDER) != 1:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 에 {PLACEHOLDER} placeholder 가 정확히 한 번 "
+            f"{prompt_id} 에 {PLACEHOLDER} placeholder 가 정확히 한 번 "
             f"있어야 합니다(현재 {body.count(PLACEHOLDER)}개)."
         )
 
@@ -149,17 +201,21 @@ def validate_body(body: str) -> None:
     holder_at = body.find(PLACEHOLDER)
     if open_at < 0 or close_at < 0:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 에 청구항 경계 표시({OPEN_TAG} … {CLOSE_TAG})가 "
+            f"{prompt_id} 에 청구항 경계 표시({OPEN_TAG} … {CLOSE_TAG})가 "
             "없습니다. 청구항을 경계 없이 넣지 않습니다."
         )
     if not open_at < holder_at < close_at:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 {PLACEHOLDER} 가 청구항 경계 안에 있지 "
+            f"{prompt_id} 의 {PLACEHOLDER} 가 청구항 경계 안에 있지 "
             "않습니다."
         )
 
-    _validate_spec_section(body, claim_open=open_at, claim_close=close_at)
-    _validate_focus_section(body, claim_open=open_at, claim_close=close_at)
+    _validate_spec_section(
+        body, claim_open=open_at, claim_close=close_at, prompt_id=prompt_id
+    )
+    _validate_focus_section(
+        body, claim_open=open_at, claim_close=close_at, prompt_id=prompt_id
+    )
 
     if has_spec_section(body) and has_focus_section(body):
         spec_open = body.find(SPEC_BLOCK_OPEN)
@@ -168,11 +224,13 @@ def validate_body(body: str) -> None:
         focus_close = body.find(FOCUS_BLOCK_CLOSE) + len(FOCUS_BLOCK_CLOSE)
         if spec_open < focus_close and focus_open < spec_close:
             raise SearchPromptError(
-                f"{SEARCH_PROMPT_ID} 의 명세서 절과 미대응 구성 절이 겹칩니다."
+                f"{prompt_id} 의 명세서 절과 미대응 구성 절이 겹칩니다."
             )
 
 
-def _validate_spec_section(body: str, *, claim_open: int, claim_close: int) -> None:
+def _validate_spec_section(
+    body: str, *, claim_open: int, claim_close: int, prompt_id: str
+) -> None:
     """명세서 절의 계약. 절 자체가 없는 본문도 유효하다.
 
     없으면 명세서를 받지 않는 프롬프트일 뿐이다. 다만 흔적만 남아 있는 상태
@@ -191,7 +249,7 @@ def _validate_spec_section(body: str, *, claim_open: int, claim_close: int) -> N
     broken = [name for name, count in marks.items() if count != 1]
     if broken:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 명세서 절이 온전하지 않습니다. "
+            f"{prompt_id} 의 명세서 절이 온전하지 않습니다. "
             f"{', '.join(broken)} 가 정확히 한 번씩 있어야 합니다."
         )
 
@@ -202,7 +260,7 @@ def _validate_spec_section(body: str, *, claim_open: int, claim_close: int) -> N
     block_close = body.find(SPEC_BLOCK_CLOSE)
     if not block_open < spec_open < spec_holder < spec_close < block_close:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 {SPEC_PLACEHOLDER} 가 명세서 경계"
+            f"{prompt_id} 의 {SPEC_PLACEHOLDER} 가 명세서 경계"
             f"({SPEC_OPEN_TAG} … {SPEC_CLOSE_TAG}) 안에 있지 않습니다."
         )
 
@@ -210,12 +268,14 @@ def _validate_spec_section(body: str, *, claim_open: int, claim_close: int) -> N
     # 있으면 함께 사라진다.
     if block_open < claim_close and claim_open < block_close:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 명세서 절이 청구항 경계와 겹칩니다. "
+            f"{prompt_id} 의 명세서 절이 청구항 경계와 겹칩니다. "
             "두 자료는 서로 다른 경계에 있어야 합니다."
         )
 
 
-def _validate_focus_section(body: str, *, claim_open: int, claim_close: int) -> None:
+def _validate_focus_section(
+    body: str, *, claim_open: int, claim_close: int, prompt_id: str
+) -> None:
     """미대응 구성 선택 절의 계약. 절 자체가 없는 본문도 유효하다."""
     marks = {
         FOCUS_BLOCK_OPEN: body.count(FOCUS_BLOCK_OPEN),
@@ -229,7 +289,7 @@ def _validate_focus_section(body: str, *, claim_open: int, claim_close: int) -> 
     broken = [name for name, count in marks.items() if count != 1]
     if broken:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 미대응 구성 절이 온전하지 않습니다. "
+            f"{prompt_id} 의 미대응 구성 절이 온전하지 않습니다. "
             f"{', '.join(broken)} 가 정확히 한 번씩 있어야 합니다."
         )
 
@@ -240,12 +300,12 @@ def _validate_focus_section(body: str, *, claim_open: int, claim_close: int) -> 
     block_close = body.find(FOCUS_BLOCK_CLOSE)
     if not block_open < focus_open < focus_holder < focus_close < block_close:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 {FOCUS_PLACEHOLDER} 가 미대응 구성 경계"
+            f"{prompt_id} 의 {FOCUS_PLACEHOLDER} 가 미대응 구성 경계"
             f"({FOCUS_OPEN_TAG} … {FOCUS_CLOSE_TAG}) 안에 있지 않습니다."
         )
     if block_open < claim_close and claim_open < block_close:
         raise SearchPromptError(
-            f"{SEARCH_PROMPT_ID} 의 미대응 구성 절이 청구항 경계와 겹칩니다."
+            f"{prompt_id} 의 미대응 구성 절이 청구항 경계와 겹칩니다."
         )
 
 
@@ -307,11 +367,78 @@ def _unwrap_focus_section(body: str) -> str:
     return body
 
 
+def _boundary_section(open_tag: str, close_tag: str, text: str) -> str:
+    return open_tag + chr(10) + text + chr(10) + close_tag
+
+
+def compose(
+    body: str,
+    claim_text: str,
+    spec_text: str = "",
+    search_focus: str = "",
+    *,
+    prompt_id: str = SEARCH_PROMPT_ID,
+) -> RenderedPrompt:
+    """검색 전략 본문에 ARIA 의 데이터 구간을 붙여 최종 본문을 만든다.
+
+    옛 프롬프트(placeholder 를 직접 든 본문)는 예전 경로로 보낸다. 두 경로가
+    만드는 결과는 다르지만 불변조건은 같다 — 청구항·명세서·미대응 구성이 각자
+    경계 안에 격리되고, 입력의 경계 표시는 삽입 전에 중화된다.
+
+    새 경로에서는 **사용자 전략 본문 자체도** 중화 대상이다. 전략에 적힌
+    ``</CLAIM_TEXT>`` 가 그대로 나가면 그 뒤의 진짜 청구항 구간이 이미 닫힌
+    것처럼 보인다. 사용자가 경계를 관리하지 않게 만든 이상, 위조도 막는 쪽이
+    ARIA 의 몫이다.
+    """
+    if is_legacy_template(body):
+        return render(body, claim_text, spec_text, search_focus, prompt_id=prompt_id)
+
+    validate_strategy_body(body, prompt_id=prompt_id)
+    claim = claim_text.strip()
+    if not claim:
+        raise SearchPromptError("검색할 청구항이 비어 있습니다.")
+
+    strategy, strategy_neutralized = neutralize_boundaries(body.strip())
+    claim, claim_neutralized = neutralize_boundaries(claim)
+
+    parts = [strategy, search_contract.preamble()]
+
+    parts.append(search_contract.CLAIM_PREAMBLE)
+    parts.append(_boundary_section(OPEN_TAG, CLOSE_TAG, claim))
+
+    focus = search_focus.strip()
+    focus_neutralized = False
+    if focus:
+        focus, focus_neutralized = neutralize_boundaries(focus)
+        parts.append(search_contract.FOCUS_PREAMBLE)
+        parts.append(_boundary_section(FOCUS_OPEN_TAG, FOCUS_CLOSE_TAG, focus))
+
+    spec = spec_text.strip()
+    spec_neutralized = False
+    if spec:
+        spec, spec_neutralized = neutralize_boundaries(spec)
+        parts.append(search_contract.SPEC_PREAMBLE)
+        parts.append(_boundary_section(SPEC_OPEN_TAG, SPEC_CLOSE_TAG, spec))
+
+    return RenderedPrompt(
+        body=(chr(10) * 2).join(parts),
+        claim_boundary_neutralized=claim_neutralized,
+        spec_boundary_neutralized=spec_neutralized,
+        spec_included=bool(spec),
+        focus_boundary_neutralized=focus_neutralized,
+        focus_included=bool(focus),
+        mode=MODE_APPENDED,
+        strategy_boundary_neutralized=strategy_neutralized,
+    )
+
+
 def render(
     body: str,
     claim_text: str,
     spec_text: str = "",
     search_focus: str = "",
+    *,
+    prompt_id: str = SEARCH_PROMPT_ID,
 ) -> RenderedPrompt:
     """청구항과(있으면) 명세서를 각자의 경계 안에 넣은 최종 본문을 만든다.
 
@@ -322,7 +449,7 @@ def render(
     본문 안의 다른 placeholder 까지 두 번째 replace 가 건드린다 — 청구항 칸에
     ``{{SPEC_TEXT}}`` 를 적어 두면 명세서가 청구항 경계 안으로 한 벌 더 들어간다.
     """
-    validate_body(body)
+    validate_body(body, prompt_id=prompt_id)
     claim = claim_text.strip()
     if not claim:
         raise SearchPromptError("검색할 청구항이 비어 있습니다.")
@@ -332,7 +459,7 @@ def render(
     if focus:
         if not has_focus_section(body):
             raise SearchPromptError(
-                f"{SEARCH_PROMPT_ID} 에 미대응 구성을 넣을 자리"
+                f"{prompt_id} 에 미대응 구성을 넣을 자리"
                 f"({FOCUS_PLACEHOLDER})가 없습니다. 선택 구성을 무시한 채 검색하지 "
                 "않습니다."
             )
@@ -347,7 +474,7 @@ def render(
         if not has_spec_section(body):
             # 첨부한 자료를 조용히 버리지 않는다.
             raise SearchPromptError(
-                f"{SEARCH_PROMPT_ID} 에 출원발명 문서를 넣을 자리"
+                f"{prompt_id} 에 출원발명 문서를 넣을 자리"
                 f"({SPEC_PLACEHOLDER})가 없습니다. 명세서를 무시한 채 검색하지 "
                 "않습니다."
             )
@@ -371,4 +498,5 @@ def render(
         spec_included=bool(spec),
         focus_boundary_neutralized=focus_neutralized,
         focus_included=bool(focus),
+        mode=MODE_LEGACY,
     )

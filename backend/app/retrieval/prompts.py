@@ -65,7 +65,7 @@ AGENT_SYSTEM_PROMPT = f"""당신은 특허 문헌 검색 실행기 안에서 동
 
 - "components" 는 **첫 라운드에만** 채웁니다. 청구항을 구성요소로 분해해서
   각 항목에 label(예: "청구항 1 (A)"), feature(구성 내용),
-  importance("high"|"medium"|"low"), importance_reasons(판정 근거),
+  importance("high"|"medium"|"low"), importance_reasons(판정 근거 문자열 배열),
   depends_on(선행 구성 label 또는 임시 식별자 목록)를 적습니다. 중요도는
   잠정 판정이며, ARIA 가 실제 검색 결과를 보고 매 라운드 재평가합니다.
   ARIA 가 여기에 R001, R002 … 형태의 id 를 붙여 다음 라운드에 돌려줍니다.

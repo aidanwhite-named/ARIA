@@ -44,7 +44,10 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 # 프롬프트가 메타데이터에 선언해야 이 기능이 켜진다.
 CAPABILITY = "similarity_search_v1"
 
-MANIFEST_VERSION = 11
+# v12: 검색 전략 프롬프트가 여러 개가 되고(prompt.name/kind/template_mode),
+# 채널 정책·채널 상태·내부 검색 계획이 기록에 들어왔다. 옛 기록에는 이 키들이
+# 없으며, 읽는 쪽은 없는 것을 거짓이 아니라 **모르는 것**으로 다뤄야 한다.
+MANIFEST_VERSION = 12
 _OPEN = "[ARIA_SEARCH_LOG_V1]"
 _CLOSE = "[/ARIA_SEARCH_LOG_V1]"
 
@@ -1899,6 +1902,32 @@ def empty_reported(*, web_report_error: str = "") -> dict:
     }
 
 
+def empty_kiwee_section(*, enabled: bool = False, reason: str = "") -> dict:
+    """Kiwee 채널의 빈 기록.
+
+    구현되지 않은 채널도 자리를 갖는다. "결과가 없다"가 아니라 "실행하지
+    않았다"라고 적기 위해서다. 이 함수가 만드는 기록에는 후보가 절대 들어가지
+    않는다 — 검색을 흉내 내지 않는다는 뜻이다.
+    """
+    return {
+        "channel": "kiwee",
+        "label": "Kiwee 특허 검색",
+        "enabled": enabled,
+        "attempted": False,
+        "status": "SKIPPED",
+        "skip_kind": "not_implemented" if enabled else "disabled",
+        "reason": reason
+        or (
+            "Kiwee 연동이 켜져 있어도 접속·인증이 구현되지 않아 실행하지 "
+            "않습니다."
+            if enabled
+            else "Kiwee 연동이 꺼져 있습니다."
+        ),
+        "requests": 0,
+        "candidates": [],
+    }
+
+
 def empty_literature_section(*, enabled: bool = False, reason: str = "") -> dict:
     """ARIA 서지 검색 채널의 빈 기록. 돌지 않은 실행에서도 같은 모양으로 남는다.
 
@@ -2555,6 +2584,10 @@ def build(
     claim_text: str,
     prompt_id: str,
     prompt_sha256: str,
+    prompt_name: str = "",
+    prompt_kind: str = "search",
+    prompt_template_mode: str = "",
+    strategy_boundary_neutralized: bool = False,
     runtime_context_sha256: str = "",
     reasoning_effort: str = "",
     claim_boundary_neutralized: bool,
@@ -2582,7 +2615,10 @@ def build(
     lanes: list[dict] | None = None,
     epo: dict | None = None,
     literature: dict | None = None,
+    kiwee: dict | None = None,
     verification: dict | None = None,
+    channel_policy: dict | None = None,
+    plan: dict | None = None,
 ) -> dict:
     """저장할 감사 기록을 만든다.
 
@@ -2594,6 +2630,7 @@ def build(
     )
     epo_section = epo or empty_epo_section()
     literature_section = literature or empty_literature_section()
+    kiwee_section = dict(kiwee or empty_kiwee_section())
     channels_used = {
         candidate.get("channel")
         for candidate in ((reported or {}).get("candidates") or [])
@@ -2607,7 +2644,17 @@ def build(
         channels_used.add(CHANNEL_PATENT_DB)
     if literature_section.get("candidates"):
         channels_used.add(CHANNEL_PATENT_DB)
-    return {
+
+    # 채널 상태는 이 기록의 나머지 부분에서 계산된다. 그래서 먼저 본문을 만들고
+    # 마지막에 채워 넣는다.
+    #
+    # import 를 함수 안에서 하는 이유: search_channels 는 이 모듈의 상수와
+    # 판정 함수를 쓴다. 모듈 수준에서 서로 부르면 순환 import 가 된다. 상태
+    # 계산을 이쪽으로 복사해 오는 대신 부르는 쪽을 늦춘다 — 두 벌이 되면
+    # 저장된 상태와 보고서의 상태가 갈라진다.
+    from . import search_channels
+
+    manifest = {
         "version": MANIFEST_VERSION,
         "generated_at": _utcnow_iso(),
         # channels 는 이 스키마가 아는 채널 목록이다(원래 의미 그대로 둔다 —
@@ -2638,6 +2685,19 @@ def build(
         },
         "prompt": {
             "id": prompt_id,
+            # 검색 전략 프롬프트는 이제 여러 개다. id 만으로는 History 를 여는
+            # 사람이 "어느 전략으로 돌았는지" 알 수 없으므로 이름도 남긴다.
+            # 본문 자체는 job.prompt_snapshot 에 이미 있다.
+            "name": prompt_name,
+            "kind": prompt_kind,
+            # 사용자 전략 뒤에 ARIA 가 데이터 구간을 붙였는가, 아니면 옛
+            # placeholder 를 치환했는가. 같은 본문·같은 청구항이어도 이 값이
+            # 다르면 모델이 받은 프롬프트가 다르다.
+            "template_mode": prompt_template_mode,
+            # 전략 본문에 경계 표시가 들어 있어 중화했는가. 청구항 칸의
+            # 중화(input.claim_boundary_neutralized)와 다른 축이다 — 이쪽은
+            # 사용자가 쓴 전략이고 저쪽은 검색 대상 데이터다.
+            "strategy_boundary_neutralized": strategy_boundary_neutralized,
             # 이 값은 **프롬프트 템플릿 파일**의 해시다. 모델에게 실제로 간
             # 프롬프트가 아니다. 런타임 컨텍스트와 청구항이 붙기 전 값이라,
             # 런타임 컨텍스트만 바뀐 두 실행이 여기서는 같아 보인다 —
@@ -2698,6 +2758,21 @@ def build(
         # 물어 무엇을 받았는지가 따로 남아야 "웹이 못 찾은 것을 여기서 찾았는가"에
         # 답할 수 있다.
         "literature": literature_section,
+        # v12 의 정본. 아직 구현되지 않은 채널도 기록에 자리를 갖는다. 자리를
+        # 비워 두면 "실행했는데 결과가 없었다"와 "실행하지 않았다"를 구분할 수
+        # 없고, 나중에 구현되었을 때 옛 실행이 소급 실행된 것처럼 보인다.
+        "kiwee": kiwee_section,
+        # 이번 실행에서 어떤 채널을 돌기로 했고 왜 그렇게 정했는가. 프롬프트
+        # 본문은 이 판정에 들어가지 않는다(search_channels 참조).
+        "channel_policy": dict(channel_policy or {}),
+        # 채널별 최종 상태(SUCCEEDED/PARTIAL/FAILED/SKIPPED)와 사유. 실행
+        # 시점에 확정해 저장한다 — 보고서가 나중에 다시 계산하면 저장된 기록과
+        # 화면이 갈라진다.
+        "channel_status": [],
+        "channel_status_overall": "",
+        # ARIA 가 검색 전에 만든 정규화된 내부 검색 계획. 실제로 실행된 검색어는
+        # observed 에 따로 있다 — 계획과 실행을 같은 칸에 두지 않는다.
+        "plan": dict(plan or {}),
         # Codex 후보의 공식 문헌 확보·2차 분류 기록. 검색 전체 요약과 별도로
         # 각 후보에도 verification 객체가 있어 부분 실패를 추적할 수 있다.
         "verification": dict(verification or {}),
@@ -2709,3 +2784,8 @@ def build(
         "normalization_notes": list(notes or []),
         "error": error,
     }
+    manifest["channel_status"] = search_channels.status_rows(manifest)
+    manifest["channel_status_overall"] = search_channels.overall_status(
+        manifest["channel_status"]
+    )
+    return manifest

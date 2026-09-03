@@ -52,13 +52,59 @@ from ..schemas import (
     PreflightOut,
     UploadResponse,
 )
+from ..prompt_store import DEFAULT_SEARCH_PROMPT_ID, KIND_ANALYSIS, KIND_SEARCH
 from ..search_prompt import (
     SEARCH_PROMPT_ID,
     SearchPromptError,
     has_focus_section,
     has_spec_section,
+    is_legacy_template,
 )
-from ..search_prompt import load as load_search_prompt
+from ..search_prompt import validate_strategy_body as validate_search_strategy
+
+
+def _resolve_search_prompt(payload_prompt_id: str | None, values: dict):
+    """이 실행이 쓸 검색 전략 프롬프트를 고른다.
+
+    우선순위는 요청 > 설정 기본값 > 배포본이다. 요청이 잘못된 id 면 조용히
+    다른 프롬프트로 넘어가지 않는다 — 사용자가 고른 전략과 다른 전략으로 도는
+    것은 "검색 결과가 왜 이런가"에 답할 수 없게 만든다.
+
+    설정 기본값이 사라진 경우(파일을 지웠다)에만 배포본으로 되돌아간다.
+    """
+    requested = str(payload_prompt_id or "").strip()
+    if requested:
+        try:
+            return PROMPT_STORE.get_for_kind(requested, KIND_SEARCH)
+        except PromptNotFound as exc:
+            raise HTTPException(
+                404,
+                f"검색 전략 프롬프트를 찾을 수 없습니다: {requested}. "
+                "유사 문헌 검색에는 검색 종류의 프롬프트만 쓸 수 있습니다.",
+            ) from exc
+        except InvalidPromptFile as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    configured = str(values.get("default_search_prompt_id") or "").strip()
+    for candidate in (configured, DEFAULT_SEARCH_PROMPT_ID):
+        if not candidate:
+            continue
+        try:
+            return PROMPT_STORE.get_for_kind(candidate, KIND_SEARCH)
+        except PromptNotFound:
+            continue
+        except InvalidPromptFile as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    # 배포본까지 없는 설치. 남아 있는 검색 프롬프트 중 활성인 것을 쓴다.
+    try:
+        rows = PROMPT_STORE.list(kind=KIND_SEARCH, include_reserved=True)
+    except InvalidPromptFile as exc:
+        raise HTTPException(422, str(exc)) from exc
+    found = next((item for item in rows if item.enabled), None)
+    if found is None:
+        raise HTTPException(404, "검색 전략 프롬프트가 없습니다.")
+    return found
 
 router = APIRouter(prefix="/api", tags=["jobs"])
 
@@ -439,7 +485,9 @@ async def _resolve_provider(
     return provider_id, selected_model
 
 
-def _validated_search_spec(rows: list[Attachment], prompt_body: str) -> list[Attachment]:
+def _validated_search_spec(
+    rows: list[Attachment], prompt_body: str, prompt_id: str = ""
+) -> list[Attachment]:
     """검색 작업이 받은 업로드가 출원발명 문서 한 건인지 확인한다.
 
     조용히 무시하지 않는다. 여기서 통과한 파일은 반드시 프롬프트에 들어가고,
@@ -469,11 +517,14 @@ def _validated_search_spec(rows: list[Attachment], prompt_body: str) -> list[Att
             f"{row.error or '알 수 없음'}. 명세서를 반영하지 못한 채로 검색하지 "
             "않습니다.",
         )
-    if not has_spec_section(prompt_body):
+    # 새 방식 프롬프트에는 자리를 확인할 것이 없다. 명세서 구간은 ARIA 가
+    # 전략 본문 뒤에 붙이므로 사용자 전략의 내용과 무관하게 항상 자리가 있다.
+    # 옛 방식 본문만 예전처럼 확인한다.
+    if is_legacy_template(prompt_body) and not has_spec_section(prompt_body):
         raise HTTPException(
             422,
-            f"{SEARCH_PROMPT_ID} 에 출원발명 문서를 넣을 자리가 없습니다. "
-            "프롬프트를 되돌리거나 명세서 없이 검색하십시오.",
+            f"{prompt_id or SEARCH_PROMPT_ID} 에 출원발명 문서를 넣을 자리가 "
+            "없습니다. 프롬프트를 되돌리거나 명세서 없이 검색하십시오.",
         )
     return rows
 
@@ -499,19 +550,17 @@ async def _create_search_job(
         raise HTTPException(
             400, "유사 문헌 검색에는 후속 분석 relation_type 을 사용할 수 없습니다."
         )
-    if payload.prompt_id and payload.prompt_id != SEARCH_PROMPT_ID:
-        raise HTTPException(
-            400,
-            f"유사 문헌 검색은 {SEARCH_PROMPT_ID} 로만 실행됩니다. "
-            "분석 프롬프트는 이 작업에 쓰이지 않습니다.",
-        )
-
+    prompt = _resolve_search_prompt(payload.prompt_id, values)
     try:
-        prompt = load_search_prompt()
+        # 스냅샷할 본문이 조립 계약을 만족하는지 지금 확인한다. 큐에서 기다린
+        # 뒤 실행 시점에 처음 알게 되면 사용자는 이유 없이 실패한 실행을 본다.
+        validate_search_strategy(prompt.body, prompt_id=prompt.id)
     except SearchPromptError as exc:
         raise HTTPException(422, str(exc)) from exc
     if not prompt.enabled:
-        raise HTTPException(400, "검색 프롬프트가 비활성화되어 있습니다.")
+        raise HTTPException(
+            400, f"검색 전략 프롬프트가 비활성화되어 있습니다: {prompt.name}"
+        )
 
     requested_ids = list(dict.fromkeys(payload.search_component_ids or []))
     if len(requested_ids) > 100:
@@ -560,10 +609,14 @@ async def _create_search_job(
                 400, "미대응 구성 검색의 청구항은 원본 분석 청구항과 같아야 합니다."
             )
         claim_text = source_claim
-        if not has_focus_section(prompt.body):
+        # 새 방식 프롬프트에는 이 검사가 없다. 미대응 구성 구간은 ARIA 가
+        # 전략 본문 뒤에 붙이므로, 사용자가 자리를 만들어 둘 필요가 없다.
+        # 옛 방식(placeholder 를 직접 든 본문)에서만 자리를 확인한다 — 그쪽은
+        # 자리가 없으면 선택 구성이 조용히 사라진다.
+        if is_legacy_template(prompt.body) and not has_focus_section(prompt.body):
             raise HTTPException(
                 422,
-                f"{SEARCH_PROMPT_ID} 에 미대응 구성 검색 절이 없습니다. 선택 구성을 "
+                f"{prompt.id} 에 미대응 구성 검색 절이 없습니다. 선택 구성을 "
                 "무시한 채 검색하지 않습니다.",
             )
         search_focus = {
@@ -589,6 +642,7 @@ async def _create_search_job(
             .filter(Attachment.upload_batch == payload.batch_id)
             .all(),
             prompt.body,
+            prompt.id,
         )
 
     provider_id, selected_model = await _resolve_provider(payload, values)
@@ -655,7 +709,9 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
     prompt = None
     if prompt_id:
         try:
-            prompt = PROMPT_STORE.get(prompt_id)
+            # 종류를 건 조회다. 검색 전략 프롬프트가 분석 실행의 분석 기준으로
+            # 들어오는 경로를 만들지 않는다 — 두 본문은 계약이 다르다.
+            prompt = PROMPT_STORE.get_for_kind(prompt_id, KIND_ANALYSIS)
         except PromptNotFound:
             # An explicit API override must be valid. A stale configured default
             # (for example an old database UUID) falls back to the prompt folder.
@@ -665,7 +721,17 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
             raise HTTPException(422, str(exc)) from exc
     if prompt is None:
         try:
-            prompt = next((item for item in PROMPT_STORE.list() if item.enabled), None)
+            # 분석 실행의 폴백은 **분석 프롬프트**에서만 고른다. 종류를 걸지
+            # 않으면 사용자가 만든 검색 전략이 분석 기준으로 뽑힐 수 있고,
+            # 그 본문은 첨부 분석 계약을 만족하지 않는다.
+            prompt = next(
+                (
+                    item
+                    for item in PROMPT_STORE.list(kind=KIND_ANALYSIS)
+                    if item.enabled
+                ),
+                None,
+            )
         except InvalidPromptFile as exc:
             raise HTTPException(422, str(exc)) from exc
     if prompt is None:
@@ -861,22 +927,38 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
     provider_id = payload.provider or str(values.get("default_provider") or "")
 
     # --- 프롬프트 본문 ---------------------------------------------------
+    search_prompt_id = ""
     if job_kind is JobKind.SIMILARITY_SEARCH:
+        # 실행과 **같은 선택 규칙**을 쓴다. 준비 화면이 배포본 크기를 안내하고
+        # 실행은 사용자가 고른 전략으로 돌면, 안내한 크기와 나가는 크기가 다르다.
+        search_prompt = _resolve_search_prompt(payload.prompt_id, values)
         try:
-            prompt_body = load_search_prompt().body
+            validate_search_strategy(search_prompt.body, prompt_id=search_prompt.id)
         except SearchPromptError as exc:
             raise HTTPException(422, str(exc)) from exc
+        prompt_body = search_prompt.body
+        search_prompt_id = search_prompt.id
     else:
         prompt_id = payload.prompt_id or str(values.get("default_prompt_id") or "")
         prompt = None
         if prompt_id:
             try:
-                prompt = PROMPT_STORE.get(prompt_id)
+                prompt = PROMPT_STORE.get_for_kind(prompt_id, KIND_ANALYSIS)
             except (PromptNotFound, InvalidPromptFile):
                 prompt = None
         if prompt is None:
             try:
-                prompt = next((item for item in PROMPT_STORE.list() if item.enabled), None)
+                # 분석 실행의 폴백은 **분석 프롬프트**에서만 고른다. 종류를
+                # 걸지 않으면 사용자가 만든 검색 전략이 분석 기준으로 뽑힐 수
+                # 있고, 그 본문은 첨부 분석 계약을 만족하지 않는다.
+                prompt = next(
+                    (
+                        item
+                        for item in PROMPT_STORE.list(kind=KIND_ANALYSIS)
+                        if item.enabled
+                    ),
+                    None,
+                )
             except InvalidPromptFile as exc:
                 raise HTTPException(422, str(exc)) from exc
         if prompt is None:
@@ -943,6 +1025,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             runtime_context_enabled=bool(values.get("runtime_context_enabled", True)),
             max_chars=max_chars,
             claim_text=payload.claim_text or "",
+            search_prompt_id=search_prompt_id or SEARCH_PROMPT_ID,
             followup_instruction=payload.followup_instruction or "",
             prior_claim_text=prior_claim_text,
             prior_report=prior_report,

@@ -11,7 +11,30 @@ const BLANK = {
   tags: [] as string[],
 };
 
-type Draft = typeof BLANK & { id?: string; kind: PromptKind };
+type Draft = typeof BLANK & {
+  id?: string;
+  kind: PromptKind;
+  // 배포본인가. 저장 경로가 다르고 삭제할 수 없다.
+  reserved?: boolean;
+};
+
+//: 새 검색 전략 프롬프트의 시작 본문. 실행·보안·감사 계약은 ARIA 가 갖고
+//: 있으므로 여기에는 전략만 적는다 — placeholder 도 경계 표시도 필요 없다.
+const SEARCH_STRATEGY_TEMPLATE = `기술적 식별력이 높은 핵심 특징을 중심으로 검색하되 전체 시스템의 유사성도 함께 고려해줘.
+
+검색 범위와 확장 방식
+- 후출원·후공개 문헌도 기술적으로 유사하거나 인용문헌 추적에 유용하면 포함해줘.
+- 유력 문헌의 실제 용어, IPC·CPC, 패밀리, 인용·피인용 문헌으로 검색을 넓혀줘.
+
+후보 우선순위와 평가 관점
+- 전용 페이지에서 문헌 식별정보를 확인했고, 관측한 문장이 핵심 특징을 직접
+  뒷받침하는 후보를 먼저 배치해줘.
+- 확인하지 못한 후보도 버리지 말고 미확인 단서로 남겨줘.
+
+동의어·영문어·분류코드 활용
+- 청구항 용어의 동의어와 영문 대응어를 함께 시도해줘.
+- 유력 후보의 IPC·CPC 를 확인해 같은 분류의 문헌으로 넓혀줘.
+`;
 
 export default function PromptsPage() {
   const [prompts, setPrompts] = useState<PromptCatalogItem[]>([]);
@@ -49,15 +72,22 @@ export default function PromptsPage() {
         tags: draft.tags,
       };
       if (draft.id) {
-        if (draft.kind === "search") {
+        // 배포본(기본 제공)만 예약 경로로 저장한다. 사용자가 만든 검색 전략은
+        // 일반 프롬프트와 같은 경로로 저장하며, 백엔드가 종류에 맞는 검증을
+        // 건다 — 종류로 경로를 가르면 사용자가 만든 검색 전략을 편집할 수 없다.
+        if (draft.reserved) {
           await api.updateReservedPrompt(draft.id, payload);
         } else {
           await api.updatePrompt(draft.id, payload);
         }
         notify("프롬프트를 저장했습니다.");
       } else {
-        await api.createPrompt(payload);
-        notify("prompt 폴더에 새 프롬프트 파일을 만들었습니다.");
+        await api.createPrompt({ ...payload, kind: draft.kind });
+        notify(
+          draft.kind === "search"
+            ? "prompt 폴더에 새 검색 전략 프롬프트를 만들었습니다."
+            : "prompt 폴더에 새 프롬프트 파일을 만들었습니다.",
+        );
       }
       setDraft(null);
       load();
@@ -108,7 +138,7 @@ export default function PromptsPage() {
   return (
     <div className="page page-prompts">
       <div className="page-head">
-        <span className="eyebrow">03 / 프롬프트</span>
+        <span className="eyebrow">프롬프트</span>
         <h1>프롬프트를 관리합니다</h1>
         <p>
           분석과 검색이 각자의 전용 프롬프트를 사용합니다. 모든 수정의 맥락과
@@ -148,6 +178,19 @@ export default function PromptsPage() {
               hidden
               onChange={(e) => importFile(e.target.files?.[0])}
             />
+            <button
+              className="btn small"
+              onClick={() =>
+                setDraft({
+                  ...BLANK,
+                  kind: "search",
+                  name: "새 검색 전략",
+                  body: SEARCH_STRATEGY_TEMPLATE,
+                })
+              }
+            >
+              새 검색 전략
+            </button>
             <button
               className="btn primary small"
               onClick={() => setDraft({ ...BLANK, kind: "analysis" })}
@@ -214,6 +257,7 @@ export default function PromptsPage() {
                               output_mode: p.output_mode,
                               tags: p.tags ?? [],
                               kind: p.kind,
+                              reserved: !p.deletable,
                             })
                           }
                         >
@@ -224,11 +268,11 @@ export default function PromptsPage() {
                           onClick={() =>
                             act(
                               () =>
-                                p.kind === "search"
-                                  ? api.updateReservedPrompt(p.id, {
+                                p.deletable
+                                  ? api.updatePrompt(p.id, { enabled: !p.enabled })
+                                  : api.updateReservedPrompt(p.id, {
                                       enabled: !p.enabled,
-                                    })
-                                  : api.updatePrompt(p.id, { enabled: !p.enabled }),
+                                    }),
                               p.enabled ? "비활성화했습니다." : "활성화했습니다.",
                             )
                           }
@@ -269,9 +313,11 @@ export default function PromptsPage() {
             <h2 style={{ marginTop: 0 }}>
               {draft.id
                 ? draft.kind === "search"
-                  ? "검색 프롬프트 편집"
+                  ? "검색 전략 프롬프트 편집"
                   : "분석 프롬프트 편집"
-                : "새 분석 프롬프트"}
+                : draft.kind === "search"
+                  ? "새 검색 전략 프롬프트"
+                  : "새 분석 프롬프트"}
             </h2>
             <div className="field">
               <label>이름</label>
@@ -332,7 +378,7 @@ export default function PromptsPage() {
               />
               <span className="hint">
                 {draft.kind === "search"
-                  ? "검색 프롬프트는 청구항·명세서 placeholder와 경계 표시가 온전한지 검사한 뒤 저장합니다."
+                  ? "검색 전략만 적으십시오. 청구항·명세서·미대응 구성은 ARIA가 이 본문 뒤에 경계와 함께 붙이며, 도구 허용·호출 예산·채널 정책·감사 기록·보고서 형식은 이 본문이 바꿀 수 없습니다."
                   : "저장하면 prompt 폴더의 파일이 즉시 갱신됩니다. ARIA는 이 본문 앞뒤에 업무 지시를 추가하지 않습니다."}
               </span>
             </div>

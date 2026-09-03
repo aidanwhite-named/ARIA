@@ -634,6 +634,125 @@ def test_document_status_action_is_charged_to_the_round_budget(tmp_path) -> None
         retrieval.close_documents(corpus)
 
 
+def test_componentless_deferred_status_does_not_block_finalize(tmp_path) -> None:
+    """전역 문헌 상태 조회는 어떤 구성의 미검토도 뜻하지 않는다."""
+    from app.retrieval import agent as agent_module
+    from app.retrieval.actions import GetDocumentStatus
+
+    item = _pdf_attachment(tmp_path, "doc.pdf", KOREAN_PAGES)
+    corpus, _ = _corpus(tmp_path, [item])
+    try:
+        agent = agent_module.RetrievalAgent(
+            job_id="job-deferred-status",
+            provider=DeterministicTestProvider(),
+            model=None,
+            timeout_seconds=60,
+            work_dir=tmp_path,
+            corpus=corpus,
+            claim_text="청구항 1.",
+            budget=RetrievalBudget(),
+            trace=agent_module.TraceWriter(tmp_path / "trace.jsonl"),
+        )
+        agent._deferred_actions.append(
+            agent_module.DeferredAction(
+                item=GetDocumentStatus(
+                    action="get_document_status", attachment="ATT-01"
+                ),
+                first_round=1,
+                reason="반환 예산 부족",
+            )
+        )
+
+        assert agent._has_blocking_deferred() is False
+    finally:
+        retrieval.close_documents(corpus)
+
+
+def test_last_valid_finalize_is_kept_when_round_limit_is_reached(tmp_path, monkeypatch) -> None:
+    """이월 action 때문에 보류된 유효 finalize 는 빈 패키지로 잃지 않는다."""
+    from app.providers.base import ExecutionOutcome
+    from app.retrieval import agent as agent_module
+    from app.retrieval.actions import SearchDocument
+
+    class FallbackProvider(DeterministicTestProvider):
+        async def execute(self, request, emit):
+            outcome = ExecutionOutcome(cli_path="(test)", cli_version="0")
+            if '"round": 1' in request.user_message:
+                response = {
+                    "components": [
+                        {
+                            "label": "청구항 1 (A)",
+                            "feature": "센서 구성",
+                            "importance": "high",
+                            "importance_reasons": ["핵심 구성"],
+                            "depends_on": [],
+                        }
+                    ],
+                    "actions": [],
+                }
+            else:
+                response = {
+                    "actions": [
+                        {
+                            "action": "finalize_evidence",
+                            "components": [
+                                {
+                                    "component_id": "R001",
+                                    "status_claim": "not_found",
+                                    "searched_terms": [],
+                                    "evidence": [],
+                                    "note": "테스트 확정",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            outcome.result_text = json.dumps(response, ensure_ascii=False)
+            outcome.exit_code = 0
+            outcome.terminal_reason = "completed"
+            return outcome
+
+    item = _pdf_attachment(tmp_path, "doc.pdf", KOREAN_PAGES)
+    corpus, _ = _corpus(tmp_path, [item])
+    try:
+        agent = agent_module.RetrievalAgent(
+            job_id="job-finalize-fallback",
+            provider=FallbackProvider(),
+            model=None,
+            timeout_seconds=60,
+            work_dir=tmp_path,
+            corpus=corpus,
+            claim_text="청구항 1.",
+            budget=RetrievalBudget(max_rounds=2),
+            trace=agent_module.TraceWriter(tmp_path / "trace.jsonl"),
+        )
+
+        async def defer_component_action(items, run, round_no):
+            if not agent._deferred_actions:
+                agent._deferred_actions.append(
+                    agent_module.DeferredAction(
+                        item=SearchDocument(
+                            action="search_document",
+                            component_id="R001",
+                            attachment="ATT-01",
+                            queries=["센서"],
+                        ),
+                        first_round=round_no,
+                        reason="반환 예산 부족",
+                    )
+                )
+            return []
+
+        monkeypatch.setattr(agent, "_execute_actions", defer_component_action)
+        run = asyncio.run(agent.run())
+
+        assert run.finalize is not None
+        assert run.finalize.components[0].component_id == "R001"
+        assert any("예산 소진 상태로 채택" in note for note in run.notes)
+    finally:
+        retrieval.close_documents(corpus)
+
+
 def test_read_page_action_is_charged_to_the_round_budget(tmp_path) -> None:
     """페이지 본문뿐 아니라 read_page 반환 JSON 전체가 예산 안에 있어야 한다."""
     from app.retrieval import agent as agent_module

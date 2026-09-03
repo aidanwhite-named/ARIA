@@ -226,6 +226,17 @@ class OutputMode(StrEnum):
     TEXT = "text"
 
 
+class PromptKind(StrEnum):
+    """프롬프트가 어느 작업의 것인가.
+
+    값은 prompt_store 의 KIND_* 와 같은 문자열이다. 두 곳이 갈라지면 파일
+    메타데이터와 API 스키마가 다른 말을 하게 되므로 tests 가 이를 잡는다.
+    """
+
+    ANALYSIS = "analysis"
+    SEARCH = "search"
+
+
 class AuthState(StrEnum):
     OK = "OK"
     NOT_LOGGED_IN = "NOT_LOGGED_IN"

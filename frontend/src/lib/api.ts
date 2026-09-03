@@ -7,6 +7,7 @@ import type {
   Preflight,
   Prompt,
   PromptCatalogItem,
+  PromptKind,
   ProviderInfo,
   ProviderLoginSession,
   ProviderLogoutResult,
@@ -52,9 +53,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<{ status: string; version: string }>("/api/health"),
 
-  listPrompts: (params: { search?: string } = {}) => {
+  /**
+   * 실행 화면의 프롬프트 선택 목록. 종류를 반드시 지정한다 — 분석 화면이
+   * 검색 전략 프롬프트를 고를 수 있게 되면 그 본문이 분석 기준으로 나간다.
+   */
+  listPrompts: (params: { search?: string; kind?: PromptKind } = {}) => {
     const query = new URLSearchParams();
     if (params.search) query.set("search", params.search);
+    query.set("kind", params.kind ?? "analysis");
     const suffix = query.toString();
     return request<Prompt[]>(`/api/prompts${suffix ? `?${suffix}` : ""}`);
   },

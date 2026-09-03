@@ -5,6 +5,7 @@ import StatusPill from "../components/StatusPill";
 import { api } from "../lib/api";
 import { DELIVERY_LABEL, isNarrowed } from "../lib/types";
 import type { HistoryItem, JobKind, RelationType } from "../lib/types";
+import { workspacePath } from "../lib/workspaces";
 
 /** 두 축은 결과물이 다르다. 목록에서도 한 눈에 갈라 보이게 한다. */
 const KIND_LABEL: Record<JobKind, string> = {
@@ -43,8 +44,12 @@ export default function HistoryPage() {
     ? items.filter((item) => item.job_kind === kindFilter)
     : items;
 
-  const open = (id: string) => {
-    navigate(`/run?job=${encodeURIComponent(id)}`);
+  // 기록은 두 작업의 실행이 섞여 있다. 여는 곳은 그 실행이 속한 작업의
+  // 화면이다 — 검색 결과를 분석 화면에서 열면 둘이 한 화면인 것처럼 보인다.
+  const open = (item: HistoryItem) => {
+    navigate(
+      `${workspacePath(item.job_kind)}?job=${encodeURIComponent(item.id)}`,
+    );
   };
 
   const remove = async (item: HistoryItem) => {
@@ -109,7 +114,7 @@ export default function HistoryPage() {
   return (
     <div className="page page-history">
       <div className="page-head">
-        <span className="eyebrow">04 / 실행 기록</span>
+        <span className="eyebrow">실행 기록</span>
         <h1>분석 결과와 과정을 확인합니다</h1>
         <p>
           입력의 지문부터 프롬프트 스냅샷, 실행 환경과 결과까지 판단의 근거를 다시 확인합니다.
@@ -191,12 +196,12 @@ export default function HistoryPage() {
                     className="history-row"
                     tabIndex={0}
                     aria-label={`${new Date(item.created_at).toLocaleString()} ${item.prompt_name} 결과 보기`}
-                    onClick={() => open(item.id)}
+                    onClick={() => open(item)}
                     onKeyDown={(event) => {
                       if (event.target !== event.currentTarget) return;
                       if (event.key === "Enter" || event.key === " ") {
                         event.preventDefault();
-                        open(item.id);
+                        open(item);
                       }
                     }}
                   >
