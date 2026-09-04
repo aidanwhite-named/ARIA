@@ -12,6 +12,7 @@ runner 와 preflight 가 **같은 함수**를 부른다.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -222,11 +223,7 @@ class AssemblyResult:
 
         명세서가 있으면 전체 입력을 기록하는 보조 조립본을 쓴다.
         """
-        return (
-            self.lanes.get(search_manifest.ORIGIN_SPEC_ASSISTED)
-            or self.lanes.get(search_manifest.ORIGIN_CLAIM_ONLY)
-            or self.lanes[LANE_SINGLE]
-        )
+        return self.lanes[LANE_SINGLE]
 
     def lane_bytes(self, provider=None) -> dict[str, int]:
         """레인마다 Provider 에게 실제로 나갈 UTF-8 바이트 수.
@@ -547,6 +544,10 @@ def assemble_job(
     max_chars: int | None,
     claim_text: str = "",
     focus_text: str = "",
+    # 선택적 검색 기준일. 빈 문자열이면 "날짜 조건 없음" 구간이 나간다 — 절을
+    # 빼지 않는다. 빼면 모델이 오늘 날짜를 기준으로 삼는다.
+    search_cutoff: str = "",
+    search_tool_status: dict | None = None,
     # 이 실행이 고른 검색 전략 프롬프트의 id. 오류 메시지와 감사 기록이 어떤
     # 프롬프트였는지 말할 수 있어야 한다 — 이제 하나가 아니다.
     search_prompt_id: str = search_prompt.SEARCH_PROMPT_ID,
@@ -698,71 +699,38 @@ def assemble_job(
     if spec is not None and not spec_text.strip():
         raise SpecUnreadable(spec.original_filename)
 
-    # 가장 중요한 불변조건: 기본 검색 프롬프트에는 명세서 본문이 단 한 글자도
-    # 들어가지 않는다. 같은 호출 안에서 "먼저 청구항만 보라"고 부탁하는 대신
-    # 컨텍스트 자체를 격리한다.
-    claim_rendered = search_prompt.compose(
-        master_prompt, claim_text, "", focus_text, prompt_id=search_prompt_id
+    rendered = search_prompt.compose(
+        master_prompt, claim_text, spec_text, focus_text,
+        prompt_id=search_prompt_id, cutoff=search_cutoff,
     )
-    search_context = SEARCH_CONTEXT_BY_POLICY.get(
-        tool_policy_name, SEARCH_RUNTIME_CONTEXT
-    )
-    # 허용 목록은 조립 시점의 실제 파일에서 온다. 목록이 비어 있어도 절을 붙인다 —
-    # 빼면 모델이 "제한이 없다"로 읽고, 그 오해 한 번이 실행 전체를 날린다.
-    # 준비 화면(preflight)과 실행이 같은 함수를 지나므로 안내한 크기와 실제로
-    # 나가는 크기가 이 절 때문에 어긋나지 않는다.
+    search_context = SEARCH_CONTEXT_BY_POLICY.get(tool_policy_name, SEARCH_RUNTIME_CONTEXT)
     if tool_policy_name == ALLOWLIST_POLICY:
         search_context = with_agy_allowlist(search_context, agy_allowed_hosts)
-    lanes: dict[str, AssembledPrompt] = {
-        search_manifest.ORIGIN_CLAIM_ONLY: assemble_search(
-            search_prompt_body=claim_rendered.body,
-            runtime_context=search_context,
-            max_chars=max_chars,
-            # 파일 신원조차 모델 컨텍스트에는 들어가지 않지만, 단독 실행의
-            # 조립 기록도 입력 파일과 분리해 둔다.
-            attachments=[],
-        )
+    if search_tool_status is not None:
+        search_context += "\n[이 실행의 도구 상태]\n" + json.dumps(search_tool_status, ensure_ascii=False)
+    lane = assemble_search(
+        search_prompt_body=rendered.body, runtime_context=search_context,
+        max_chars=max_chars, attachments=[spec] if spec else [],
+    )
+    lanes = {LANE_SINGLE: lane}
+    spec_document = None if spec is None else {
+        "attachment_id": spec.attachment_id, "filename": spec.original_filename,
+        "sha256": spec.sha256, "page_count": spec.page_count, "char_count": len(spec_text),
     }
-
-    spec_document: dict | None = None
-    spec_boundary_neutralized = False
-    if spec is not None:
-        spec_document = {
-            "attachment_id": spec.attachment_id,
-            "filename": spec.original_filename,
-            "sha256": spec.sha256,
-            "page_count": spec.page_count,
-            "char_count": len(spec_text),
-        }
-        assisted_rendered = search_prompt.compose(
-            master_prompt,
-            claim_text,
-            spec_text,
-            focus_text,
-            prompt_id=search_prompt_id,
-        )
-        spec_boundary_neutralized = assisted_rendered.spec_boundary_neutralized
-        lanes[search_manifest.ORIGIN_SPEC_ASSISTED] = assemble_search(
-            search_prompt_body=assisted_rendered.body,
-            runtime_context=search_context,
-            max_chars=max_chars,
-            attachments=attachments,
-        )
-
     return AssemblyResult(
         lanes=lanes,
         spec_document=spec_document,
         spec_text=spec_text,
         search_prompt_sha=search_prompt.sha256(master_prompt),
         search_prompt_id=search_prompt_id,
-        search_prompt_mode=claim_rendered.mode,
+        search_prompt_mode=rendered.mode,
         strategy_boundary_neutralized=(
-            claim_rendered.strategy_boundary_neutralized
+            rendered.strategy_boundary_neutralized
         ),
         search_runtime_context_sha=hashlib.sha256(
             search_context.encode("utf-8")
         ).hexdigest(),
-        claim_boundary_neutralized=claim_rendered.claim_boundary_neutralized,
-        spec_boundary_neutralized=spec_boundary_neutralized,
-        focus_boundary_neutralized=claim_rendered.focus_boundary_neutralized,
+        claim_boundary_neutralized=rendered.claim_boundary_neutralized,
+        spec_boundary_neutralized=rendered.spec_boundary_neutralized,
+        focus_boundary_neutralized=rendered.focus_boundary_neutralized,
     )

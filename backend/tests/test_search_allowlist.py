@@ -95,7 +95,7 @@ def _assemble(policy: str, hosts):
 
 
 def _lane_text(assembly) -> str:
-    lane = assembly.lanes["claim_only"]
+    lane = assembly.lanes["single"]
     return lane.system_prompt + lane.user_message
 
 
@@ -113,7 +113,7 @@ def test_the_agy_prompt_carries_the_failure_rules() -> None:
     """열지 못한 문헌을 버리지도, 실행을 멈추지도 않게 하는 규칙."""
     text = _lane_text(_assemble("agy_web_search", ["arxiv.org"]))
 
-    assert "candidate_only" in text
+    assert "미열람을 원문 확인으로 표현하지" in text
     assert "reported_title" in text
     assert "access_failures" in text
     # 접근 실패가 실행 중단 사유가 아니라는 것과, 블록은 반드시 나가야 한다는 것.

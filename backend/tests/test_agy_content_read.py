@@ -304,24 +304,7 @@ def test_content_read_budget_is_reported_separately() -> None:
     assert "본문 읽기" in verdict.errors[-1]
 
 
-def test_content_read_budget_is_split_across_lanes_like_the_search_budget() -> None:
-    """명세서를 넣으면 검색이 두 번 도는데, 본문 읽기 상한도 함께 나뉜다.
 
-    runner 가 쓰는 식과 같은 식이다. 나누지 않으면 명세서를 넣은 실행이 상한을
-    두 배로 쓰게 되고, 그건 사용자가 정한 경계가 아니다.
-    """
-    from app.execution.runner import _search_lane_budgets
-
-    total = AGY_WEB_SEARCH.max_content_read_calls
-    assert total > 0
-    single = _search_lane_budgets(total, False)
-    both = _search_lane_budgets(total, True)
-    assert single == {"claim_only": total}
-    assert sum(both.values()) == total
-    assert set(both) == {"claim_only", "spec_assisted"}
-
-
-# ------------------------------------------------- 모델에게 알려주는 도구 계약
 
 
 def test_agy_context_tells_the_model_that_fetch_returns_a_path() -> None:
@@ -340,12 +323,10 @@ def test_agy_context_tells_the_model_that_fetch_returns_a_path() -> None:
     assert "WebSearch" not in text
 
 
-def test_agy_context_limits_mapping_to_pages_actually_read() -> None:
-    """읽지 않은 후보의 대응표는 ARIA 가 버린다. 쓰게 두면 그만큼 낭비다."""
+def test_agy_context_keeps_model_explanations_separate_from_quotes():
     from app.config import AGY_SEARCH_RUNTIME_CONTEXT as text
-
-    assert "mapping 을\n   빈 배열 [] 로 남기십시오" in text
-    assert '"candidate_only"' in text
+    assert "직접 인용을 주장하지" in text
+    assert "기술적 설명을 남길 수" in text
 
 
 def test_agy_context_does_not_demand_reading_every_candidate() -> None:
@@ -358,14 +339,6 @@ def test_agy_context_does_not_demand_reading_every_candidate() -> None:
     assert "모든 후보를 다 열어야 한다는 뜻이 아닙니다" in text
 
 
-def test_agy_context_edits_fail_loudly_when_the_source_drifts() -> None:
-    """원문이 바뀌었는데 파생본만 옛 문장을 들고 도는 것이 가장 나쁘다."""
-    import app.config as config
-
-    original = config.SEARCH_RUNTIME_CONTEXT
-    try:
-        config.SEARCH_RUNTIME_CONTEXT = "치환 대상이 없는 본문"
-        with pytest.raises(RuntimeError, match="치환이 빗나갔습니다"):
-            config._agy_search_context()
-    finally:
-        config.SEARCH_RUNTIME_CONTEXT = original
+def test_agy_context_contains_no_other_providers_native_tool_names():
+    from app.config import AGY_SEARCH_RUNTIME_CONTEXT as text
+    assert "WebSearch" not in text and "WebFetch" not in text

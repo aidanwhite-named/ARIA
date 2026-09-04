@@ -49,18 +49,10 @@ EDITABLE_KEYS = frozenset(
         "epo_http_budget_seconds",
         "epo_hourly_quota_bytes",
         "epo_max_detail_fetches",
-        "epo_max_search_calls",
-        "epo_channel_timeout_seconds",
-        "epo_max_results_per_query",
-        "epo_shortlist_limit",
-        "epo_verification_targets",
         "literature_integration_enabled",
         "literature_contact_email",
-        "literature_max_queries",
         "literature_max_results_per_query",
-        "literature_shortlist_limit",
         "literature_http_budget_seconds",
-        "literature_verification_targets",
         # epo_quota_state 는 일부러 없다. ARIA 가 관측해 적는 값이라
         # 사용자가 PUT 으로 고칠 수 있으면 사용량을 0 으로 되돌릴 수 있다.
             # 근거 패키지의 페이지 확장.
@@ -118,16 +110,8 @@ _INT_KEYS = frozenset(
         "epo_http_budget_seconds",
         "epo_hourly_quota_bytes",
         "epo_max_detail_fetches",
-        "epo_max_search_calls",
-        "epo_channel_timeout_seconds",
-        "epo_max_results_per_query",
-        "epo_shortlist_limit",
-        "epo_verification_targets",
-        "literature_max_queries",
         "literature_max_results_per_query",
-        "literature_shortlist_limit",
         "literature_http_budget_seconds",
-        "literature_verification_targets",
     }
 )
 
@@ -159,23 +143,9 @@ _LIMITS = {
     # 클 수 있으면 그 설정은 아무것도 막지 못한다.
     "epo_hourly_quota_bytes": (1000 * 1000, patent_search.WEEKLY_QUOTA_BYTES),
     "epo_max_detail_fetches": (1, 50),
-    "epo_max_search_calls": (1, 20),
-    "epo_channel_timeout_seconds": (30, 900),
-    # OPS 가 한 질의로 돌려주는 최대 건수가 20 이다. 그보다 큰 값을 저장하게
-    # 두면 설정 화면이 지키지 못할 약속을 하게 된다.
-    "epo_max_results_per_query": (1, 20),
-    # 상한을 크게 잡으면 공식 검증 호출이 그만큼 늘어난다. 파서의 구조적
-    # 상한(epo_actions.MAX_SHORTLIST_ITEMS)을 넘지 않게 맞춘다.
-    "epo_shortlist_limit": (1, 50),
-    "epo_verification_targets": (1, 50),
-    # ARIA 가 한 실행에서 서지 DB 에 보내는 질의 수. 모델의 검색어를 다시 묻는
-    # 것이므로 그쪽 라운드 상한(2라운드 × 질의 몇 개)보다 클 이유가 없다.
-    "literature_max_queries": (1, 20),
-    # 두 DB 각각에 적용된다. 넘겨 받아 봐야 뒤쪽은 관련성이 급격히 떨어진다.
+    # 응답 크기와 네트워크 대기 시간의 하드 상한. 후보 선정과 무관하다.
     "literature_max_results_per_query": (1, 20),
-    "literature_shortlist_limit": (1, 50),
     "literature_http_budget_seconds": (10, 600),
-    "literature_verification_targets": (1, 50),
 }
 
 # 인용발명 문헌 전달 방식. enums.RetrievalMode 와 같은 값이며, 여기서 import

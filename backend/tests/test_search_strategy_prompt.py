@@ -227,7 +227,7 @@ def test_audit_manifest_is_built_without_any_audit_instruction(client) -> None:
         assert job["status"] == "SUCCEEDED", job["errors"]
 
         # 계약은 시스템 프롬프트에서 왔다. 사용자 본문에는 없다.
-        assert any("[ARIA_SEARCH_LOG_V1]" in text for text in _sent_systems())
+        assert any('"candidates"' in text for text in _sent_systems())
         assert not any(
             "[ARIA_SEARCH_LOG_V1]" in message.split("# ARIA 조립 데이터 구간")[0]
             for message in _sent_messages()
@@ -309,8 +309,8 @@ def test_the_standard_report_survives_a_strategy_that_demands_another_format(
 
         report = job["result_text"] or ""
         # 전략이 금지한 절이 그대로 나온다. 보고서는 매니페스트가 만든다.
-        assert "## 채널별 실행 결과" in report
-        assert "| 채널 | 상태 | 내용 |" in report
+        assert "## 사용 가능한 도구" in report
+        assert "LLM의 기술적 판단" in report
         # 모델 산문은 보고서 본문이 되지 않는다.
         assert "★ 결과 ★" not in report
         assert "유사 문헌 검토 후보 (테스트)" not in report
@@ -323,67 +323,10 @@ def test_the_standard_report_survives_a_strategy_that_demands_another_format(
 # --- 4. 채널 정책은 전략 문장이 정하지 않는다 -------------------------------
 
 
-def test_a_prompt_that_forbids_searching_does_not_change_the_channel_policy(
-    client,
-) -> None:
-    """'검색하지 마라'는 문장은 실행 정책이 아니다.
-
-    실행 여부는 job_kind 가 정하고, 어떤 채널을 도는지는 설정이 정한다.
-    프롬프트 문장에서 자연어를 찾아 판정하면, 사용자가 문장 하나를 바꾸는
-    것만으로 감사 기록 생성을 건너뛰게 만들 수 있다.
-    """
-    strategy = _create_strategy(client, "검색을 거부하는 전략", STRATEGY_REFUSES)
-    try:
-        job = _run(client, prompt_id=strategy["id"])
-        assert job["status"] == "SUCCEEDED", job["errors"]
-
-        manifest = job["search_manifest"]
-        # 도구 정책과 예산은 그대로다.
-        assert manifest["policy"]["allowed_tools"] == ["WebSearch", "WebFetch"]
-        assert manifest["policy"]["max_tool_calls_total"] > 0
-        # 웹 채널은 여전히 실행 대상이다.
-        decisions = {
-            row["channel"]: row for row in manifest["channel_policy"]["channels"]
-        }
-        assert decisions[search_channels.CHANNEL_WEB]["enabled"] is True
-        # 실제로 검색도 나갔고 감사 기록도 생겼다.
-        assert manifest["observed"]["search_queries"]
-        assert job["search_manifest_error"] is None
-        assert "## 채널별 실행 결과" in (job["result_text"] or "")
-    finally:
-        client.delete(f"/api/prompts/{strategy['id']}")
 
 
-def test_the_channel_policy_reads_settings_not_prompts() -> None:
-    """정책 함수에는 프롬프트 본문이 들어가는 자리가 없다."""
-    values = {
-        "epo_integration_enabled": True,
-        "literature_integration_enabled": True,
-        "kiwee_integration_enabled": True,
-    }
-    policy = search_channels.resolve(values)
-    assert policy.runs(search_channels.CHANNEL_WEB) is True
-    assert policy.runs(search_channels.CHANNEL_EPO) is True
-    assert policy.runs(search_channels.CHANNEL_LITERATURE) is True
-    # 켜 두어도 구현이 없으면 돌지 않는다.
-    assert policy.runs(search_channels.CHANNEL_KIWEE) is False
-    assert policy.skip_kind(search_channels.CHANNEL_KIWEE) == (
-        search_channels.SKIP_NOT_IMPLEMENTED
-    )
-
-    off = search_channels.resolve({})
-    assert off.runs(search_channels.CHANNEL_EPO) is False
-    assert "꺼져" in off.reason(search_channels.CHANNEL_EPO)
-
-    # 명시적 channels 는 범위를 좁히기만 한다. 꺼진 채널을 켜지 못한다.
-    narrowed = search_channels.resolve(values, channels=["web"])
-    assert narrowed.runs(search_channels.CHANNEL_WEB) is True
-    assert narrowed.runs(search_channels.CHANNEL_EPO) is False
-    widened = search_channels.resolve({}, channels=["web", "epo"])
-    assert widened.runs(search_channels.CHANNEL_EPO) is False
 
 
-# --- 5. Kiwee 는 네트워크를 열지 않는다 -------------------------------------
 
 
 @pytest.fixture()
@@ -399,42 +342,18 @@ def kiwee_search_is_a_tripwire(monkeypatch):
     monkeypatch.setattr(kiwee_backend.KiweePatentSearchBackend, "search", refuse)
 
 
-def test_kiwee_is_recorded_as_skipped_without_touching_the_network(
-    client, kiwee_search_is_a_tripwire
-) -> None:
+def test_kiwee_is_recorded_unavailable_without_network(client, monkeypatch):
     job = _run(client)
-    assert job["status"] == "SUCCEEDED", job["errors"]
-
-    kiwee = job["search_manifest"]["kiwee"]
-    assert kiwee["status"] == search_channels.STATUS_SKIPPED
-    assert kiwee["attempted"] is False
-    assert kiwee["candidates"] == []
-    assert kiwee["skip_kind"] == search_channels.SKIP_DISABLED
-
-    rows = {row["id"]: row for row in job["search_manifest"]["channel_status"]}
-    assert rows["kiwee_search"]["status"] == search_channels.STATUS_SKIPPED
+    assert job["search_manifest"]["tool_availability"]["kiwee"]["status"] == "disabled"
 
 
-def test_kiwee_stays_skipped_even_when_the_toggle_is_on(
-    client, kiwee_search_is_a_tripwire
-) -> None:
-    """켜도 흉내 내지 않는다. 검색하지 않았다는 사실을 사유와 함께 남긴다."""
-    with session_scope() as session:
-        settings_service.update(session, {"kiwee_integration_enabled": True})
+def test_kiwee_stays_unavailable_when_toggle_on(client, monkeypatch):
+    client.put("/api/settings", json={"values": {"kiwee_integration_enabled": True}})
     try:
         job = _run(client)
-        assert job["status"] == "SUCCEEDED", job["errors"]
-        kiwee = job["search_manifest"]["kiwee"]
-        assert kiwee["status"] == search_channels.STATUS_SKIPPED
-        assert kiwee["skip_kind"] == search_channels.SKIP_NOT_IMPLEMENTED
-        assert "구현" in kiwee["reason"]
-        assert kiwee["candidates"] == []
+        assert job["search_manifest"]["tool_availability"]["kiwee"]["status"] == "not_implemented"
     finally:
-        with session_scope() as session:
-            settings_service.update(session, {"kiwee_integration_enabled": False})
-
-
-# --- 6. 채널 격리 -----------------------------------------------------------
+        client.put("/api/settings", json={"values": {"kiwee_integration_enabled": False}})
 
 
 @pytest.fixture()
@@ -456,123 +375,16 @@ def literature_answers(monkeypatch):
     monkeypatch.setattr(literature_client, "_live_transport", transport)
 
 
-def test_a_broken_web_block_does_not_erase_the_literature_channel(
-    client, literature_answers
-) -> None:
-    """웹 채널의 출력 형식 오류가 다른 채널의 정상 결과를 지우지 않는다.
-
-    SEARCH_NOLOG 는 모델이 감사 블록을 내지 않은 실행이다. 그때도 ARIA 가 직접
-    물어 받은 서지 결과는 남아야 한다 — 두 채널은 격리되어 있고, 한쪽의 형식
-    오류가 다른 쪽이 실제로 받은 응답을 무효로 만들지 않는다.
-    """
-    job = _run(client, claim=CLAIM + " SEARCH_NOLOG")
-    manifest = job["search_manifest"]
-    assert manifest is not None
-
-    # 웹 채널의 실패는 사유와 함께 남는다.
-    assert job["search_manifest_error"]
-    rows = {row["id"]: row for row in manifest["channel_status"]}
-    assert rows["web_search"]["status"] == search_channels.STATUS_FAILED
-    assert rows["web_search"]["detail"]
-
-    # 서지 채널은 자기 결과를 그대로 갖고 있다.
-    literature = manifest["literature"]
-    assert literature["enabled"] is True
-    assert literature["candidates"], literature.get("reason")
-    assert rows["literature_search"]["status"] == search_channels.STATUS_SUCCEEDED
-
-    # 그 후보는 최종 후보 목록에도 살아 있다.
-    candidates = (manifest["reported"] or {}).get("candidates") or []
-    assert any(
-        search_manifest.DISCOVERY_LITERATURE
-        in search_manifest.discovery_origins(item)
-        for item in candidates
-    )
 
 
-def test_the_internal_plan_feeds_the_literature_channel_when_the_web_lane_dies(
-    client, literature_answers
-) -> None:
-    """웹 레인이 검색을 한 번도 하지 못한 실행에서도 논문 채널은 돈다.
-
-    예전에는 모델의 검색어를 관측하지 못하면 이 채널을 통째로 건너뛰었다. 그러면
-    웹 채널 하나의 실패가 논문 채널까지 함께 없앤다 — 채널 격리라고 할 수 없다.
-    대체 입력은 모델의 문장이 아니라 ARIA 의 내부 검색 계획이므로, 이 경로가
-    모델 출력에 의존하지 않는다는 성질은 그대로다.
-    """
-    job = _run(client, claim=CLAIM + chr(10) + "SEARCH_NO_TOOL")
-
-    # 웹 채널은 검색을 하지 않아 실패한다. 그 판정은 그대로 둔다.
-    assert job["status"] == "FAILED"
-    assert job["error_code"] == "SEARCH_NOT_PERFORMED"
-
-    manifest = job["search_manifest"]
-    assert manifest["observed"]["tool_call_counts"] == {}
-
-    literature = manifest["literature"]
-    assert literature["enabled"] is True
-    # 질의의 출처가 기록에 남는다. 모델이 쓴 검색어와 같은 칸에 두지 않는다.
-    assert literature["query_source"] == "plan"
-    assert literature["queries"]
-    planned = {row["text"] for row in manifest["plan"]["queries"]}
-    assert {row["query"] for row in literature["queries"]} <= planned
 
 
-def test_a_failing_literature_channel_keeps_the_web_results(client, monkeypatch) -> None:
-    """반대 방향도 같다. 서지 API 가 전부 실패해도 웹 후보는 남는다."""
-
-    def broken(request, timeout):
-        raise RuntimeError("서지 API 연결 실패(테스트)")
-
-    monkeypatch.setattr(literature_client, "_live_transport", broken)
-
-    job = _run(client)
-    assert job["status"] == "SUCCEEDED", job["errors"]
-    manifest = job["search_manifest"]
-
-    rows = {row["id"]: row for row in manifest["channel_status"]}
-    assert rows["literature_search"]["status"] == search_channels.STATUS_FAILED
-    # 실패 사유가 기록에 남는다.
-    assert any(
-        row.get("error") for row in (manifest["literature"].get("queries") or [])
-    )
-    # 웹 후보는 그대로다.
-    assert rows["web_search"]["status"] == search_channels.STATUS_SUCCEEDED
-    numbers = {
-        item.get("doc_number")
-        for item in (manifest["reported"] or {}).get("candidates") or []
-    }
-    assert "AB1234" in numbers
 
 
-# --- 7. 내부 검색 계획 ------------------------------------------------------
 
 
-def test_the_plan_and_the_executed_queries_are_recorded_separately(client) -> None:
-    """계획한 것과 실행한 것을 같은 칸에 적지 않는다."""
-    strategy = _create_strategy(client, "계획 확인용 전략", STRATEGY_PLAIN)
-    try:
-        job = _run(client, prompt_id=strategy["id"])
-        manifest = job["search_manifest"]
-
-        plan = manifest["plan"]
-        assert plan["version"] >= 1
-        assert plan["generator"] == "aria_deterministic_v1"
-        assert plan["strategy_prompt_id"] == strategy["id"]
-        assert [row["text"] for row in plan["terms"]]
-        assert plan["queries"]
-
-        # 실행된 검색어는 여전히 observed 에 있고, 계획과 섞이지 않는다.
-        executed = manifest["observed"]["search_queries"]
-        assert executed == ["테스트 검색식 A", "테스트 검색식 B"]
-        assert set(executed).isdisjoint(
-            {row["text"] for row in plan["queries"]}
-        )
-    finally:
-        client.delete(f"/api/prompts/{strategy['id']}")
 
 
-# --- 8. 분석 작업에는 영향이 없다 -------------------------------------------
 
 
 def test_analysis_prompts_and_jobs_are_untouched(client) -> None:
@@ -663,7 +475,7 @@ def test_a_legacy_placeholder_prompt_still_runs(client) -> None:
 
         # 옛 본문이어도 감사 기록과 표준 보고서는 그대로 나온다.
         assert job["search_manifest_error"] is None
-        assert "## 채널별 실행 결과" in (job["result_text"] or "")
+        assert "## 사용 가능한 도구" in (job["result_text"] or "")
     finally:
         client.delete(f"/api/prompts/{legacy['id']}")
 

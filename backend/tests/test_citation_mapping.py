@@ -267,15 +267,26 @@ def test_mapping_is_verified_and_removed_from_the_deliverable(
     assert "ARIA_CITATION_MAPPING" in client.get(f"/api/jobs/{job['id']}/raw").text
 
 
-def test_mapping_is_not_expected_when_the_prompt_does_not_declare_it(
+def test_mapping_is_read_from_a_prompt_that_declares_nothing(
     client, plain_prompt
 ) -> None:
+    """capabilities 선언이 없어도 매핑을 읽는다.
+
+    출력 규칙을 ARIA 가 붙이므로(analysis_protocol) 선언은 더 이상 이 기능의
+    스위치가 아니다. 사용자가 프롬프트를 자기 것으로 갈아 끼우면서 선언을 잊는
+    것이 기본값인데, 그때 번호 유지가 조용히 꺼지면 안 된다.
+    """
     job = _run(client, plain_prompt, batch_id=_upload(client, "c1.txt"))
     assert job["status"] == "SUCCEEDED"
-    assert job["citation_mapping"] is None
+
+    # 선언하지 않은 프롬프트에도 규칙이 붙었고, 그 결과가 읽혔다.
+    assert "ARIA_CITATION_MAPPING_V1" in _final_prompt(client, job["id"])
     assert job["citation_mapping_error"] is None
-    # 선언하지 않은 프롬프트의 출력은 손대지 않는다.
-    assert "ARIA_CITATION_MAPPING" in (job["result_text"] or "")
+    mapping = job["citation_mapping"]
+    assert mapping is not None
+    assert [item["citation_number"] for item in mapping["items"]] == [1]
+    # 사용자가 받아 가는 보고서에는 프로토콜 블록이 남지 않는다.
+    assert "ARIA_CITATION_MAPPING" not in (job["result_text"] or "")
 
 
 def test_unreadable_mapping_keeps_the_run_successful(

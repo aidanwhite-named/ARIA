@@ -204,6 +204,28 @@ def _summarize_input(item_type: str, item: dict) -> dict:
     """감사에 필요한 필드만 뽑는다. 도구 출력 원문은 남기지 않는다."""
     if item_type == "web_search":
         return _web_search_input(item)
+    if item_type == "mcp_tool_call":
+        summary = {
+            key: str(item.get(key) or "")[:_MAX_INPUT_VALUE]
+            for key in ("server", "tool")
+            if item.get(key)
+        }
+        arguments = item.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw": arguments[:_MAX_INPUT_VALUE]}
+        if isinstance(arguments, dict):
+            summary["arguments"] = {
+                str(key)[:80]: (
+                    str(value)[:_MAX_INPUT_VALUE]
+                    if not isinstance(value, (dict, list))
+                    else json.dumps(value, ensure_ascii=False)[:_MAX_INPUT_VALUE]
+                )
+                for key, value in list(arguments.items())[:20]
+            }
+        return summary
     keys = _TOOL_INPUT_KEYS.get(item_type)
     if keys is None:
         return {"keys": sorted(str(key) for key in item if key not in ("id", "type"))[:10]}
@@ -358,10 +380,13 @@ class CodexStreamParser:
         call = state.tool_calls_by_id.get(call_id)
         events: list[tuple[str, dict]] = []
 
+        audit_name = item_type
+        if item_type == "mcp_tool_call" and item.get("server") and item.get("tool"):
+            audit_name = f"mcp__{item['server']}__{item['tool']}"
         if call is None:
             call = {
                 "id": call_id,
-                "name": item_type,
+                "name": audit_name,
                 "ts": _utcnow_iso(),
                 "input": _summarize_input(item_type, item),
                 "ok": None,
@@ -369,7 +394,7 @@ class CodexStreamParser:
             }
             state.tool_calls_by_id[call_id] = call
             state.tool_calls.append(call)
-            state.tool_uses.append(item_type)
+            state.tool_uses.append(audit_name)
             events.append(
                 (
                     "tool_use",
@@ -395,6 +420,9 @@ class CodexStreamParser:
             fresh = _summarize_input(item_type, item)
             if fresh and (envelope == "item.completed" or not call["input"]):
                 call["input"] = fresh
+            if audit_name != item_type and call.get("name") != audit_name:
+                call["name"] = audit_name
+                state.tool_uses[state.tool_calls.index(call)] = audit_name
 
         if envelope == "item.completed":
             status = str(item.get("status") or "").lower()

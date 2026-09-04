@@ -1,11 +1,9 @@
 <!-- ARIA_PROMPT_METADATA
 {
-  "name": "분석 프롬프트",
+  "name": "보고서 생성",
   "description": "지식재산권 심사, 선행기술 조사 및 무효자료 조사를 지원하며 출원발명의 청구항과 복수 인용발명을 구성별로 대비하는 분석 전용 프롬프트입니다.",
-  "output_mode": "markdown",
   "version": 1,
   "capabilities": ["citation_mapping_v1", "claim_component_analysis_v1"],
-  "tags": ["특허", "선행기술조사", "무효조사", "구성대비"],
   "accepted_file_types": [".pdf"],
   "enabled": true
 }
@@ -52,10 +50,10 @@
 
 **판독 또는 검토 범위 제한으로 판단할 수 없는 경우를 제외하고 모든 구성요소에 0~100% 유사도를 하나씩 부여한다.** 기준 문헌 하나만 평가하며 여러 문헌을 합산하지 않는다. 수치는 기술 대응도 보조지표다.
 
-- `95~100%: 동일 대응`
-- `80~94%: 실질 대응`
-- `1~79%: 부분 대응`
-- `0%: 대응 없음—확인 범위 기준`
+- `95~100%: 동일 대응 🔵`
+- `80~94%: 실질 대응 🟢`
+- `1~79%: 부분 대응 🟡`
+- `0%: 대응 없음—확인 범위 기준 ⚪`
 
 형식: `대응 정도: [등급명] (XX%)`
 
@@ -147,23 +145,3 @@
 4. 부분 대응이 있는데 `대응 없음`으로 처리하지 않았는가?
 5. 같은 차이에 단일 문헌 도출과 문헌 결합을 중복된 필수 단계처럼 쓰지 않았는가?
 6. 결합 후 도출 용이성은 결합 후에도 실제로 남은 차이에 대해서만 판단했는가?
-
-# ARIA 기계 판독 블록
-
-종합 요약 뒤에 아래 두 블록을 출력한다. 화면에서는 제거되므로 본문에서 설명하지 않는다.
-
-## 구성별 분석 블록
-
-모든 구성요소를 보고서 순서로 한 번만 기록한다. `similarity`는 본문과 같은 정수, `status`는 80% 이상 `matched`, 0~79% `below_threshold`, 판독 또는 검토 범위 제한으로 유사도를 생략한 경우는 `unreadable`이다(`not_found` 미사용). `difference`에는 미대응 기능을 간결히 쓴다. 한 줄 JSON이며 코드펜스를 쓰지 않는다.
-
-[ARIA_COMPONENT_ANALYSIS_V1]
-{"items":[{"claim":"청구항 1","symbol":"(A)","feature":"청구항 구성 내용","similarity":92,"status":"matched","difference":""},{"claim":"청구항 1","symbol":"(B)","feature":"청구항 구성 내용","similarity":0,"status":"below_threshold","difference":"확인 범위에서 대응 내용 없음"}]}
-[/ARIA_COMPONENT_ANALYSIS_V1]
-
-## 문헌 매핑 블록
-
-보고서 맨 마지막에 한 번만 출력한다. 번호를 부여한 모든 문헌에 대해 `citation_number`는 표의 번호, `attachment`는 첨부의 `ATT-02`형 자료 번호, `document_number`는 확인된 고유 문헌번호를 쓴다. UUID·해시는 쓰지 않으며 문헌번호 미확인 시 블록 전체를 생략한다. 한 줄 JSON이며 코드펜스를 쓰지 않는다.
-
-[ARIA_CITATION_MAPPING_V1]
-{"items":[{"citation_number":1,"attachment":"ATT-02","document_number":"KR10-1234567"}]}
-[/ARIA_CITATION_MAPPING_V1]

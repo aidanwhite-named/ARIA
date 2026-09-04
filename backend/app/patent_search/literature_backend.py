@@ -43,7 +43,6 @@ from .base import (
 
 SETTING_ENABLED = "literature_integration_enabled"
 SETTING_MAILTO = "literature_contact_email"
-SETTING_MAX_QUERIES = "literature_max_queries"
 SETTING_MAX_RESULTS = "literature_max_results_per_query"
 SETTING_HTTP_BUDGET = "literature_http_budget_seconds"
 

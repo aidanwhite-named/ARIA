@@ -268,11 +268,10 @@ def test_codex_search_context_never_mentions_tools_it_does_not_have() -> None:
     assert "web_search" in CODEX_SEARCH_RUNTIME_CONTEXT
 
 
-def test_codex_search_context_caps_evidence_at_snippet_level() -> None:
-    from app.config import CODEX_SEARCH_RUNTIME_CONTEXT
-
-    assert '항상 "candidate_only"' in CODEX_SEARCH_RUNTIME_CONTEXT
-    assert "raw_original_verified 를 부여하지" in CODEX_SEARCH_RUNTIME_CONTEXT
+def test_codex_native_url_lookup_never_claims_verified_body():
+    from app.config import CODEX_SEARCH_RUNTIME_CONTEXT as text
+    assert "본문 열람 성공을 검증할 수 없습니다" in text
+    assert "직접 인용" in text
 
 
 def test_codex_search_tool_name_is_counted_by_the_manifest() -> None:

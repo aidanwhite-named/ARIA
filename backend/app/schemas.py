@@ -3,28 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from .enums import AttachmentRole, JobKind, OutputMode, PromptKind, RelationType
+from .enums import AttachmentRole, JobKind, PromptKind, RelationType
 
 
 class PromptBase(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     body: str = Field(min_length=1)
-    output_mode: str = OutputMode.MARKDOWN
-    tags: list[str] = Field(default_factory=list)
     accepted_file_types: list[str] = Field(default_factory=list)
-
-    @field_validator("output_mode")
-    @classmethod
-    def _check_mode(cls, value: str) -> str:
-        allowed = {OutputMode.MARKDOWN.value, OutputMode.TEXT.value}
-        if value not in allowed:
-            raise ValueError(f"output_mode 는 {sorted(allowed)} 중 하나여야 합니다.")
-        return value
 
 
 class PromptCreate(PromptBase):
@@ -45,20 +35,8 @@ class PromptUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     body: str | None = Field(default=None, min_length=1)
-    output_mode: str | None = None
-    tags: list[str] | None = None
     accepted_file_types: list[str] | None = None
     enabled: bool | None = None
-
-    @field_validator("output_mode")
-    @classmethod
-    def _check_mode(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        allowed = {OutputMode.MARKDOWN.value, OutputMode.TEXT.value}
-        if value not in allowed:
-            raise ValueError(f"output_mode 는 {sorted(allowed)} 중 하나여야 합니다.")
-        return value
 
 
 class PromptOut(PromptBase):
@@ -163,6 +141,26 @@ class JobCreate(BaseModel):
     # 구성대비 결과에서 시작하는 미대응 구성 검색. source_job_id 와 함께 쓰며,
     # 일반 유사문헌 검색과 후속 분석에서는 비워 둔다.
     search_component_ids: list[str] = Field(default_factory=list)
+    # 선택적 검색 기준일. 이 날짜까지 **공개된** 문헌만 대상으로 한다.
+    #
+    #   None / ""  날짜 조건 없음. 과거·최근·미래 공개문헌을 구분 없이 본다.
+    #   YYYY-MM-DD 그 날짜까지 공개된 문헌만 본다.
+    #
+    # 이 필드를 모르는 기존 클라이언트는 보내지 않으므로 None 이 되고, 그때의
+    # 동작은 이 기능이 없던 때와 같다. 비어 있다고 오늘 날짜를 채우지 않는다.
+    search_cutoff_date: str | None = None
+    search_depth: Literal["quick", "standard", "deep"] = "standard"
+
+    @field_validator("search_cutoff_date")
+    @classmethod
+    def _check_cutoff(cls, value: str | None) -> str | None:
+        from .search_dates import DateInputError, normalize_cutoff
+
+        try:
+            normalized = normalize_cutoff(value)
+        except DateInputError as exc:
+            raise ValueError(str(exc)) from exc
+        return normalized or None
 
     @field_validator("relation_type")
     @classmethod
@@ -278,6 +276,10 @@ class JobOut(BaseModel):
     search_manifest: dict[str, Any] | None = None
     search_manifest_error: str | None = None
     search_focus: dict[str, Any] | None = None
+    # 이 실행에 적용한 검색 기준일. null 이면 날짜 조건 없이 검색했다는 뜻이며,
+    # 이 기능 이전의 실행도 모두 null 이다.
+    search_cutoff_date: str | None = None
+    search_depth: Literal["quick", "standard", "deep"] = "standard"
     # 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline.
     delivery_plan: str = "full_inline"
     # 그 판정의 근거와 실제 전송 크기. 이 기능 이전 실행은 null 이며, 화면은

@@ -53,17 +53,8 @@ export default function GapSearchPanel({
       </div>
 
       <div className="notice info gap-search-order">
-        <strong>검색 순서</strong>
-        <ol>
-          <li>
-            <strong>1차 조합 검색</strong> — 선택 구성이 하나의 문헌에 함께 개시된
-            발명을 먼저 찾습니다.
-          </li>
-          <li>
-            <strong>2차 개별 검색</strong> — 선택한 각 구성을 개별 검색식으로
-            넓혀 찾습니다.
-          </li>
-        </ol>
+        <strong>검색 방식</strong>
+        <p>선택 구성의 조합·개별 검색과 확장 여부는 LLM이 판단합니다.</p>
       </div>
 
       <div className="btn-row gap-search-select-actions">

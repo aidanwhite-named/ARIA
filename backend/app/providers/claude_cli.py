@@ -171,6 +171,13 @@ class ClaudeCliProvider(Provider):
 
     def build_args(self, request: ExecutionRequest) -> list[str]:
         policy = request.tool_policy or NO_TOOLS
+        if request.mcp_servers and not policy.mcp_tools:
+            raise ValueError("MCP servers require an explicit tool policy")
+        mcp_config = (
+            json.dumps({"mcpServers": request.mcp_servers}, ensure_ascii=False)
+            if request.mcp_servers
+            else _EMPTY_MCP
+        )
         args = [
             "-p",
             "--input-format",
@@ -184,11 +191,12 @@ class ClaudeCliProvider(Provider):
             "--tools",
             ",".join(policy.allowed_tools),
         ]
-        if policy.allowed_tools:
+        permitted_tools = (*policy.allowed_tools, *policy.mcp_tools)
+        if permitted_tools:
             # 비대화형 실행이라 권한 프롬프트에 답할 사람이 없다. 허용한 도구는
             # 되묻지 않고 통과시키고, 목록 밖 도구는 애초에 --tools 로 없앤다.
             # 여기서 --dangerously-skip-permissions 는 쓰지 않는다.
-            args += ["--allowedTools", *policy.allowed_tools]
+            args += ["--allowedTools", *permitted_tools]
             args += ["--permission-mode", "dontAsk"]
         args += [
             # 코딩 에이전트 기본 시스템 프롬프트를 ARIA 규칙으로 교체한다.
@@ -201,7 +209,7 @@ class ClaudeCliProvider(Provider):
             "",
             "--strict-mcp-config",
             "--mcp-config",
-            _EMPTY_MCP,
+            mcp_config,
             "--disable-slash-commands",
             "--no-session-persistence",
             "--no-chrome",

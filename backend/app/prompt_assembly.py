@@ -16,6 +16,11 @@
 ARIA 는 Master Prompt 앞뒤로 업무 지시를 덧붙이지 않는다. "위 지시를
 수행하라" 같은 문장도 넣지 않는다. 업무 로직의 유일한 출처는 Master Prompt다.
 
+한 가지 예외는 업무 지시가 아니다. 분석 프롬프트 뒤에는 기계 판독 블록의 출력
+규칙(analysis_protocol)이 붙는다. 그 절은 무엇을 어떻게 분석할지 정하지 않고
+결과를 돌려받을 형식만 정한다 — 파서가 코드에 있으니 그 짝도 코드에 있어야
+사용자가 프롬프트를 바꿔도 연계 기능이 조용히 꺼지지 않는다.
+
 후속 분석(CONTINUED)도 같은 원칙을 지킨다. ARIA 는 이전 보고서를 "데이터"로만
 붙이고, 그것을 어떻게 이어서 다룰지는 정하지 않는다. 그 규칙은 Master Prompt 의
 「후속 처리 규칙」 절에 있다. 사용자가 직접 쓴 후속 지시는 별도 섹션으로 구분해서
@@ -31,7 +36,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
-from . import retrieval
+from . import analysis_protocol, retrieval
 from .citation_mapping import AliasedAttachment, assign_aliases
 from .citation_mapping import ordered_attachments as citation_ordered_attachments
 from .citation_mapping import render as render_mapping
@@ -195,7 +200,12 @@ def assemble(
     aliases = assign_aliases(ranked)
     alias_by_id = {item.attachment_id: item.alias for item in aliases.values()}
 
-    sections: list[str] = ["[MASTER PROMPT]", master_prompt.strip()]
+    # 기계 판독 블록의 출력 규칙을 여기서 붙인다. 검색 조립(assemble_search)은
+    # 이 경로를 지나지 않으므로 검색 프롬프트에는 붙지 않는다.
+    sections: list[str] = [
+        "[MASTER PROMPT]",
+        analysis_protocol.apply(master_prompt).strip(),
+    ]
 
     if claim_text.strip():
         sections += ["", "[출원발명 청구항]", claim_text.strip()]

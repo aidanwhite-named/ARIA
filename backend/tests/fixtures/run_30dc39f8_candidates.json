@@ -1,0 +1,886 @@
+{
+ "source_run": "30dc39f8-c83c-46c2-b5aa-7c166c1468c7",
+ "note": "2026-09-03 실행의 후보 18건을 공식 검증 대상 선택 직전 상태로 되돌린 스냅샷. 그 실행에서는 부분 재사용이 가능한 EPO 후보 셋이 검증 4자리 중 셋을 먼저 가져갔고, US7277572B2 와 US20100149180A1 은 예상 조회가 3회라는 이유만으로 밀렸다. 본문(초록·청구항)은 넣지 않는다.",
+ "candidates": [
+  {
+   "index": 1,
+   "channel": "web",
+   "doc_type": "patent",
+   "doc_number": "US20260010642A1",
+   "doi": "",
+   "title": "Multimodal User Interfaces for Interacting with Digital Model Files",
+   "reported_title": "Multimodal User Interfaces for Interacting with Digital Model Files",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DUS20260010642",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DUS20260010642",
+   "provenance": "webfetch_summary",
+   "original_verified": false,
+   "page_fetch_succeeded": true,
+   "url_is_document": true,
+   "identifier_url_matched": true,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "web"
+   ],
+   "group": "A",
+   "provisional_group": null,
+   "classification_basis": "page_observed",
+   "classification_outcome": "",
+   "provisional": false,
+   "group_eligible": true,
+   "evidence_status": "source_page_reviewed",
+   "page_supported_rows": 5,
+   "mapping": [
+    {
+     "feature": "전자 장치에 있어서, 사용자 장치와 데이터를 송수신하는 통신 회로, 적어도 하나의 프로세서 및 명령어들을 저장하는 메모리를 포함",
+     "page_supported": true,
+     "official_supported": false,
+     "support_source": "page_text",
+     "degree": "강한 대응"
+    },
+    {
+     "feature": "(A) 제1 CAD 표현을 기반으로 생성된 제1 3D 모델을 가상 디자인 공간에 표시한 제1 화면을 상기 사용자 장치를 통해 표시하고",
+     "page_supported": true,
+     "official_supported": false,
+     "support_source": "page_text",
+     "degree": "강한 대응"
+    },
+    {
+     "feature": "(B) 상기 제1 3D 모델에 대한 설계 시각화 정보를 요청하는 제1 사용자 입력을 획득하고",
+     "page_supported": true,
+     "official_supported": false,
+     "support_source": "page_text",
+     "degree": "부분 대응"
+    },
+    {
+     "feature": "(C) 상기 제1 사용자 입력에 기반하여 상기 제1 3D 모델을 구성하는 복수의 디자인 요소들에 대한 설계 정보를 상기 제1 CAD표현을 통해 획득하고, 상기 복수의 디자인 요소들은 상기 제1 3D 모델을 구성하는 ",
+     "page_supported": true,
+     "official_supported": false,
+     "support_source": "page_text",
+     "degree": "강한 대응"
+    },
+    {
+     "feature": "(D) 상기 설계 정보에 기반하여 상기 복수의 디자인 요소들 중 적어도 일부의 설계 시각화 정보를 나타내는 제1 시각적 객체를 포함하는 제2 화면을 상기 사용자 장치를 통해 표시하는",
+     "page_supported": true,
+     "official_supported": false,
+     "support_source": "page_text",
+     "degree": "부분 대응"
+    }
+   ],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {}
+  },
+  {
+   "index": 2,
+   "channel": "web",
+   "doc_type": "patent",
+   "doc_number": "US7277572B2",
+   "doi": "",
+   "title": "",
+   "reported_title": "Three-dimensional interior design system",
+   "url": "https://patents.google.com/patent/US7277572B2/en",
+   "canonical_url": "https://patents.google.com/patent/US7277572B2/en",
+   "provenance": "search_snippet",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": true,
+   "quarantine_reason": "이 주소로 성공한 페이지 열람 기록이 없습니다.",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "web"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {}
+  },
+  {
+   "index": 3,
+   "channel": "web",
+   "doc_type": "patent",
+   "doc_number": "US20100149180A1",
+   "doi": "",
+   "title": "",
+   "reported_title": "Method and System for Converting Engineering Data into 3D Modeling Data",
+   "url": "https://patents.google.com/patent/US20100149180A1/en",
+   "canonical_url": "https://patents.google.com/patent/US20100149180A1/en",
+   "provenance": "search_snippet",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": true,
+   "quarantine_reason": "이 주소로 성공한 페이지 열람 기록이 없습니다.",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "web"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {}
+  },
+  {
+   "index": 4,
+   "channel": "patent_db",
+   "doc_type": "patent",
+   "doc_number": "WO2026155739A1",
+   "doi": "",
+   "title": "LLM-BASED AUTONOMOUS COMPUTATIONAL 3D MULTI-PHYSICS ANALYSIS SYSTEM AND METHOD",
+   "reported_title": "",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DWO2026155739",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DWO2026155739",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "epo"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "epo_discovery": {
+    "lanes": [
+     "epo:claim_only"
+    ],
+    "first_seen_round": 1,
+    "evidence_fields": [
+     "abstract:en",
+     "abstract:fr",
+     "applicants",
+     "application_number",
+     "family_id",
+     "inventors",
+     "ipc",
+     "publication_date",
+     "publication_number",
+     "title:en",
+     "title:fr"
+    ]
+   }
+  },
+  {
+   "index": 5,
+   "channel": "patent_db",
+   "doc_type": "patent",
+   "doc_number": "CN122132638A",
+   "doi": "",
+   "title": "Method and equipment for reading CAD (Computer Aided Design) file at web end and computer readable medium",
+   "reported_title": "",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DCN122132638",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DCN122132638",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": true,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "epo"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "official_record_verified",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "epo_discovery": {
+    "lanes": [
+     "epo:claim_only"
+    ],
+    "first_seen_round": 1,
+    "evidence_fields": [
+     "abstract:en",
+     "abstract:ol",
+     "applicants",
+     "application_number",
+     "family_id",
+     "inventors",
+     "ipc",
+     "publication_date",
+     "publication_number",
+     "title:en",
+     "title:ol"
+    ]
+   }
+  },
+  {
+   "index": 6,
+   "channel": "patent_db",
+   "doc_type": "patent",
+   "doc_number": "US20260236845A1",
+   "doi": "",
+   "title": "AEROSPACE ENGINE BLADE INSPECTION SYSTEM",
+   "reported_title": "",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DUS20260236845",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DUS20260236845",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "epo"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "epo_discovery": {
+    "lanes": [
+     "epo:claim_only"
+    ],
+    "first_seen_round": 1,
+    "evidence_fields": [
+     "abstract:en",
+     "applicants",
+     "application_number",
+     "family_id",
+     "inventors",
+     "ipc",
+     "publication_date",
+     "publication_number",
+     "title:en"
+    ]
+   }
+  },
+  {
+   "index": 7,
+   "channel": "patent_db",
+   "doc_type": "patent",
+   "doc_number": "WO2026105120A1",
+   "doi": "",
+   "title": "SYSTEMS AND METHODS FOR POST CONSTRUCTION VALIDATION",
+   "reported_title": "",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DWO2026105120",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DWO2026105120",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "epo"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "epo_discovery": {
+    "lanes": [
+     "epo:claim_only"
+    ],
+    "first_seen_round": 1,
+    "evidence_fields": [
+     "abstract:en",
+     "abstract:fr",
+     "applicants",
+     "application_number",
+     "family_id",
+     "inventors",
+     "ipc",
+     "publication_date",
+     "publication_number",
+     "title:en",
+     "title:fr"
+    ]
+   }
+  },
+  {
+   "index": 8,
+   "channel": "patent_db",
+   "doc_type": "patent",
+   "doc_number": "CN122174293A",
+   "doi": "",
+   "title": "Method and device for generating AI model through CAD model by using single view",
+   "reported_title": "",
+   "url": "https://worldwide.espacenet.com/patent/search?q=pn%3DCN122174293",
+   "canonical_url": "https://worldwide.espacenet.com/patent/search?q=pn%3DCN122174293",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "epo"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "epo_discovery": {
+    "lanes": [
+     "epo:claim_only"
+    ],
+    "first_seen_round": 1,
+    "evidence_fields": [
+     "abstract:en",
+     "abstract:ol",
+     "applicants",
+     "application_number",
+     "family_id",
+     "inventors",
+     "ipc",
+     "publication_date",
+     "publication_number",
+     "title:en",
+     "title:ol"
+    ]
+   }
+  },
+  {
+   "index": 9,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.17814/mechanik.2015.2.40",
+   "doi": "10.17814/mechanik.2015.2.40",
+   "title": "Manufacturing cost estimation of machined parts based on 3D CAD model",
+   "reported_title": "",
+   "url": "https://doi.org/10.17814/mechanik.2015.2.40",
+   "canonical_url": "https://doi.org/10.17814/mechanik.2015.2.40",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com \"CAD\" \"3D model\" \"design visualization\" \"parts\" \"user interface\"",
+     "site:patents.google.com \"CAD\" \"3D model\" \"visualizing\" \"parts\" \"portion\" \"user input\" G06F30/00",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "Mechanik"
+   }
+  },
+  {
+   "index": 10,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1016/b978-0-240-82107-8.50028-3",
+   "doi": "10.1016/b978-0-240-82107-8.50028-3",
+   "title": "3D CAD Brief",
+   "reported_title": "",
+   "url": "https://doi.org/10.1016/b978-0-240-82107-8.50028-3",
+   "canonical_url": "https://doi.org/10.1016/b978-0-240-82107-8.50028-3",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com \"CAD\" \"3D model\" \"design visualization\" \"parts\" \"user interface\"",
+     "site:patents.google.com \"CAD representation\" \"3D model\" \"virtual design space\" OR \"design visualization\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "3ds Max Design Architectural Visualization"
+   }
+  },
+  {
+   "index": 11,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1016/j.cad.2023.103577",
+   "doi": "10.1016/j.cad.2023.103577",
+   "title": "Simplification of 3D CAD Model in Voxel Form for Mechanical Parts Using Generative Adversarial Networks",
+   "reported_title": "",
+   "url": "https://doi.org/10.1016/j.cad.2023.103577",
+   "canonical_url": "https://doi.org/10.1016/j.cad.2023.103577",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "Computer-Aided Design"
+   }
+  },
+  {
+   "index": 12,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1007/978-1-84800-239-5_79",
+   "doi": "10.1007/978-1-84800-239-5_79",
+   "title": "From a 3D Point Cloud to a Real CAD Model of Mechanical Parts, a Product Knowledge Based Approach",
+   "reported_title": "",
+   "url": "https://doi.org/10.1007/978-1-84800-239-5_79",
+   "canonical_url": "https://doi.org/10.1007/978-1-84800-239-5_79",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "Global Design to Gain a Competitive Edge"
+   }
+  },
+  {
+   "index": 13,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.31274/rtd-180813-16075",
+   "doi": "10.31274/rtd-180813-16075",
+   "title": "Effects of computer self-efficacy and spatial visualization ability on student perceptions of 2D/3D CAD virtual prototype simulations for apparel design",
+   "reported_title": "",
+   "url": "https://doi.org/10.31274/rtd-180813-16075",
+   "canonical_url": "https://doi.org/10.31274/rtd-180813-16075",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com \"CAD representation\" \"3D model\" \"virtual design space\" OR \"design visualization\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": ""
+   }
+  },
+  {
+   "index": 14,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.14733/cadaps.2025.430-444",
+   "doi": "10.14733/cadaps.2025.430-444",
+   "title": "3D Model for Representation and Visualization of Magnetic Resonance Spectroscopy Data",
+   "reported_title": "",
+   "url": "https://doi.org/10.14733/cadaps.2025.430-444",
+   "canonical_url": "https://doi.org/10.14733/cadaps.2025.430-444",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com \"CAD representation\" \"3D model\" \"virtual design space\" OR \"design visualization\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "Computer-Aided Design and Applications"
+   }
+  },
+  {
+   "index": 15,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.36934/tr2025_222",
+   "doi": "10.36934/tr2025_222",
+   "title": "Dynamic Registration of 2D Drawings to 3D Parts in a Split 2D and 3D CAD System",
+   "reported_title": "",
+   "url": "https://doi.org/10.36934/tr2025_222",
+   "canonical_url": "https://doi.org/10.36934/tr2025_222",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "\"CAD\" \"3D model\" \"design visualization\" \"parts\" \"electronic device\" OR \"server\" patent",
+     "site:patents.google.com \"CAD\" \"3D model\" \"visualizing\" \"parts\" \"portion\" \"user input\" G06F30/00"
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": ""
+   }
+  },
+  {
+   "index": 16,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1080/16864360.2005.10738335",
+   "doi": "10.1080/16864360.2005.10738335",
+   "title": "A 2D Sketch-Based User Interface for 3D CAD Model Retrieval",
+   "reported_title": "",
+   "url": "https://doi.org/10.1080/16864360.2005.10738335",
+   "canonical_url": "https://doi.org/10.1080/16864360.2005.10738335",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "site:patents.google.com \"CAD\" \"3D model\" \"design visualization\" \"parts\" \"user interface\"",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "crossref"
+    ],
+    "container": "Computer-Aided Design and Applications"
+   }
+  },
+  {
+   "index": 17,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1371/journal.pone.0342071",
+   "doi": "10.1371/journal.pone.0342071",
+   "title": "Toward mass customization of animal trackers by design automation.",
+   "reported_title": "",
+   "url": "https://doi.org/10.1371/journal.pone.0342071",
+   "canonical_url": "https://doi.org/10.1371/journal.pone.0342071",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "site:patents.google.com \"CAD\" \"3D model\" \"design visualization\" \"parts\" \"user interface\"",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "europepmc"
+    ],
+    "container": "PloS one"
+   }
+  },
+  {
+   "index": 18,
+   "channel": "patent_db",
+   "doc_type": "paper",
+   "doc_number": "10.1016/j.ohx.2025.e00732",
+   "doi": "10.1016/j.ohx.2025.e00732",
+   "title": "Low-cost, open-access sensorized aerial robot multirotor testing operational platform.",
+   "reported_title": "",
+   "url": "https://doi.org/10.1016/j.ohx.2025.e00732",
+   "canonical_url": "https://doi.org/10.1016/j.ohx.2025.e00732",
+   "provenance": "official_record_response",
+   "original_verified": false,
+   "page_fetch_succeeded": false,
+   "url_is_document": true,
+   "identifier_url_matched": false,
+   "quarantined": false,
+   "quarantine_reason": "",
+   "search_origins": [
+    "claim_only"
+   ],
+   "discovery_origins": [
+    "literature"
+   ],
+   "group": null,
+   "provisional_group": null,
+   "classification_basis": "none",
+   "classification_outcome": "unverified",
+   "provisional": true,
+   "group_eligible": false,
+   "evidence_status": "candidate_only",
+   "page_supported_rows": 0,
+   "mapping": [],
+   "official_supported_rows": 0,
+   "matched_feature_rows": 0,
+   "official_evidence": {},
+   "literature_discovery": {
+    "queries": [
+     "site:patents.google.com \"CAD\" \"3D model\" \"design visualization\" \"parts\" \"user interface\"",
+     "site:patents.google.com/patent/ \"CAD\" \"3D model\" \"design information\" \"parts\" \"display\" \"user device\""
+    ],
+    "sources": [
+     "europepmc"
+    ],
+    "container": "HardwareX"
+   }
+  }
+ ]
+}

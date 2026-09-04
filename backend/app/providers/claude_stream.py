@@ -16,6 +16,13 @@ from datetime import datetime, timezone
 _TOOL_INPUT_KEYS = {
     "WebSearch": ("query", "allowed_domains", "blocked_domains"),
     "WebFetch": ("url",),
+    "mcp__aria-search__search_capabilities": (),
+    "mcp__aria-search__epo_search": ("query", "max_results"),
+    "mcp__aria-search__epo_fetch": ("publication_number", "constituent"),
+    "mcp__aria-search__kiwee_search": ("query", "max_results"),
+    "mcp__aria-search__kiwee_fetch": ("publication_number", "constituent"),
+    "mcp__aria-search__literature_search": ("query", "max_results"),
+    "mcp__aria-search__literature_fetch": ("doi", "constituent"),
 }
 _MAX_INPUT_VALUE = 500
 # 한 실행에서 남기는 도구 호출 기록 상한. 감사 기록이 DB 를 밀어내지 않게 한다.
@@ -113,6 +120,10 @@ def _summarize_input(name: str, raw) -> dict:
         value = raw[key]
         if isinstance(value, str):
             summary[key] = value[:_MAX_INPUT_VALUE]
+        elif isinstance(value, (int, float, bool)):
+            summary[key] = value
+        elif isinstance(value, dict):
+            summary[key] = json.dumps(value, ensure_ascii=False)[:_MAX_INPUT_VALUE]
         elif isinstance(value, list):
             summary[key] = [str(item)[:_MAX_INPUT_VALUE] for item in value[:20]]
     return summary

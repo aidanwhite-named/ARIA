@@ -112,6 +112,11 @@ class ExecutionJob(Base):
     # 구성대비 결과에서 시작한 검색이면 원본 실행과 선택 구성 스냅샷이 들어간다.
     # 일반 유사문헌 검색은 NULL 이다.
     search_focus = Column(JSON, nullable=True)
+    # 선택적 검색 기준일(YYYY-MM-DD). NULL 이면 **날짜 조건이 없다**는 뜻이고,
+    # 그것이 이 칸의 기본값이다. 비어 있다고 실행일을 채워 넣지 않는다 —
+    # 그러면 같은 청구항의 검색 범위가 실행한 날짜에 따라 달라진다.
+    search_cutoff_date = Column(String(10), nullable=True)
+    search_depth = Column(String(16), nullable=True, default="standard")
 
     provider = Column(String(30), nullable=False)
     model = Column(String(80), nullable=True)

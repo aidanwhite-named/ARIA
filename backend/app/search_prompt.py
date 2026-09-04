@@ -378,6 +378,7 @@ def compose(
     search_focus: str = "",
     *,
     prompt_id: str = SEARCH_PROMPT_ID,
+    cutoff: str = "",
 ) -> RenderedPrompt:
     """검색 전략 본문에 ARIA 의 데이터 구간을 붙여 최종 본문을 만든다.
 
@@ -391,7 +392,14 @@ def compose(
     ARIA 의 몫이다.
     """
     if is_legacy_template(body):
-        return render(body, claim_text, spec_text, search_focus, prompt_id=prompt_id)
+        return render(
+            body,
+            claim_text,
+            spec_text,
+            search_focus,
+            prompt_id=prompt_id,
+            cutoff=cutoff,
+        )
 
     validate_strategy_body(body, prompt_id=prompt_id)
     claim = claim_text.strip()
@@ -405,6 +413,10 @@ def compose(
 
     parts.append(search_contract.CLAIM_PREAMBLE)
     parts.append(_boundary_section(OPEN_TAG, CLOSE_TAG, claim))
+
+    # 기준일은 값이 있든 없든 매 실행에 나간다. 없다는 것도 조건이고, 적지
+    # 않으면 모델이 오늘 날짜를 기준으로 삼는다.
+    parts.append(search_contract.cutoff_section(cutoff))
 
     focus = search_focus.strip()
     focus_neutralized = False
@@ -439,6 +451,7 @@ def render(
     search_focus: str = "",
     *,
     prompt_id: str = SEARCH_PROMPT_ID,
+    cutoff: str = "",
 ) -> RenderedPrompt:
     """청구항과(있으면) 명세서를 각자의 경계 안에 넣은 최종 본문을 만든다.
 
@@ -490,6 +503,12 @@ def render(
         FOCUS_PLACEHOLDER: focus,
     }
     rendered = _PLACEHOLDERS.sub(lambda m: filled.get(m.group(0), m.group(0)), body)
+    # 옛 본문에는 기준일 자리가 없다. placeholder 를 새로 요구하지 않고 ARIA 가
+    # 소유하는 구간으로 뒤에 붙인다 — 사용자가 본문을 고쳐야만 기준일이 적용되면
+    # 그 조건은 조용히 빠진다.
+    rendered = rendered.rstrip() + (chr(10) * 2) + search_contract.cutoff_section(
+        cutoff
+    )
 
     return RenderedPrompt(
         body=rendered,

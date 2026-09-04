@@ -1,6 +1,8 @@
 # ADR 0002 — 검색 전략 프롬프트와 검색 실행 계약의 분리
 
-- 상태: 채택 (2026-09-03)
+- 상태: 일부 대체됨 (2026-09-04). 아래는 당시 결정의 기록이다.
+- 현재 검색 실행 구조는 [단일 에이전트 검색 변경 검토](search-simplification-review.md)를 따른다.
+  전략/실행 계약의 분리는 유지하지만, 독립 채널·이중 레인·내부 검색 계획·후처리 검증 우선순위는 삭제했다.
 - 적용 범위: `backend/app/search_prompt.py`, `search_contract.py`, `search_channels.py`,
   `search_plan.py`, `search_manifest.py`, `prompt_store.py`, `execution/runner.py`,
   `api/jobs.py`, `api/prompts.py`, `prompt/search_prompt.md`, 검색 화면·프롬프트 화면

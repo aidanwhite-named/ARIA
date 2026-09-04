@@ -101,10 +101,9 @@ def test_the_order_contract_moved_into_the_program() -> None:
     뒤따르는 검증의 우선순위 규칙이 사라진다. 이제 ARIA 가 매 실행에 붙인다.
     """
     contract = search_contract.preamble()
-    assert "대상은 후보 목록의 순서로 정해지므로" in contract
-    assert "전용 페이지에서 문헌 식별정보를 확인했고" in contract
-    assert "이 단계에서는 공식 검증을 마쳤다고 주장하지 말고" in contract
-    assert "부재나 모순으로 바꾸지 마라" in contract
+    assert "재정렬하지 않는다" in contract
+    assert "같은 실행 안에서 LLM이 선택한다" in contract
+    assert "비용이나 출처별 슬롯" in contract
 
     # 조립된 본문에도 실제로 들어간다.
     rendered = search_prompt.compose(search_prompt.load().body, CLAIM).body
@@ -381,3 +380,36 @@ def test_search_prompt_is_not_reachable_through_prompt_api(client) -> None:
         client.delete(f"/api/prompts/{search_prompt.SEARCH_PROMPT_ID}").status_code
         == 404
     )
+
+
+# --- 검색 기준일 구간 -------------------------------------------------------
+#
+# 값이 있든 없든 **매 실행에 나간다.** 아무 말도 하지 않으면 모델이 "오늘까지"를
+# 짐작하고, 그 짐작이 검색 범위를 바꾼다.
+
+
+def test_a_run_without_a_cutoff_still_says_there_is_no_date_limit() -> None:
+    rendered = search_prompt.compose("전략 본문", CLAIM)
+    assert "이 실행에는 검색 기준일이 **없다.**" in rendered.body
+    assert "오늘 날짜나 출원일을 기준으로 삼지 마라" in rendered.body
+
+
+def test_a_cutoff_reaches_the_prompt_with_the_publication_date_rule() -> None:
+    rendered = search_prompt.compose("전략 본문", CLAIM, cutoff="2024-12-31")
+    assert "기준일: 2024-12-31" in rendered.body
+    assert "판단 기준은 공개일이다. 출원일·우선일이 아니다" in rendered.body
+    # 공개일을 확인할 수 없는 문헌을 버리라고 하지 않는다.
+    assert "버리지 말고" in rendered.body
+
+
+def test_the_legacy_template_also_receives_the_cutoff_section() -> None:
+    """옛 본문에는 기준일 자리가 없다. placeholder 를 새로 요구하지 않는다."""
+    rendered = search_prompt.render(LEGACY_BODY, CLAIM, cutoff="2024-12-31")
+    assert rendered.mode == search_prompt.MODE_LEGACY
+    assert "기준일: 2024-12-31" in rendered.body
+
+
+def test_the_cutoff_section_is_program_owned() -> None:
+    """전략 본문이 무엇을 적든 이 구간은 그대로 나간다."""
+    assert search_contract.cutoff_section("") == search_contract.NO_CUTOFF_PREAMBLE
+    assert "2030-01-01" in search_contract.cutoff_section("2030-01-01")

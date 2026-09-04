@@ -299,11 +299,14 @@ def evaluate(
                 + ", ".join(outcome.tools_advertised[:10])
             )
             return Verdict(JobStatus.FAILED, ErrorCode.TOOL_POLICY_VIOLATION, errors)
-        if outcome.tool_uses:
+        if outcome.tool_uses or outcome.tool_calls:
             # 선언된 정책이 판단 근거다. 전역 설정으로 완화할 수 없다.
             errors.append(
                 "실행 중 도구가 호출되었습니다: "
-                + ", ".join(sorted(set(outcome.tool_uses))[:10])
+                + ", ".join(sorted(set(outcome.tool_uses) | {
+                    str(call.get("name") or "") for call in outcome.tool_calls
+                    if isinstance(call, dict)
+                })[:10])
                 + ". ARIA 는 첨부 자료를 프롬프트에 직접 넣어 전달하므로 "
                 "도구 호출이 필요하지 않습니다."
             )

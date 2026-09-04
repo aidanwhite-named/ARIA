@@ -41,6 +41,7 @@ agy 보다 나은 점이 하나 있다. `--ephemeral` 로 세션 파일을 디�
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -247,6 +248,8 @@ class CodexCliProvider(Provider):
     def build_args(self, request: ExecutionRequest) -> list[str]:
         """검증된 플래그만 쓴다. CLI 옵션이 바뀌면 여기만 고치면 된다."""
         policy = request.tool_policy
+        if request.mcp_servers and (policy is None or not policy.mcp_tools):
+            raise ValueError("MCP servers require an explicit tool policy")
         wants_search = policy is not None and policy.name == CODEX_WEB_SEARCH.name
         args = [
             "exec",
@@ -285,6 +288,33 @@ class CodexCliProvider(Provider):
         # config.toml 이 아니라서 --ignore-user-config 의 영향을 받지 않는다.
         if request.reasoning_effort:
             args += ["-c", f"model_reasoning_effort={request.reasoning_effort}"]
+        # Per-run MCP configuration is injected after --ignore-user-config so
+        # host MCP servers never leak into ARIA jobs.  Values are encoded as
+        # TOML literals rather than shell fragments.
+        for server_name, server in request.mcp_servers.items():
+            # -c splits paths literally on dots; quotes become part of the key.
+            # ARIA owns this one fixed server name, never a model-provided path.
+            if server_name != "aria-search":
+                raise ValueError("Unsupported MCP server")
+            prefix = f"mcp_servers.{server_name}"
+            args += ["-c", f"{prefix}.command={json.dumps(str(server['command']))}"]
+            args += [
+                "-c",
+                f"{prefix}.args={json.dumps([str(value) for value in server.get('args', [])])}",
+            ]
+            for key, value in (server.get("env") or {}).items():
+                if not str(key).replace("_", "").isalnum():
+                    raise ValueError("Invalid MCP environment key")
+                args += [
+                    "-c",
+                    f"{prefix}.env.{key}={json.dumps(str(value))}",
+                ]
+            enabled = [name.removeprefix("mcp__aria-search__") for name in policy.mcp_tools]
+            args += ["-c", f"{prefix}.enabled_tools={json.dumps(enabled)}"]
+            # Only ARIA's explicitly listed, read-only tools are unattended.
+            # Keep approval requirements for any write-capable tool.
+            args += ["-c", f'{prefix}.default_tools_approval_mode="writes"']
+            args += ["-c", f"{prefix}.required=true"]
         # 마지막 인수. 프롬프트를 stdin 에서 읽는다 — Windows 의 명령행 길이
         # 제한(32,767자) 때문에 인수로는 긴 프롬프트를 넘길 수 없다.
         args.append("-")

@@ -815,24 +815,21 @@ def test_search_call_count_falls_back_to_one_query_per_call() -> None:
     assert observed["search_queries"] == ["radar"]
 
 
-def test_progress_dedupes_per_lane_not_globally() -> None:
-    """두 레인은 각자 별도의 CLI 프로세스다. 호출 ID 는 프로세스 안에서만
-    고유하므로, ID 만으로 중복을 막으면 뒤 레인의 첫 호출이 통째로 누락된다."""
+def test_progress_dedupes_calls_in_one_agent_execution() -> None:
+    """하나의 CLI 실행에서 시작·완료 이벤트를 중복 집계하지 않는다."""
     counted: set = set()
-    assert _progress_should_count(counted, "claim_only", "item_0") is True
-    # 같은 레인의 같은 ID(시작·완료) 는 한 번만 센다.
-    assert _progress_should_count(counted, "claim_only", "item_0") is False
-    # 다른 레인의 같은 ID 는 다른 호출이다.
-    assert _progress_should_count(counted, "spec_assisted", "item_0") is True
-    assert _progress_should_count(counted, "spec_assisted", "item_0") is False
+    assert _progress_should_count(counted, "item_0") is True
+    assert _progress_should_count(counted, "item_0") is False
+    assert _progress_should_count(counted, "item_1") is True
+    assert _progress_should_count(counted, "item_1") is False
     assert len(counted) == 2
 
 
 def test_progress_without_an_id_is_always_counted() -> None:
     """ID 를 못 읽었다고 세지 않으면 진행 표시가 멈춘 것처럼 보인다."""
     counted: set = set()
-    assert _progress_should_count(counted, "claim_only", "") is True
-    assert _progress_should_count(counted, "claim_only", "") is True
+    assert _progress_should_count(counted, "") is True
+    assert _progress_should_count(counted, "") is True
 
 
 def test_resolved_event_without_a_kind_is_not_counted_by_name() -> None:

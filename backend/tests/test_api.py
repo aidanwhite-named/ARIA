@@ -87,6 +87,10 @@ def test_prompt_catalog_contains_analysis_and_search_prompts(client) -> None:
 
         catalog = client.get("/api/prompts/catalog").json()
         by_id = {item["id"]: item for item in catalog}
+        default_analysis = by_id["patent-analysis-master-prompt.md"]
+        assert default_analysis["kind"] == "analysis"
+        assert default_analysis["name"] == "보고서 생성"
+        assert default_analysis["deletable"] is False
         assert by_id[analysis["id"]]["kind"] == "analysis"
         assert by_id[analysis["id"]]["deletable"] is True
         assert by_id["search_prompt.md"]["kind"] == "search"
@@ -94,6 +98,24 @@ def test_prompt_catalog_contains_analysis_and_search_prompts(client) -> None:
         assert by_id["search_prompt.md"]["deletable"] is False
     finally:
         client.delete(f"/api/prompts/{analysis['id']}")
+
+
+def test_bundled_analysis_prompt_is_listed_editable_but_not_deletable(client) -> None:
+    prompt_id = "patent-analysis-master-prompt.md"
+    listed_ids = {item["id"] for item in client.get("/api/prompts").json()}
+    assert prompt_id in listed_ids
+
+    current = next(
+        item for item in client.get("/api/prompts/catalog").json()
+        if item["id"] == prompt_id
+    )
+    renamed = client.put(
+        f"/api/prompts/reserved/{prompt_id}",
+        json={"name": current["name"]},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["deletable"] is False
+    assert client.delete(f"/api/prompts/{prompt_id}").status_code == 404
 
 
 def test_search_prompt_catalog_edit_validates_execution_contract(client) -> None:
@@ -171,13 +193,6 @@ def test_prompt_export_import_roundtrip(client) -> None:
         "/api/prompts/import", json={"prompts": payload, "replace_existing": False}
     ).json()
     assert again["created"] == 0
-
-
-def test_invalid_output_mode_rejected(client) -> None:
-    response = client.post(
-        "/api/prompts", json={"name": "x", "body": "y", "output_mode": "yaml"}
-    )
-    assert response.status_code == 422
 
 
 # --------------------------------------------------------------- providers

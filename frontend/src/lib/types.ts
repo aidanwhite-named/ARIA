@@ -254,7 +254,6 @@ export interface GapSearchFocus {
   source_job_id: string;
   source_job_label: string;
   threshold: number;
-  strategy: "combined_then_individual";
   components: AnalysisComponent[];
 }
 
@@ -264,543 +263,52 @@ export interface GapSearchFocus {
  *  webfetch_summary      WebFetch 로 페이지를 열어 요약을 받았다 (원문 아님)
  *  raw_original_verified 공식 원문 텍스트를 확보해 대조했다
  */
-export type SearchProvenance =
-  | "search_snippet"
-  | "webfetch_summary"
-  | "raw_original_verified"
-  /** ARIA 가 EPO OPS 를 직접 불러 받은 응답에서 후보를 만들었다. 모델이 주장할
-   *  수 없는 값이며, "원문 대조 완료"와 다르다 — 응답을 받아 보존했다는 뜻이지
-   *  그 문장이 특허 원문의 직접 인용이라는 뜻이 아니다. */
-  | "official_record_response";
-
-/** 이 후보를 데려온 검색 경로. search_origins(무엇을 입력으로 검색했나)와
- *  다른 축이다. 값이 없는 옛 기록은 web 하나로 읽는다. */
-export type SearchDiscoveryOrigin = "web" | "epo";
-
-/** 청구항 구성 대응표 한 줄.
- *
- *  verified 가 false 면 source_location·verbatim_excerpt·translation 은 ARIA 가
- *  확정 표현으로 바꾼 값이며, 모델이 쓴 원래 값은 들어 있지 않다.
- */
+export type SearchGroup = "A" | "B" | "C" | null;
+export type SearchEvidenceLevel = "search_snippet_only" | "source_page_reviewed" |
+  "official_bibliographic" | "official_abstract" | "official_claims" | "official_full_text";
+export type SearchVerificationIssue = "identifier_unverified" | "identifier_invalid" |
+  "identifier_mismatch" | "source_not_read" | "quote_unverified" | "support_unverified" |
+  "duplicate_group_conflict" | "publication_date_conflict" | "source_conflict";
 export interface SearchMappingRow {
-  feature: string;
-  counterpart: string;
-  degree: string;
-  verified: boolean;
-  /** 이 행의 대응 주장을 무엇을 읽고 썼는가. verified 와 다른 축이다.
-   *
-   *  verified 는 후보의 공식 원문을 대조했는지이고 web 채널에서는 늘 false 다.
-   *  그래서 그것만으로는 근거 있는 행과 지어낸 행이 화면에서 구분되지 않았다.
-   *  none 인 행은 degree 가 "확인되지 않음" 이고 서술 칸이 비어 있다.
-   */
-  support_source?: "page_text" | "snippet" | "official_record" | "none";
-  support_text?: string;
-  support_scope?: "claims" | "full_text" | "abstract" | "unknown";
-  support_url?: string;
-  page_supported?: boolean;
-  official_supported?: boolean;
-  support_match_kind?: string;
-  support_field?: string;
-  support_artifact_id?: string;
-  source_location: string;
-  verbatim_excerpt: string;
-  translation: string;
-  similar: string;
-  different: string;
+  feature: string; degree: string; counterpart: string; similar: string; different: string;
+  support_text: string; support_verified: boolean; quote_verified: boolean;
+  verbatim_excerpt: string; translation: string; source_location: string;
+  evidence_ref: { artifact_id: string; field_path: string; profile_id: string } | null;
 }
-
 export interface SearchCandidate {
-  index: number;
-  /**
-   * 정식 그룹. 새 실행은 A/B 만 만들고, C 는 과거 매니페스트에서만 온다.
-   * 그룹 자격을 얻지 못한 후보(참고 후보)는 null 이다.
-   */
-  group: "A" | "B" | "C" | null;
-  /**
-   * 왜 정식 A/B 가 아닌가. group 이 차 있으면 빈 문자열이다.
-   * below_threshold 는 공식 검증한 결론이고, unverified 는 아직 안 본 것이다.
-   */
-  classification_outcome?: "" | "below_threshold" | "unverified" | "legacy_c";
-  /**
-   * 페이지 관측으로 정식 A/B 를 받은 후보를 공식 응답으로 추가 확인했는가.
-   * not_confirmed 라도 분류는 내리지 않는다 — OPS 가 주는 것은 초록·청구항
-   * 뿐이라 명세서에만 있는 구성은 여기서 대조될 수 없기 때문이다.
-   */
-  official_ab_confirmation?: "confirmed" | "not_confirmed";
-  official_ab_confirmation_detail?: string;
-  /** 검색 결과 기반 AI 제안. 정식 group 과 동시에 값이 있으면 안 된다. */
-  provisional_group?: "A" | "B" | "C" | null;
-  /** ARIA가 저장된 관측/공식 근거로 계산한 분류 근거 등급. */
-  classification_basis?:
-    | "none"
-    | "legacy_unknown"
-    | "search_result"
-    | "page_observed"
-    | "official_record"
-    | "original_text";
-  provisional: boolean;
-  /** 검색 경로. 현재는 web 뿐이고 향후 epo 등이 추가된다. */
-  channel: string;
-  doc_type: string;
-  doc_number: string;
-  doi: string;
-  title: string;
-  /** 검증되지 않은 제목. 문헌번호-주소 대조를 통과하지 못하면 title 이 비고
-   *  이 칸에만 남는다. 표시할 때는 반드시 "검색 결과 기반·미검증" 이라고
-   *  밝히며, 이 값만으로는 A/B 등급도 구성 대응표도 만들어지지 않는다.
-   *  옛 매니페스트에는 없다. */
-  reported_title?: string;
-  applicant: string;
-  url: string;
-  /** 관측 기록과 대조하기 위해 정규화한 URL. */
-  canonical_url: string;
-  family: string;
-  provenance: SearchProvenance;
-  evidence_status:
-    | "candidate_only"
-    | "source_page_reviewed"
-    | "official_record_verified";
-  original_verified: boolean;
-  /** ARIA 가 관측한 사실. 이 URL 로 성공한 WebFetch 호출이 있었는가. */
-  page_fetch_succeeded: boolean;
-  /** 후보 식별 게이트의 결과. 모두 ARIA 가 계산하며 모델이 정하지 않는다.
-   *
-   *  옛 매니페스트에는 없다. 없으면 저장된 다른 검증 근거가 없는 한 잠정이다.
-   */
-  url_is_document?: boolean;
-  identifier_url_matched?: boolean;
-  quarantined?: boolean;
-  quarantine_reason?: string;
-  group_eligible?: boolean;
-  page_supported_rows?: number;
-  official_supported_rows?: number;
-  matched_feature_rows?: number;
-  official_identity_matched?: boolean;
-  official_evidence?: {
-    status?: string;
-    reason?: string;
-    backend_id?: string;
-    artifact_ids?: string[];
-    fields?: string[];
-  };
-  verification?: {
-    status:
-      | "not_attempted"
-      | "fetch_failed"
-      | "record_fetched"
-      | "classification_failed"
-      | "evidence_mismatch"
-      | "promoted";
-    reason_code: string;
-    detail: string;
-    backend_id: string;
-    artifact_ids: string[];
-  };
-  verbatim_excerpt: string;
-  source_location: string;
-  mapping: SearchMappingRow[];
-  note: string;
-  /** 공식 대조로 덮이기 전의 1차(페이지 관측) 분류. 이 후보의 분류가 아니라
-   *  대체되기 전의 기록이다. 두 값을 같은 칸에 두면 위계가 사라진다. */
-  page_classification?: {
-    group: "A" | "B" | "C";
-    classification_basis: string;
-    page_supported_rows?: number;
-    evidence_status?: string;
-    url?: string;
-    mapping?: SearchMappingRow[];
-  };
-  /** 이 후보를 데려온 검색 경로. 없으면 web 하나로 읽는다. */
-  discovery_origins?: SearchDiscoveryOrigin[];
-  /** EPO 독립 검색이 이 문헌을 찾았을 때의 기록. 비어 있으면 나오지 않았다. */
-  epo_discovery?: {
-    lanes?: string[];
-    doc_number?: string;
-    first_seen_round?: number;
-    artifact_ids?: string[];
-    evidence_fields?: string[];
-    shortlist?: {
-      lane?: string;
-      round?: number;
-      reason?: string;
-      matched_elements?: string[];
-    }[];
-  };
-  /** EPO 후보의 백엔드 id. 웹 후보에는 없다. */
-  backend_id?: string;
-  /** ARIA가 붙인 독립 검색 출처. 모델이 정하는 값이 아니다. */
-  search_origins?: ("claim_only" | "spec_assisted")[];
-  /** 같은 문헌을 각 경로가 어느 그룹으로 분류했는지. */
-  origin_groups?: Partial<
-    Record<"claim_only" | "spec_assisted", "A" | "B" | "C" | null>
-  >;
-  origin_provisional_groups?: Partial<
-    Record<"claim_only" | "spec_assisted", "A" | "B" | "C" | null>
-  >;
+  index: number; rank: number; group: SearchGroup; doc_type: string;
+  doc_number: string; doi: string; title: string; url: string; note: string;
+  applicant: string; family: string; publication_date: string; reported_publication_date: string;
+  evidence_level: SearchEvidenceLevel; verification_issues: SearchVerificationIssue[];
+  verification_scope: Record<string, "not_requested" | "verified" | "unavailable">;
+  evidence_sources: unknown[]; mapping: SearchMappingRow[];
 }
-
-/** 청구항 문언을 명세서로 어떻게 읽었는지, 모델이 보고한 한 줄.
- *
- *  ARIA 가 검증하는 값이 아니다. basis 가 가리키는 명세서 위치에 정말 그 내용이
- *  있는지는 사람이 원문에서 확인해야 한다. 그래도 화면에 내보내는 이유는,
- *  검색 범위가 청구항보다 좁아졌다면 그 사실이 어딘가에 보여야 하기 때문이다.
- */
-export interface ClaimInterpretation {
-  term: string;
-  reading: string;
-  basis: string;
-  /** 청구항 문언 자체보다 좁게 읽었는가. 알 수 없으면 true 로 둔다. */
-  narrowed: boolean;
+export interface SearchManifestV14 {
+  version: 14; status: "complete" | "incomplete"; provider: string; model: string;
+  group_definitions: Record<string, string>;
+  input: { claim_text: string; spec_document: unknown; search_focus: GapSearchFocus | null };
+  prompt: { id: string; name: string; sha256: string; runtime_context_sha256: string };
+  started_at: string; completed_at: string;
+  limits: { max_tool_calls: number; timeout_seconds: number };
+  tool_availability: Record<string, { status: "available" | "disabled" | "not_configured" |
+    "not_implemented" | "unsupported_transport"; detail: string }>;
+  tool_journal: Record<string, unknown>[];
+  observed: { tool_calls: Record<string, unknown>[]; tool_call_counts: Record<string, number>;
+    search_queries: string[]; search_call_count: number; attempted_fetch_urls: string[]; succeeded_fetch_urls: string[]; url_lookup_attempts: string[]; tool_failures: unknown[]; unknown_tool_outcomes: unknown[] };
+  llm_output: unknown;
+  reported: { candidates: SearchCandidate[]; term_expansions: unknown[]; rounds: unknown[]; access_failures: unknown[] } | null;
+  date_filter: { cutoff: string; applied: boolean; excluded: { doc_number: string; doi: string;
+    title: string; publication_date: string; detail: string; reason_code: string }[];
+    unknown_publication_date: number };
+  usage: unknown; normalization_notes: string[]; error: string | null;
 }
-
-/** 명세서 보조 검색에서 모델이 보고한 검색어 확장 근거. */
-export interface SearchTermExpansion {
-  claim_term: string;
-  alternative_meanings: string[];
-  expanded_terms: string[];
-  basis: string;
-  excluded_limitations: string[];
+export interface LegacySearchManifest {
+  version: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
+  // Retained only as a read-only audit object. Never interpreted as the new schema.
+  [key: string]: unknown;
 }
+export type SearchManifest = SearchManifestV14 | LegacySearchManifest;
 
-/** 검색에 곁들인 출원발명 문서. 넣지 않았으면 null. */
-export interface SearchSpecDocument {
-  attachment_id: string;
-  filename: string;
-  sha256: string;
-  page_count: number | null;
-  char_count: number;
-}
-
-/** EPO 검색 레인 하나의 기록. 후보를 다른 레인과 합치지 않는다. */
-export interface EpoLaneRecord {
-  id: string;
-  channel?: string;
-  origin?: "claim_only" | "spec_assisted";
-  status: string;
-  error?: string;
-  termination_reason?: string;
-  termination_detail?: string;
-  search_calls?: number;
-  detail_fetches?: number;
-  /** 검색 전에 청구항을 어떻게 나눠 읽었는가. 모델의 판단이다. */
-  claim_analysis?: {
-    round?: number;
-    notes?: string;
-    elements?: {
-      id: string;
-      text: string;
-      /** 세 상태다. null 은 "판단 없음"이며 "필수 아님"이 아니다. */
-      essential?: boolean | null;
-      synonyms?: string[];
-    }[];
-    relations?: {
-      source?: string;
-      target?: string;
-      kind?: string;
-      description?: string;
-    }[];
-    concept_combinations?: {
-      elements?: string[];
-      terms?: string[];
-      reason?: string;
-    }[];
-    search_conditions?: { kind?: string; value?: string; reason?: string }[];
-  };
-  /** 최종 대응표로 넘긴 유망 후보. */
-  shortlist?: {
-    doc_number: string;
-    reason?: string;
-    matched_elements?: string[];
-    round?: number;
-  }[];
-  /** 상한·대조 실패로 넘기지 않은 것과 그 사유. */
-  excluded?: {
-    kind: string;
-    value?: string;
-    reason_code: string;
-    detail: string;
-  }[];
-  /** NO_TOOLS 계획 턴에서 감지된 도구 호출. 비어 있어야 정상이다. */
-  tool_violations?: {
-    provider?: string;
-    lane?: string;
-    tools?: string[];
-    /** post_hoc_detection 은 차단이 아니다. 외부 호출은 이미 나갔다. */
-    isolation?: "provider_enforced" | "post_hoc_detection" | "unknown";
-    /** 어느 턴에서 감지됐는가. 없으면 검색 라운드다. */
-    phase?: string;
-    detail?: string;
-  }[];
-  tool_isolation?: string;
-  /** 검색하지 않는 최종 선택 턴. 돌리지 않았으면 빈 객체다. */
-  selection?: {
-    attempted?: boolean;
-    status?: string;
-    reason?: string;
-    candidates_reviewed?: number;
-    shortlist_added?: number;
-    /** 이 턴에서 모델이 보냈지만 실행하지 않은 검색·조회 action 수. */
-    rejected_actions?: number;
-    /** Provider 가 알려준 이 턴의 사용량. 알려주지 않으면 빈 객체다 —
-     *  0 으로 적으면 "안 썼다"로 읽힌다. */
-    provider_usage?: Record<
-      string,
-      number | string | boolean | Record<string, number>
-    >;
-  };
-}
-
-export interface SearchManifest {
-  version: number;
-  generated_at: string;
-  channels: string[];
-  /** 이 실행이 쓴 A/B/C 정의. 렌더러가 자기 표를 들고 있으면 정의를 고친 뒤
-   *  갱신되지 않은 렌더러가 옛 제목으로 인쇄한다. 실제로 그렇게 어긋난 적이
-   *  있어서 정의를 기록에 싣는다.
-   *
-   *  **프런트는 이 정의의 사본을 갖지 않는다.** 표시해야 하면 이 값을 읽고,
-   *  값이 없는 옛 매니페스트는 백엔드 렌더러가 그린 result.md 로 본다.
-   *  사본이 되살아나지 않는지는 백엔드 게이트가 이 파일들을 훑어 지킨다
-   *  (test_search_gates 의 the_frontend_keeps_no_copy_of_the_group_definitions). */
-  group_schema_version?: number;
-  group_definitions?: Record<string, string>;
-  input: {
-    claim_text: string;
-    claim_boundary_neutralized: boolean;
-    spec_document?: SearchSpecDocument | null;
-    spec_boundary_neutralized?: boolean;
-    search_focus?: GapSearchFocus | null;
-    focus_boundary_neutralized?: boolean;
-  };
-  prompt: {
-    id: string;
-    /** 템플릿 파일의 해시. 모델에게 실제로 간 프롬프트가 아니다(호환용 별칭). */
-    sha256: string;
-    /** 위와 같은 값. 이름으로 무엇의 해시인지 알 수 있게 둔 것. */
-    template_sha256?: string;
-    /** 런타임 컨텍스트의 해시. 템플릿이 같아도 이것이 다르면 프롬프트가 다르다. */
-    runtime_context_sha256?: string;
-    /** 레인별로 모델에게 실제로 간 프롬프트의 해시. */
-    effective_prompt_sha256?: Record<string, string>;
-  };
-  /** 요청한 추론강도. 실제 적용값은 CLI 가 알려주지 않아 기록하지 않는다. */
-  reasoning_effort?: { requested: string; model_default: boolean };
-  policy: {
-    name: string;
-    allowed_tools: string[];
-    advertised_tools_enforced: boolean;
-    max_rounds: number;
-    search_domain_restriction: boolean;
-    search_strategy?:
-      | "claim_only"
-      | "isolated_union"
-      | "combined_then_individual";
-    candidate_merge?: "single" | "union";
-    max_tool_calls_total?: number | null;
-    lane_budgets?: Partial<Record<"claim_only" | "spec_assisted", number>>;
-  };
-  timing: { started_at: string | null; completed_at: string | null };
-  verification?: {
-    attempted?: boolean;
-    reason?: string;
-    backend_id?: string;
-    classification_error?: string;
-    counts?: {
-      targets: number;
-      verified: number;
-      fetch_failed: number;
-      not_attempted: number;
-    };
-    promotion_policy?: {
-      minimum_official_supported_rows: number;
-      coverage_ratio_threshold: number | null;
-      group_assignment: string;
-    };
-    /** 상한 때문에 공식 대조를 시도하지 않은 후보. 조용히 누락하지 않는다. */
-    excluded_candidates?: {
-      index: number;
-      doc_number: string;
-      reason_code: string;
-      detail: string;
-      selection_reason?: string;
-      selection_bucket?: "page_ab" | "epo_shortlist" | "other";
-      expected_fetches?: number | null;
-      missing_constituents?: string[];
-    }[];
-    limits?: Record<string, number>;
-    /** 무엇을 어떤 순서로 왜 골랐는가. 상한이 무엇을 잘랐는지와 함께 읽는다. */
-    selection_order?: {
-      position: number;
-      index: number;
-      doc_number: string;
-      selection_reason: string;
-      selection_bucket?: "page_ab" | "epo_shortlist" | "other";
-      detail: string;
-      /** 이 후보를 확인하려고 OPS 를 몇 번 더 부를 것인가. null 이면 세어 보지
-       *  않았다는 뜻이고 0 과 다르다. */
-      expected_fetches?: number | null;
-      /** 아직 손에 없는 구성요소. 위 횟수의 근거다. */
-      missing_constituents?: string[];
-    }[];
-    selection_policy?: {
-      ranking?: string[];
-      labels?: Record<string, string>;
-      /** 후보 하나를 확인하는 데 필요한 구성요소. */
-      constituents?: string[];
-      /** 고르는 시점에 예상한 추가 조회 횟수의 합. */
-      planned_fetch_calls?: number;
-      unknown_fetch_plans?: number;
-    };
-    usage?: {
-      official_fetch_calls?: number;
-      /** 이번 단계가 다시 받지 않고 재사용한 EPO 검색 응답 수. */
-      reused_artifact_calls?: number;
-      /** 선택 시점 계획에서 필요한 구성요소가 모두 있었던 문헌. */
-      fully_reused_documents?: number;
-      /** 선택 시점 계획에서 일부 구성요소가 부족했던 문헌. */
-      partially_reused_documents?: number;
-      /** 재사용 계획을 계산하지 못한 문헌. 0회와 구분한다. */
-      reuse_plan_unknown_documents?: number;
-      /** 재사용 문헌 중 이번 검증 단계에서 실제 추가 호출이 없었던 문헌. */
-      reused_without_fresh_fetch_documents?: number;
-      /** 재사용 문헌 중 이번 검증 단계에서 실제 추가 호출이 발생한 문헌. */
-      reused_with_fresh_fetch_documents?: number;
-      /** 선택 시점의 예상 추가 조회 횟수. 실제와 어긋나면 상한·취소·실패다. */
-      planned_fetch_calls?: number;
-      classification_runs?: number;
-    };
-  };
-  /** EPO 채널 기록. 웹과 섞지 않는다. */
-  epo?: {
-    enabled?: boolean;
-    backend_id?: string;
-    reason?: string;
-    error?: string;
-    channel_budget?: Record<string, unknown>;
-    lane_budget?: Record<string, number>;
-    lanes?: EpoLaneRecord[];
-  };
-  search_lanes?: {
-    id: "claim_only" | "spec_assisted";
-    spec_in_context: boolean;
-    prompt_sha256: string;
-    max_tool_calls: number;
-    started_at: string;
-    completed_at: string;
-    status: string;
-    error_code: string | null;
-  }[];
-  /** ARIA 가 스트림에서 직접 관측한 것. 모델의 자기 보고가 아니다. */
-  observed: {
-    tool_names: string[];
-    tool_call_counts: Record<string, number>;
-    tool_calls: {
-      id: string | null;
-      name: string;
-      ts: string;
-      input: Record<string, unknown>;
-      ok: boolean | null;
-      error: string | null;
-    }[];
-    search_queries: string[];
-    /** 검색 호출 수. 한 호출이 질의 여러 개를 묶어 보내므로 질의 수와 다르다. */
-    search_call_count?: number;
-    /** 위 호출 수를 결과별로 나눈 값. 셋을 더하면 search_call_count 가 된다.
-     *
-     *  unknown 은 실패가 아니라 **관측 불가**다. Codex 의 web_search 는
-     *  구조화된 성공 신호를 주지 않아 늘 여기 온다. 성공으로 읽으면 안 된다. */
-    search_call_succeeded?: number;
-    search_call_failed?: number;
-    search_call_unknown?: number;
-    search_queries_by_origin?: Partial<
-      Record<"claim_only" | "spec_assisted", string[]>
-    >;
-    /** 검색어가 아니라 URL 로 부른 호출. 시도일 뿐 열람이 아니다. */
-    url_lookup_attempts?: string[];
-    /** 열려고 시도한 주소. 성공했다는 뜻이 아니다. */
-    attempted_fetch_urls: string[];
-    /** 실제로 열린 주소. 후보의 열람 주장은 이 목록과 대조해야 인정된다. */
-    succeeded_fetch_urls: string[];
-    tool_failures: {
-      name: string;
-      ts: string;
-      input: Record<string, unknown>;
-      error: string;
-      search_origin?: "claim_only" | "spec_assisted";
-    }[];
-    /** 성공도 실패도 관측할 수 없었던 호출. 성공으로 읽으면 안 된다. */
-    unknown_tool_outcomes?: {
-      name: string;
-      ts: string;
-      input: Record<string, unknown>;
-      search_origin?: "claim_only" | "spec_assisted";
-    }[];
-  };
-  /** 모델이 보고한 것. 읽지 못했으면 null. */
-  reported: {
-    rounds: {
-      round: number;
-      channel: string;
-      queries: string[];
-      note: string;
-      search_origin?: "claim_only" | "spec_assisted";
-    }[];
-    /** 웹 채널의 구조화 결과를 읽지 못한 사유. 비어 있지 않으면 이 후보
-     *  목록은 EPO 독립 검색만으로 만들어졌다는 뜻이다. */
-    web_report_error?: string;
-    term_expansions?: SearchTermExpansion[];
-    /** v1 저장 기록을 여는 동안만 사용하는 이전 필드. */
-    claim_interpretation?: ClaimInterpretation[];
-    candidates: SearchCandidate[];
-    access_failures: {
-      url: string;
-      reason: string;
-      search_origin?: "claim_only" | "spec_assisted";
-    }[];
-    /** 모델이 보고한 후보 중 몇 건이 정규화를 통과했고 몇 건이 버려졌는가.
-     *
-     *  **채널 상태 판정에는 들어가지 않는다.** 모델이 후보 하나를 이상한
-     *  모양으로 적은 것은 검색 실패가 아니다. 다만 "모델이 5건을 적었는데
-     *  목록에 4건뿐"이라는 사실은 감사에 남아야 한다. */
-    candidate_normalization?: {
-      raw: number;
-      accepted: number;
-      dropped: number;
-      dropped_malformed: number;
-      dropped_over_limit: number;
-    };
-  } | null;
-  /** 채널별 최종 상태와 사유.
-   *
-   *  **파생 스냅샷이다. 원본이 아니다.** 원본은 같은 기록 안의 reported ·
-   *  observed · epo.lanes 의 종료 사유 · literature.queries 이고, 상태는
-   *  백엔드의 search_channels.status_rows() 가 그것들에서 계산한다. 여기
-   *  저장된 것은 실행이 끝난 그 시점의 계산 결과일 뿐이다.
-   *
-   *  매니페스트를 만든 뒤 채널 절을 고치는 경로가 있는 한 이 값은 낡을 수
-   *  있다 — 2026-09-01 실행의 EPO 레인은 provider_error 로 끝났는데 저장된
-   *  lane.status 에는 "ok" 가 적혀 있었다. 그래서 보고서는 이 값을 읽지 않고
-   *  같은 함수를 다시 부른다. 화면도 상태를 표시하게 되면 같은 규칙을 따르고,
-   *  이 배열은 "그때 ARIA 가 무엇으로 판정했는가"라는 감사 기록으로만 읽는다. */
-  channel_status?: {
-    id: string;
-    channel: string;
-    label: string;
-    status: "SUCCEEDED" | "PARTIAL" | "FAILED" | "SKIPPED";
-    detail: string;
-  }[];
-  channel_status_overall?: "SUCCEEDED" | "PARTIAL" | "FAILED" | "SKIPPED" | "";
-  /** ARIA 가 증거 등급을 내리거나 고친 내역. */
-  normalization_notes: string[];
-  error: string | null;
-}
-
-/** 후속 실행이 원본에서 무엇을 물려받았는지. null 이면 독립 실행.
- *
- *  MAPPED     인용발명 번호 + 이전 청구항. 이전 보고서는 받지 않는다.
- *  CONTINUED  거기에 이전 보고서 전체를 더한다. 보고서 수정·보완용.
- *  REANALYZED 같은 자료로 재분석. 번호도 이전 판단도 물려받지 않는다.
- */
 export type RelationType = "MAPPED" | "CONTINUED" | "REANALYZED";
 
 export interface CitationMappingItem {
@@ -826,8 +334,6 @@ export interface Prompt {
   description: string;
   body: string;
   enabled: boolean;
-  output_mode: "markdown" | "text";
-  tags: string[];
   accepted_file_types: string[];
   /** 프롬프트 파일 메타데이터에서만 정하는 ARIA 확장 선언. */
   capabilities: string[];
@@ -984,6 +490,10 @@ export interface Job {
   search_manifest_error: string | null;
   /** 구성대비 결과에서 시작한 검색의 선택 구성 스냅샷. */
   search_focus: GapSearchFocus | null;
+  /** 이 실행에 적용한 검색 기준일(YYYY-MM-DD). null 이면 날짜 조건 없이
+   *  검색했다는 뜻이며, 이 기능 이전의 실행도 모두 null 이다. */
+  search_cutoff_date?: string | null;
+  search_depth?: "quick" | "standard" | "deep";
   /** 인용발명 문헌을 어떻게 전달했는가. 값이 없는 과거 실행은 full_inline. */
   delivery_plan: DeliveryPlan;
   delivery_manifest?: DeliveryManifest | null;
@@ -1085,7 +595,7 @@ export interface AppSettings {
     /** 기본 꺼짐. 켜도 라이브러리·모델이 없으면 키워드 검색만으로 진행한다. */
     retrieval_semantic_enabled: boolean;
     kiwee_integration_enabled: boolean;
-    /** EPO OPS 연동 토글. 켜고 자격증명을 넣어도 아직 검색 경로에는 연결되지 않는다. */
+    /** EPO OPS 도구 연동. 실행별 MCP를 지원하는 Provider에서 사용한다. */
     epo_integration_enabled: boolean;
     epo_consumer_key: string;
     /**
@@ -1093,36 +603,24 @@ export interface AppSettings {
      * 저장 여부는 secrets_set 을 봐야 한다.
      */
     epo_consumer_secret: string;
-    /** OPS HTTP 대기 시간의 총합. EPO 채널 전체 벽시계와 다른 축이다. */
+    /** OPS HTTP 대기 시간의 총합. 실행 전체 시간과 별개인 내부 안전 한도. */
     epo_http_budget_seconds: number;
     /** 0 = 시간당 사용량을 관측·표시만 하고 차단하지 않음. 주간 한도는 계약값이라 별도. */
     epo_hourly_quota_bytes: number;
     epo_max_detail_fetches: number;
-    /** 질의 하나가 받아 오는 결과 건수 상한. OPS 자체 상한은 20건이다. */
-    epo_max_results_per_query: number;
-    /** 최종 A/B/C 대응표까지 끌고 갈 EPO 유망 후보 수 상한. */
-    epo_shortlist_limit: number;
-    /** 공식 문헌 대조를 시도할 후보 수 상한. 조회 예산과 다른 축이다. */
-    epo_verification_targets: number;
     /** ARIA 가 관측해 적는 값. 사용자가 PUT 으로 못 고친다(사용량 되돌리기 방지). */
     epo_quota_state: Record<string, unknown>;
     /**
      * 비특허문헌(Crossref·Europe PMC) 연동. 자격증명이 필요 없어 켜기만 하면
-     * 동작한다. 웹 검색이 식별하지 못한 논문을 ARIA 가 직접 찾아 온다.
+     * MCP를 지원하는 Provider의 LLM이 필요할 때 도구로 호출한다.
      */
     literature_integration_enabled: boolean;
     /** Crossref 예의 풀 표시용 연락처. 비워 둬도 동작한다. */
     literature_contact_email: string;
-    /** 한 실행에서 ARIA 가 직접 보낼 서지 질의 수 상한. */
-    literature_max_queries: number;
     /** 질의 하나가 받아 오는 결과 건수 상한. 두 DB 각각에 적용된다. */
     literature_max_results_per_query: number;
     /** 서지 API HTTP 대기 시간의 총합(초). */
     literature_http_budget_seconds: number;
-    /** 공식 서지 대조로 **확보할** 논문 수. 앞 후보의 조회가 실패하면
-     *  literature_shortlist_limit 안에서 다음 후보로 이월해 이 수를 채운다.
-     *  EPO 예산과 다른 축이다. */
-    literature_verification_targets: number;
   };
   warnings: string[];
   data_dir: string;

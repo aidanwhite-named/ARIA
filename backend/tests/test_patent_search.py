@@ -95,11 +95,13 @@ def test_model_reported_channel_stays_web_only() -> None:
     바뀌었다. 지켜야 할 것은 이름의 부재가 아니라 '모델이 그 라벨을 붙일 수
     없다'는 성질이다.
     """
-    assert search_manifest.MODEL_REPORTED_CHANNELS == (search_manifest.CHANNEL_WEB,)
-    assert (
-        search_manifest.CHANNEL_PATENT_DB
-        not in search_manifest.MODEL_REPORTED_CHANNELS
-    )
+    import json
+    parsed, _ = search_manifest.parse(json.dumps({"candidates": [{
+        "group": "A", "channel": "patent_db", "evidence_level": "official_full_text",
+        "doc_number": "EP123A1", "mapping": [],
+    }]}))
+    assert "channel" not in parsed["candidates"][0]
+    assert "evidence_level" not in parsed["candidates"][0]
 
 
 # --------------------------------------------------------------- settings 배선

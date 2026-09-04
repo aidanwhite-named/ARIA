@@ -231,6 +231,7 @@ export default function RunPage({ kind }: { kind: JobKind }) {
   const [searchPromptId, setSearchPromptId] = useState("");
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [promptId, setPromptId] = useState("");
+  const [searchDepth, setSearchDepth] = useState<"quick" | "standard" | "deep">("standard");
   // 빈 문자열 = 지정 안 함. 제한된 안전성 Provider 가 자동으로 선택되면
   // 사용자가 위험을 확인하지 않은 채 실행하게 된다.
   const [providerId, setProviderId] = useState("");
@@ -266,6 +267,8 @@ export default function RunPage({ kind }: { kind: JobKind }) {
     setClaimText,
     searchClaimText,
     setSearchClaimText,
+    searchCutoffDate,
+    setSearchCutoffDate,
     lineage,
     setLineage,
     followupInstruction,
@@ -619,6 +622,11 @@ export default function RunPage({ kind }: { kind: JobKind }) {
         prompt_id: searchPromptId || null,
         claim_text: searchClaimText,
         batch_id: prepared?.batch_id ?? null,
+        // 비워 두면 null 로 보낸다. 오늘 날짜를 대신 채우지 않는다 — 그러면
+        // 사용자가 넣지 않은 조건이 생기고, 같은 청구항의 검색 범위가 실행한
+        // 날에 따라 달라진다.
+        search_cutoff_date: searchCutoffDate.trim() || null,
+        search_depth: searchDepth,
       });
       setJob(created);
       navigate(workspacePath("similarity_search"), { replace: true });
@@ -650,6 +658,8 @@ export default function RunPage({ kind }: { kind: JobKind }) {
         prompt_id: searchPromptId || null,
         source_job_id: job.id,
         search_component_ids: selectedGapIds,
+        search_cutoff_date: searchCutoffDate.trim() || null,
+        search_depth: searchDepth,
       });
       setSearchClaimText(created.claim_text);
       setJob(created);
@@ -996,49 +1006,57 @@ export default function RunPage({ kind }: { kind: JobKind }) {
               </div>
             )}
 
-            <section className="input-panel search-panel-input">
-              <div className="input-panel-head">
-                <span className="input-step">1</span>
-                <div>
-                  <strong>검색 전략</strong>
-                  <div className="hint">
-                    무엇을 중시하고 어디까지 넓힐지를 정하는 프롬프트입니다.
-                    검색 실행·보안·감사 규칙은 ARIA가 갖고 있으므로 전략을
-                    바꿔도 감사 기록과 보고서 형식은 그대로입니다.
+            {searchPrompts.length >= 2 && (
+              <section className="input-panel search-panel-input">
+                <div className="input-panel-head">
+                  <span className="input-step">1</span>
+                  <div>
+                    <strong>검색 전략</strong>
+                    <div className="hint">
+                      무엇을 중시하고 어디까지 넓힐지를 정하는 프롬프트입니다.
+                      검색 실행·보안·감사 규칙은 ARIA가 갖고 있으므로 전략을
+                      바꿔도 감사 기록과 보고서 형식은 그대로입니다.
+                    </div>
                   </div>
                 </div>
-              </div>
-              <select
-                id="searchPromptId"
-                aria-label="검색 전략 프롬프트"
-                value={searchPromptId}
-                onChange={(e) => setSearchPromptId(e.target.value)}
-                disabled={running}
-              >
-                {searchPrompts.length === 0 && (
-                  <option value="">검색 전략 프롬프트가 없습니다</option>
+                <select
+                  id="searchPromptId"
+                  aria-label="검색 전략 프롬프트"
+                  value={searchPromptId}
+                  onChange={(e) => setSearchPromptId(e.target.value)}
+                  disabled={running}
+                >
+                  {searchPrompts.map((p) => (
+                    <option key={p.id} value={p.id} disabled={!p.enabled}>
+                      {p.name}
+                      {p.enabled ? "" : " (비활성)"}
+                    </option>
+                  ))}
+                </select>
+                {selectedSearchPrompt?.description && (
+                  <div className="hint" style={{ marginTop: 6 }}>
+                    {selectedSearchPrompt.description}
+                  </div>
                 )}
-                {searchPrompts.map((p) => (
-                  <option key={p.id} value={p.id} disabled={!p.enabled}>
-                    {p.name}
-                    {p.enabled ? "" : " (비활성)"}
-                  </option>
-                ))}
-              </select>
-              {selectedSearchPrompt?.description && (
                 <div className="hint" style={{ marginTop: 6 }}>
-                  {selectedSearchPrompt.description}
+                  <a href="#/prompts">프롬프트 관리</a>에서 검색 전략을 새로
+                  만들거나 고칠 수 있습니다.
                 </div>
-              )}
-              <div className="hint" style={{ marginTop: 6 }}>
-                <a href="#/prompts">프롬프트 관리</a>에서 검색 전략을 새로
-                만들거나 고칠 수 있습니다.
-              </div>
-            </section>
+              </section>
+            )}
 
+            <label>검색 깊이
+              <select aria-label="검색 깊이" value={searchDepth} disabled={running}
+                onChange={(e) => setSearchDepth(e.target.value as typeof searchDepth)}>
+                <option value="quick">빠르게 — 최대 15회 / 5분</option>
+                <option value="standard">기본 — 최대 40회 / 15분</option>
+                <option value="deep">심층 — 최대 80회 / 30분</option>
+              </select>
+              <span className="hint">환경설정의 전체 상한이 더 낮으면 그 상한을 적용합니다. 후보 수·출처별 할당량은 정하지 않습니다.</span>
+            </label>
             <section className="input-panel claim-panel search-panel-input">
               <div className="input-panel-head">
-                <span className="input-step">2</span>
+                <span className="input-step">{searchPrompts.length >= 2 ? 2 : 1}</span>
                 <div>
                   <strong>검색할 청구항</strong>
                   <div className="hint">
@@ -1057,6 +1075,54 @@ export default function RunPage({ kind }: { kind: JobKind }) {
                 }
                 disabled={running}
               />
+            </section>
+
+            <section className="input-panel search-panel-input">
+              <div className="input-panel-head">
+                <span className="input-step">
+                  {searchPrompts.length >= 2 ? 3 : 2}
+                </span>
+                <div>
+                  <strong>검색 기준일 (선택)</strong>
+                  {/* .hint 안의 strong 은 이 앱 CSS 에서 block 이다. 문장
+                      가운데서 강조하려면 인라인인 b 를 쓴다 — strong 을 쓰면
+                      한 낱말이 제 줄로 떨어져 나간다. */}
+                  <div className="hint">
+                    이 날짜까지 <b>공개된</b> 문헌만 검색 대상으로 삼습니다. 판단
+                    기준은 출원일·우선일이 아니라 공개일입니다.
+                    <br />
+                    비워 두면 날짜 제한을 적용하지 않습니다 — 과거·최근·미래
+                    공개문헌을 구분 없이 관련성 중심으로 검색합니다. 비워 두었다고
+                    오늘 날짜가 대신 들어가지 않습니다.
+                  </div>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                <input
+                  id="searchCutoffDate"
+                  type="date"
+                  aria-label="검색 기준일"
+                  value={searchCutoffDate}
+                  onChange={(e) => setSearchCutoffDate(e.target.value)}
+                  disabled={running}
+                />
+                {searchCutoffDate ? (
+                  <button
+                    type="button"
+                    className="btn small"
+                    onClick={() => setSearchCutoffDate("")}
+                    disabled={running}
+                  >
+                    날짜 제한 해제
+                  </button>
+                ) : (
+                  <span className="faint">날짜 제한 없음</span>
+                )}
+              </div>
+              <div className="hint" style={{ marginTop: 6 }}>
+                공개일을 확인할 수 없는 후보는 삭제하지 않고 「공개일 미확인」으로
+                따로 표시합니다.
+              </div>
             </section>
 
             <SizeNotice
@@ -1383,6 +1449,16 @@ export default function RunPage({ kind }: { kind: JobKind }) {
             <div className="run-ready-row">
               <span>검색 전략</span>
               <strong>{selectedSearchPrompt?.name ?? "설정 필요"}</strong>
+            </div>
+          )}
+          {searching && (
+            <div className="run-ready-row">
+              <span>검색 기준일</span>
+              <strong>
+                {searchCutoffDate
+                  ? `${searchCutoffDate} 까지 공개된 문헌`
+                  : "날짜 제한 없음"}
+              </strong>
             </div>
           )}
           {searching && (

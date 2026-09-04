@@ -16,8 +16,8 @@ prompt template tables.
 예약 id 와 ``similarity_search_v1`` 선언으로 되돌려 읽는다 — 그래야 이미
 디스크에 있는 검색 프롬프트가 분석 목록에 섞여 들어가지 않는다.
 
-검색 프롬프트는 더 이상 하나가 아니다. 사용자가 여러 개를 만들고 실행마다
-고른다. 배포본(``search_prompt.md``)은 지울 수 없는 기본값으로만 남는다.
+프롬프트는 종류별로 여러 개를 만들고 실행마다 고를 수 있다. 함께 배포되는
+분석·검색 기본 프롬프트는 어느 한쪽의 실행 기반이 사라지지 않도록 삭제할 수 없다.
 """
 
 from __future__ import annotations
@@ -43,17 +43,20 @@ PROMPT_KINDS = (KIND_ANALYSIS, KIND_SEARCH)
 # 옛 파일이 종류를 선언하는 대신 쓰던 값. kind 가 없는 파일에서만 본다.
 _SEARCH_CAPABILITY = "similarity_search_v1"
 
-# 배포본으로 함께 나가는 프롬프트. 지울 수 없다는 뜻이며, 그 종류의 프롬프트가
-# 이것 하나뿐이라는 뜻은 아니다.
+# 배포본으로 함께 나가는 프롬프트. 지울 수 없다는 뜻이며, 각 종류의 프롬프트가
+# 이것 하나뿐이라는 뜻은 아니다. 두 작업 모두 설치 직후 실행 가능한 기본값을
+# 가져야 하므로 분석과 검색 배포본을 함께 보호한다.
 #
 # 분석 실행의 선택 목록에서 빼는 근거는 이제 예약 여부가 아니라 kind 다. 검색
 # 전략 프롬프트를 사용자가 여러 개 만들 수 있게 되면서, "예약된 하나만 검색용"
 # 이라는 전제가 더 이상 성립하지 않기 때문이다. 편집은 허용하되(본문이
 # 검색 전략이므로 사용자의 것이다) 삭제는 막는다 — 지우면 기본값이 사라진다.
-RESERVED_PROMPT_IDS = frozenset({"search_prompt.md"})
-
-#: 배포되는 기본 검색 전략 프롬프트. 설정에 고른 것이 없을 때 쓴다.
+DEFAULT_ANALYSIS_PROMPT_ID = "patent-analysis-master-prompt.md"
 DEFAULT_SEARCH_PROMPT_ID = "search_prompt.md"
+RESERVED_PROMPT_IDS = frozenset(
+    {DEFAULT_ANALYSIS_PROMPT_ID, DEFAULT_SEARCH_PROMPT_ID}
+)
+
 _METADATA_START = "<!-- ARIA_PROMPT_METADATA\n"
 _METADATA_END = "\n-->\n"
 _MAX_PROMPT_BYTES = 2 * 1024 * 1024
@@ -86,8 +89,6 @@ class PromptFile:
     name: str
     description: str
     body: str
-    output_mode: str
-    tags: list[str]
     accepted_file_types: list[str]
     enabled: bool
     created_at: datetime
@@ -114,7 +115,7 @@ def resolve_kind(
     value = str(declared or "").strip().lower()
     if value in PROMPT_KINDS:
         return value
-    if prompt_id in RESERVED_PROMPT_IDS:
+    if prompt_id == DEFAULT_SEARCH_PROMPT_ID:
         return KIND_SEARCH
     if _SEARCH_CAPABILITY in (capabilities or []):
         return KIND_SEARCH
@@ -218,11 +219,6 @@ class PromptStore:
 
         created_fallback = _as_utc_timestamp(stat.st_ctime)
         updated_fallback = _as_utc_timestamp(stat.st_mtime)
-        output_mode = str(metadata.get("output_mode") or "markdown").strip().lower()
-        if output_mode not in {"markdown", "text"}:
-            raise InvalidPromptFile(
-                f"{path.name}: output_mode는 markdown 또는 text여야 합니다."
-            )
         fallback_name = path.stem.replace("-", " ").strip() or path.stem
         name = str(metadata.get("name") or _title_from_body(body, fallback_name)).strip()
         if not name:
@@ -238,8 +234,6 @@ class PromptStore:
             name=name,
             description=str(metadata.get("description") or "").strip(),
             body=body,
-            output_mode=output_mode,
-            tags=_string_list(metadata.get("tags")),
             accepted_file_types=_string_list(metadata.get("accepted_file_types")),
             capabilities=capabilities,
             kind=resolve_kind(
@@ -254,8 +248,6 @@ class PromptStore:
         metadata = {
             "name": prompt.name,
             "description": prompt.description,
-            "output_mode": prompt.output_mode,
-            "tags": prompt.tags,
             "accepted_file_types": prompt.accepted_file_types,
             "capabilities": prompt.capabilities,
             "kind": prompt.kind,
@@ -297,7 +289,6 @@ class PromptStore:
     def list(
         self,
         search: str = "",
-        tag: str = "",
         *,
         kind: str = "",
         include_reserved: bool = False,
@@ -334,8 +325,6 @@ class PromptStore:
                 (prompt.name, prompt.description, prompt.body)
             ).casefold():
                 continue
-            if tag and tag not in prompt.tags:
-                continue
             rows.append(prompt)
         rows.sort(key=lambda item: (item.updated_at, item.name.casefold()), reverse=True)
         return rows
@@ -355,9 +344,9 @@ class PromptStore:
         wanted = str(kind or "").strip().lower()
         if wanted not in PROMPT_KINDS:
             raise PromptNotFound("알 수 없는 프롬프트 종류입니다.")
-        prompt = self._read_path(
-            self._path_for_id(prompt_id, allow_reserved=wanted == KIND_SEARCH)
-        )
+        # 분석·검색 배포본 모두 실행 선택지다. 예약 여부는 삭제 보호일 뿐,
+        # 실행 가능 여부를 뜻하지 않으므로 종류 검증을 거쳐 읽게 한다.
+        prompt = self._read_path(self._path_for_id(prompt_id, allow_reserved=True))
         if prompt.kind != wanted:
             raise PromptNotFound(
                 f"{prompt_id} 는 {wanted} 작업의 프롬프트가 아닙니다."
@@ -381,14 +370,12 @@ class PromptStore:
         name: str,
         description: str,
         body: str,
-        output_mode: str,
-        tags: list[str],
         accepted_file_types: list[str],
         kind: str = KIND_ANALYSIS,
     ) -> PromptFile:
         self.ensure()
         now = datetime.now(timezone.utc)
-        suffix = ".md" if output_mode == "markdown" else ".txt"
+        suffix = ".md"
         base = _safe_stem(name)
         with self._lock:
             candidate = self.root / f"{base}{suffix}"
@@ -408,8 +395,6 @@ class PromptStore:
                 name=name.strip(),
                 description=description.strip(),
                 body=body,
-                output_mode=output_mode,
-                tags=list(tags),
                 accepted_file_types=list(accepted_file_types),
                 kind=resolved_kind,
                 enabled=True,
@@ -430,8 +415,6 @@ class PromptStore:
                 "name": current.name,
                 "description": current.description,
                 "body": current.body,
-                "output_mode": current.output_mode,
-                "tags": current.tags,
                 "accepted_file_types": current.accepted_file_types,
                 "enabled": current.enabled,
             }
@@ -447,8 +430,6 @@ class PromptStore:
                 name=str(values["name"]).strip(),
                 description=str(values["description"] or "").strip(),
                 body=str(values["body"]),
-                output_mode=str(values["output_mode"]),
-                tags=list(values["tags"] or []),
                 accepted_file_types=list(values["accepted_file_types"] or []),
                 enabled=bool(values["enabled"]),
                 updated_at=datetime.now(timezone.utc),

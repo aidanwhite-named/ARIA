@@ -41,7 +41,6 @@ import json
 import re
 
 from app.enums import AuthState
-from app.patent_search import epo_prompts
 from app.providers.base import (
     EmitFn,
     ExecutionOutcome,
@@ -523,112 +522,6 @@ _SEARCH_KEYWORDS = """유사 문헌 검색 경로 전용 키워드.
 
 
 
-_EPO_MARKER = "EPO OPS 특허 검색 실행기"
-
-# 테스트가 EPO 레인의 응답을 바꿔 끼우는 자리. 레인 id 별로 넣으면 그 레인만
-# 다르게 답한다. 비어 있으면 검색 한 번 + 마무리를 돌려준다.
-EPO_SCRIPT: dict[str, list[str]] = {}
-EPO_REQUESTS: list = []
-
-#: 최종 선택 턴의 응답을 레인별로 바꿔 끼우는 자리. 비어 있으면 아무것도 더
-#: 고르지 않고 끝낸다(기본값). 검색 라운드와 **다른 큐**를 쓰는 이유는 두 턴의
-#: 계약이 다르기 때문이다 — 선택 턴은 검색을 할 수 없다.
-EPO_SELECTION_SCRIPT: dict[str, list[str]] = {}
-EPO_SELECTION_REQUESTS: list = []
-
-#: EPO 레인이 모델을 부르는 **바로 그 순간** 테스트가 끼어드는 자리.
-#: (lane_id, request) 를 받는다. 취소처럼 "레인이 실제로 시작한 뒤에" 일어나야
-#: 하는 사건을 재현하려면 이 자리가 필요하다 — 작업 시작 전에 취소를 넣으면
-#: 웹 레인에서 먼저 걸려 EPO 가 돌기도 전에 끝나고, 그러면 EPO 취소 경로는
-#: 한 줄도 실행되지 않은 채 테스트가 통과한다.
-EPO_ON_ROUND = None
-
-
-#: 공식 근거 2차 분류 턴의 시스템 프롬프트 표식.
-_CLASSIFY_MARKER = "ARIA 유사문헌 검색의 공식 근거 분류 단계"
-
-#: 2차 분류 턴에서 이 대역이 매길 등급. 테스트가 바꿔 끼운다.
-CLASSIFY_GROUP = "B"
-#: 참이면 보존 응답에 없는 문장을 근거로 적는다(대조 실패 경로).
-CLASSIFY_FABRICATE = False
-#: 이 대역이 실제로 받은 2차 분류 요청.
-CLASSIFY_REQUESTS: list = []
-
-
-def _official_records(message: str) -> list:
-    """2차 분류 프롬프트에서 (문헌번호, 필드명, 본문) 을 읽어 온다.
-
-    실제 모델이 하는 일과 같다 — 프롬프트에 실려 온 본문만 보고 답한다.
-    """
-    records: list = []
-    doc_number = ""
-    field = ""
-    body: list = []
-
-    def flush() -> None:
-        if doc_number and field and body:
-            joined = chr(10).join(body).rstrip()
-            records.append((doc_number, field, joined))
-
-    for line in (message or "").splitlines():
-        if line.startswith("### "):
-            flush()
-            body = []
-            field = ""
-            doc_number = line[4:].strip()
-            continue
-        if line.startswith("[field:"):
-            flush()
-            body = []
-            field = line[len("[field:") :].partition("]")[0]
-            continue
-        if line.startswith("</OFFICIAL_RECORDS>"):
-            flush()
-            body = []
-            field = ""
-            continue
-        if field:
-            body.append(line)
-    flush()
-    return records
-
-
-def _quote(body: str) -> str:
-    """본문에서 **그대로** 옮길 수 있는 연속 문장 하나를 고른다.
-
-    한 줄을 골라 앞뒤 공백만 떼어 낸다. 그러면 원문 안의 연속 부분 문자열이라는
-    성질이 유지되므로 아티팩트 대조를 통과한다.
-    """
-    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
-    return max(lines, key=len) if lines else ""
-
-
-#: 기본 EPO 응답의 청구항 분석. 계약이라 없으면 검색 action 이 실행되지 않는다.
-EPO_DEFAULT_ANALYSIS = {
-    "elements": [
-        {"id": "E1", "text": "로봇 팔", "essential": True, "synonyms": ["robot arm"]}
-    ],
-    "concept_combinations": [{"elements": ["E1"], "terms": ["robot arm"]}],
-}
-
-
-def _epo_default_reply() -> str:
-    return json.dumps(
-        {
-            "strategy": "테스트",
-            "claim_analysis": EPO_DEFAULT_ANALYSIS,
-            "actions": [
-                {
-                    "action": "epo_search",
-                    "query": {"kind": "term", "field": "ta", "value": "test claim"},
-                },
-                {"action": "finish", "notes": "끝"},
-            ],
-        },
-        ensure_ascii=False,
-    )
-
-
 class DeterministicSearchProvider(Provider):
     """도구 목록을 강제할 수 있는 Provider 를 흉내 낸다.
 
@@ -664,111 +557,6 @@ class DeterministicSearchProvider(Provider):
         self._cancelled.add(job_id)
         return True
 
-    @staticmethod
-    def _epo_lane(request: ExecutionRequest) -> str:
-        for candidate in ("epo:claim_only", "epo:spec_assisted"):
-            if candidate.replace(":", "-") in str(request.work_dir):
-                return candidate
-        return ""
-
-    async def _epo_selection(self, request: ExecutionRequest):
-        """검색이 끝난 뒤의 최종 선택 턴. 검색 action 을 돌려주지 않는다."""
-        lane = self._epo_lane(request)
-        EPO_SELECTION_REQUESTS.append(
-            {"lane": lane, "message": request.user_message}
-        )
-        outcome = ExecutionOutcome(
-            cli_path="(내장)", cli_version="0.1.0", cli_args=["test-epo-selection"]
-        )
-        outcome.tool_policy = request.tool_policy
-        if request.job_id in self._cancelled:
-            outcome.cancelled = True
-            outcome.terminal_reason = "cancelled"
-            return outcome
-        queue = EPO_SELECTION_SCRIPT.get(lane)
-        if queue:
-            outcome.result_text = queue.pop(0)
-        else:
-            outcome.result_text = json.dumps(
-                {"actions": [{"action": "finish", "notes": "선택 완료"}]},
-                ensure_ascii=False,
-            )
-        return outcome
-
-    async def _epo_round(self, request: ExecutionRequest, emit: EmitFn):
-        """EPO 레인 한 라운드. 도구를 쓰지 않는다."""
-        lane = self._epo_lane(request)
-        EPO_REQUESTS.append({"lane": lane, "message": request.user_message})
-        if EPO_ON_ROUND is not None:
-            hooked = EPO_ON_ROUND(lane, request)
-            if inspect.isawaitable(hooked):
-                await hooked
-
-        outcome = ExecutionOutcome(
-            cli_path="(내장)", cli_version="0.1.0", cli_args=["test-epo"]
-        )
-        outcome.tool_policy = request.tool_policy
-        if request.job_id in self._cancelled:
-            outcome.cancelled = True
-            outcome.terminal_reason = "cancelled"
-            return outcome
-        queue = EPO_SCRIPT.get(lane)
-        if queue:
-            reply = queue.pop(0)
-            if reply == "__RAISE__":
-                # 레인 하나가 예외로 죽는 경우. 러너가 격리하는지 본다.
-                raise RuntimeError("테스트용 레인 실패")
-            outcome.result_text = reply
-        else:
-            outcome.result_text = _epo_default_reply()
-        return outcome
-
-    def _classify_round(self, request: ExecutionRequest) -> ExecutionOutcome:
-        """공식 근거 2차 분류 턴. 도구를 쓰지 않는다."""
-        CLASSIFY_REQUESTS.append(request.user_message)
-        outcome = ExecutionOutcome(
-            cli_path="(내장)", cli_version="0.1.0", cli_args=["test-classify"]
-        )
-        outcome.tool_policy = request.tool_policy
-        outcome.tools_must_be_disabled = request.tool_policy.tools_disabled
-        outcome.exit_code = 0
-        outcome.terminal_reason = "completed"
-
-        seen: dict = {}
-        for doc_number, field, body in _official_records(request.user_message):
-            entry = seen.setdefault(
-                doc_number,
-                {"doc_number": doc_number, "group": CLASSIFY_GROUP, "note": "테스트", "mapping": []},
-            )
-            quote = _quote(body)
-            if not quote:
-                continue
-            entry["mapping"].append(
-                {
-                    "feature": "청구항의 기술적 특징",
-                    "support_text": (
-                        "보존된 응답에 없는 문장입니다" if CLASSIFY_FABRICATE else quote
-                    ),
-                    "support_field": field,
-                    "support_scope": "claims" if field.startswith("claims") else "abstract",
-                    "degree": "부분 대응",
-                    "counterpart": "근거 문장이 개시하는 대응 내용",
-                    "source_location": "확인 필요",
-                    "verbatim_excerpt": "",
-                    "translation": "",
-                    "similar": "유사점",
-                    "different": "차이점",
-                }
-            )
-        payload = json.dumps(
-            {"candidates": list(seen.values())}, ensure_ascii=False, indent=2
-        )
-        outcome.result_text = chr(10).join(
-            ["[ARIA_CLASSIFY_V1]", payload, "[/ARIA_CLASSIFY_V1]", ""]
-        )
-        outcome.raw_stdout = outcome.result_text
-        return outcome
-
     async def _sleep(self, job_id: str, seconds: float) -> bool:
         step = 0.05
         waited = 0.0
@@ -787,21 +575,6 @@ class DeterministicSearchProvider(Provider):
         RECEIVED.append(request)
         message = request.user_message
         policy = request.tool_policy
-
-        # EPO 레인은 계약이 다르다. 도구를 쓰지 않고 구조화된 action JSON 을
-        # 돌려준다. 시스템 프롬프트로 구분한다 — 사용자 메시지에는 청구항이
-        #들어 있어 키워드가 섞일 수 있다.
-        if epo_prompts.SELECTION_MARKER in (request.system_prompt or ""):
-            return await self._epo_selection(request)
-
-        if _EPO_MARKER in (request.system_prompt or ""):
-            return await self._epo_round(request, emit)
-
-        # 공식 근거 2차 분류 턴. 도구를 쓰지 않고, ARIA 가 프롬프트에 실어 준
-        # 본문에서 문장을 **그대로** 옮겨 온다. 지어내면 아티팩트 대조에서
-        # 탈락하고, 그 실패 경로는 다른 테스트가 따로 검사한다.
-        if _CLASSIFY_MARKER in (request.system_prompt or ""):
-            return self._classify_round(request)
 
         outcome = ExecutionOutcome(
             cli_path="(내장)",

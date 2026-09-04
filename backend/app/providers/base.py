@@ -117,10 +117,14 @@ class ToolPolicy:
     max_content_read_calls: int = 0
     max_search_calls: int = 0
     max_url_lookup_calls: int = 0
+    # MCP tools are kept separate from built-ins because Claude's ``--tools``
+    # flag only accepts built-in names.  They are still part of the enforced
+    # allow-list and the same total call budget.
+    mcp_tools: tuple[str, ...] = ()
 
     @property
     def tools_disabled(self) -> bool:
-        return not (self.allowed_tools or self.content_read_tools)
+        return not (self.allowed_tools or self.content_read_tools or self.mcp_tools)
 
     def unexpected(self, names) -> list[str]:
         """허용 목록 밖의 도구 이름만 순서대로 돌려준다.
@@ -129,7 +133,7 @@ class ToolPolicy:
         여기서는 위반으로 잡힌다 — 인자를 볼 수 없는 호출 경로가 이 함수를 쓰면
         닫힌 쪽으로 판정된다. 인자까지 보려면 unexpected_calls 를 쓴다.
         """
-        allowed = set(self.allowed_tools)
+        allowed = set(self.allowed_tools) | set(self.mcp_tools)
         seen: list[str] = []
         for name in names:
             if name not in allowed and name not in seen:
@@ -146,7 +150,7 @@ class ToolPolicy:
 
         이것도 사후 감사다. 판정이 나오는 시점에는 그 호출이 이미 끝나 있다.
         """
-        allowed = set(self.allowed_tools)
+        allowed = set(self.allowed_tools) | set(self.mcp_tools)
         scoped = set(self.content_read_tools)
         seen: list[str] = []
         for call in calls:
@@ -239,6 +243,19 @@ CODEX_WEB_SEARCH = ToolPolicy(
     enforce_advertised_allowlist=False,
 )
 
+ARIA_MCP_TOOL_NAMES = (
+    "search_capabilities",
+    "epo_search",
+    "epo_fetch",
+    "kiwee_search",
+    "kiwee_fetch",
+    "literature_search",
+    "literature_fetch",
+)
+ARIA_MCP_TOOLS = tuple(
+    f"mcp__aria-search__{name}" for name in ARIA_MCP_TOOL_NAMES
+)
+
 POLICIES = {
     policy.name: policy
     for policy in (NO_TOOLS, WEB_SEARCH, AGY_WEB_SEARCH, CODEX_WEB_SEARCH)
@@ -260,6 +277,9 @@ class ExecutionRequest:
     # 지정하지 않으면 도구 없음. 새 호출 경로가 실수로 도구를 여는 일이 없도록
     # 기본값을 닫힌 쪽에 둔다.
     tool_policy: ToolPolicy = NO_TOOLS
+    # Claude/Codex receive this per invocation.  The mapping follows Claude's
+    # mcpServers JSON shape and is translated by each Provider.
+    mcp_servers: dict = field(default_factory=dict)
 
 
 @dataclass

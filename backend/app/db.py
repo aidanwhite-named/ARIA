@@ -64,6 +64,10 @@ _SEARCH_COLUMNS = (
     ("search_manifest", "search_manifest JSON"),
     ("search_manifest_error", "search_manifest_error TEXT"),
     ("search_focus", "search_focus JSON"),
+    # 검색 기준일이 없던 시절의 실행은 날짜 조건 없이 돌았다. NULL 이 그
+    # 사실을 그대로 표현하므로 기본값을 두지 않는다.
+    ("search_cutoff_date", "search_cutoff_date VARCHAR(10)"),
+    ("search_depth", "search_depth VARCHAR(16)"),
 )
 
 # 로컬 검색(retrieval) 컬럼. 이 기능이 없던 시절의 실행은 전부 전체 인라인

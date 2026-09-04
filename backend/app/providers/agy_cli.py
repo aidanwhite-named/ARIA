@@ -454,7 +454,7 @@ class AgyCliProvider(Provider):
             if (
                 search_policy.max_tool_calls
                 and not budget_exceeded
-                and search_calls > search_policy.max_tool_calls
+                and search_calls + content_calls > search_policy.max_tool_calls
             ):
                 budget_exceeded = True
                 await emit(

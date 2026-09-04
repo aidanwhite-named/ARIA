@@ -7,8 +7,6 @@ const BLANK = {
   name: "",
   description: "",
   body: "",
-  output_mode: "markdown" as "markdown" | "text",
-  tags: [] as string[],
 };
 
 type Draft = typeof BLANK & {
@@ -68,8 +66,6 @@ export default function PromptsPage() {
         name: draft.name,
         description: draft.description,
         body: draft.body,
-        output_mode: draft.output_mode,
-        tags: draft.tags,
       };
       if (draft.id) {
         // 배포본(기본 제공)만 예약 경로로 저장한다. 사용자가 만든 검색 전략은
@@ -211,8 +207,6 @@ export default function PromptsPage() {
                 <tr>
                   <th>용도</th>
                   <th>이름</th>
-                  <th>결과 형식</th>
-                  <th>태그</th>
                   <th>상태</th>
                   <th style={{ width: 260 }}>작업</th>
                 </tr>
@@ -228,14 +222,6 @@ export default function PromptsPage() {
                     <td>
                       <div style={{ fontWeight: 600 }}>{p.name}</div>
                       <div className="faint">{p.description || "설명 없음"}</div>
-                    </td>
-                    <td>{p.output_mode === "markdown" ? "서식 포함" : "일반 텍스트"}</td>
-                    <td>
-                      {(p.tags ?? []).map((t) => (
-                        <span className="pill neutral" key={t} style={{ marginRight: 4 }}>
-                          {t}
-                        </span>
-                      ))}
                     </td>
                     <td>
                       {p.enabled ? (
@@ -254,8 +240,6 @@ export default function PromptsPage() {
                               name: p.name,
                               description: p.description,
                               body: p.body,
-                              output_mode: p.output_mode,
-                              tags: p.tags ?? [],
                               kind: p.kind,
                               reserved: !p.deletable,
                             })
@@ -335,41 +319,17 @@ export default function PromptsPage() {
                 onChange={(e) => setDraft({ ...draft, description: e.target.value })}
               />
             </div>
-            <div className="card-row">
-              <div className="field">
-                <label>출력 형식</label>
-                <select
-                  value={draft.output_mode}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      output_mode: e.target.value as "markdown" | "text",
-                    })
-                  }
-                >
-                  <option value="markdown">markdown</option>
-                  <option value="text">text</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>태그 (쉼표 구분)</label>
-                <input
-                  type="text"
-                  value={draft.tags.join(", ")}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      tags: e.target.value
-                        .split(",")
-                        .map((t) => t.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                />
-              </div>
-            </div>
             <div className="field">
               <label>본문 (업무 로직은 전부 여기에 씁니다)</label>
+              {draft.kind !== "search" && (
+                <div className="notice info">
+                  ARIA 연동용 출력 규칙은 자동으로 추가됩니다. 전용 JSON 블록을
+                  직접 넣을 필요는 없습니다. 구성별 점수는 본문과 일치해야 하며,
+                  판독 불가를 0점으로 단정하거나 확인되지 않은 문헌번호를 만들지
+                  마세요. 점수·문헌 매핑을 금지하는 지시는 연계 기능과 충돌할 수
+                  있습니다.
+                </div>
+              )}
               <textarea
                 className="mono"
                 rows={16}

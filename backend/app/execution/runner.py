@@ -13,7 +13,8 @@ import contextlib
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field, replace
+import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,17 +24,16 @@ from .. import (
     analysis_manifest,
     citation_mapping,
     job_assembly,
-    patent_search,
     retrieval,
     search_channels,
+    search_dates,
     search_manifest,
-    search_plan,
     search_prompt,
     search_report,
     search_verification,
     settings_service,
 )
-from ..config import DEFAULTS as SETTING_DEFAULTS, PATHS
+from ..config import PATHS
 from ..db import session_scope
 from ..enums import DeliveryPlan, ErrorCode, JobKind, JobStatus, RetrievalMode
 from ..evaluation.evaluator import Verdict, evaluate
@@ -44,7 +44,6 @@ from ..prompt_assembly import InputTooLarge
 from ..patent_search import retention as evidence_retention
 from ..providers.base import (
     NO_TOOLS,
-    ExecutionOutcome,
     ExecutionRequest,
     ToolPolicy,
 )
@@ -62,12 +61,30 @@ _SEARCH_CONTEXT_BY_POLICY = job_assembly.SEARCH_CONTEXT_BY_POLICY
 search_spec = job_assembly.search_spec
 
 
+def _search_mcp_servers(work_dir: Path, cutoff: str, max_calls: int) -> dict:
+    """Per-run MCP config.  No credentials are placed in CLI arguments."""
+    backend_root = Path(__file__).resolve().parents[2]
+    return {
+        "aria-search": {
+            "command": sys.executable,
+            "args": ["-m", "app.search_mcp_server"],
+            "env": {
+                "PYTHONPATH": str(backend_root),
+                "ARIA_SEARCH_WORK_DIR": str(work_dir.resolve()),
+                "ARIA_DATA_DIR": str(PATHS.data_dir.resolve()),
+                "ARIA_SEARCH_CUTOFF": cutoff or "",
+                "ARIA_SEARCH_MAX_TOOL_CALLS": str(max(1, int(max_calls))),
+            },
+        }
+    }
+
+
 def _evidence_artifact_ids(value) -> set[str]:
     """매니페스트가 실제로 참조하는 내용주소 증거 ID를 모은다."""
     found: set[str] = set()
     if isinstance(value, dict):
         for key, item in value.items():
-            if key == "artifact_id" and isinstance(item, str) and item:
+            if key in ("artifact_id", "raw_artifact_id") and isinstance(item, str) and item:
                 found.add(item)
             elif key == "artifact_ids" and isinstance(item, list):
                 found.update(str(part) for part in item if str(part))
@@ -112,7 +129,6 @@ def render_search_focus(focus: dict | None) -> str:
         return ""
     payload = {
         "threshold": focus.get("threshold", analysis_manifest.DEFAULT_THRESHOLD),
-        "strategy": "combined_then_individual",
         "components": [
             {
                 "id": item.get("id"),
@@ -129,44 +145,8 @@ def render_search_focus(focus: dict | None) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def _positive(value, fallback: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return number if number > 0 else fallback
-
-
-def _setting(values: dict, key: str) -> int:
-    """설정값 하나. 비어 있으면 **설정 기본값**으로 돌아간다.
-
-    fallback 숫자를 호출부에 적지 않는 이유는 하나다. 코드에 박은 숫자와
-    config.DEFAULTS 가 어긋나면, 설정이 누락된 경로에서만 옛 숫자가 살아난다.
-    그 경로는 화면에서 값을 줄여도 줄지 않고, 아무도 그 사실을 모른다.
-    """
-    return _positive(values.get(key), int(SETTING_DEFAULTS[key]))
-
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _search_lane_budgets(total: int, spec_provided: bool) -> dict[str, int]:
-    """작업 전체 상한을 독립 실행에 나눈다.
-
-    설정의 max_search_tool_calls 는 작업 한 건 전체 상한이다. 명세서를 넣었다고
-    상한을 두 배로 늘리면 사용자가 정한 비용·안전 경계가 깨진다.
-    """
-    total = max(1, int(total))
-    if not spec_provided:
-        return {search_manifest.ORIGIN_CLAIM_ONLY: total}
-    if total < 2:
-        return {}
-    claim_only = (total + 1) // 2
-    return {
-        search_manifest.ORIGIN_CLAIM_ONLY: claim_only,
-        search_manifest.ORIGIN_SPEC_ASSISTED: total - claim_only,
-    }
 
 
 PROGRESS_SEARCH = "search"
@@ -207,158 +187,14 @@ def _progress_counts_as(event_type: str, payload: dict) -> str:
     return ""
 
 
-def _progress_should_count(counted: set, search_origin: str, call_id: str) -> bool:
-    """같은 호출을 두 번 세지 않는다. 세어야 하면 True 를 주고 표시까지 한다.
-
-    키에 레인을 넣는다. 두 레인은 각자 별도의 CLI 프로세스이고 호출 ID 는 그
-    프로세스 안에서만 고유하다. ID 만 쓰면 명세서 보조 검색의 첫 호출이 청구항
-    단독 검색의 같은 ID 와 겹쳐 통째로 누락된다.
-    """
+def _progress_should_count(counted: set, call_id: str) -> bool:
+    """Count each observed call once across start and completion events."""
     if not call_id:
         return True
-    key = (search_origin, call_id)
-    if key in counted:
+    if call_id in counted:
         return False
-    counted.add(key)
+    counted.add(call_id)
     return True
-
-
-# 문헌 식별자가 들어 있는 질의. 특허 공개번호(US8773539, KR1020210086877) 와
-# DOI 를 잡는다.
-_IDENTIFIER_QUERY = re.compile(r"\b[A-Z]{2}\d{6,}\b|\b10\.\d{4,9}/")
-
-
-def _literature_queries(observed: dict | None, *, limit: int) -> list[dict]:
-    """ARIA 가 다시 물을 검색어를 고른다.
-
-    ARIA 가 **관측한** 검색어만 쓴다. 모델이 보고서에 적은 검색어가 아니다 —
-    둘은 어긋날 수 있고, 어긋났을 때 신뢰할 수 있는 쪽은 관측이다.
-
-    같은 질의를 정규화한 뒤 중복을 없앤다. 모델은 같은 뜻의 검색어를 따옴표만
-    바꿔 여러 번 부르는 일이 잦고, 그것을 그대로 다시 물으면 예산만 쓴다.
-    """
-    by_origin = ((observed or {}).get("search_queries_by_origin") or {})
-    ordered: list[tuple[str, str]] = []
-    if isinstance(by_origin, dict) and by_origin:
-        for origin, queries in by_origin.items():
-            for query in queries or []:
-                ordered.append((str(origin), str(query)))
-    else:
-        for query in (observed or {}).get("search_queries") or []:
-            ordered.append((search_manifest.ORIGIN_CLAIM_ONLY, str(query)))
-
-    chosen: dict[str, dict] = {}
-    for origin, query in ordered:
-        normalized = patent_search.plain_query(query)
-        # 낱말이 둘 이하로 남는 질의는 다시 묻지 않는다.
-        if len(normalized.split()) < 3:
-            continue
-        # 문헌번호·DOI 확인용 질의도 보내지 않는다. 관측된 실행에서는 16개 중
-        # 5개가 이런 질의였다("US8773539" "Google Patents" 같은 것). 이미 아는
-        # 번호의 서지를 다시 확인하는 일이라 **개념 검색이 아니고**, 그 확인은
-        # 아래 공식 서지 확보 단계가 DOI 로 직접 한다.
-        if _IDENTIFIER_QUERY.search(normalized):
-            continue
-        key = normalized.lower()
-        row = chosen.get(key)
-        if row is None:
-            if len(chosen) >= max(0, int(limit or 0)):
-                continue
-            chosen[key] = {"query": query, "search_origins": [origin]}
-            continue
-        if origin not in row["search_origins"]:
-            row["search_origins"].append(origin)
-    return list(chosen.values())
-
-
-@dataclass
-class _EpoStage:
-    """EPO 공식 조회 구간의 결과.
-
-    ``completed`` 가 거짓이면 이 채널로는 아무것도 받지 못했다는 뜻이고, 그 사유는
-    ``section`` 에 담겨 있다. 실패가 아니다 — EPO 가 꺼져 있거나 그 문헌이 OPS 에
-    없는 것과, 문헌이 존재하지 않는 것은 다른 말이다.
-    """
-
-    reported: dict | None
-    completed: bool
-    section: dict | None = None
-    bundles: dict = field(default_factory=dict)
-    dropped: list = field(default_factory=list)
-    limits: dict = field(default_factory=dict)
-    order: list = field(default_factory=list)
-    started_at: str = ""
-    backend: object = None
-
-
-
-def _merge_search_outcomes(
-    lane_outcomes: list[tuple[str, ExecutionOutcome]], tool_policy: ToolPolicy
-) -> ExecutionOutcome:
-    """두 Provider 실행의 원시 기록을 저장·감사용 한 객체로 합친다."""
-    combined = ExecutionOutcome(tool_policy=tool_policy)
-    if not lane_outcomes:
-        return combined
-
-    first = lane_outcomes[0][1]
-    combined.cli_path = first.cli_path
-    combined.cli_version = first.cli_version
-    combined.cli_args = list(first.cli_args)
-    combined.exit_code = 0
-    combined.terminal_reason = "completed"
-    usage_by_lane: dict[str, dict | None] = {}
-    narratives: list[str] = []
-    stdout: list[str] = []
-    stderr: list[str] = []
-
-    for origin, outcome in lane_outcomes:
-        narratives.append(f"===== {origin} =====\n{outcome.result_text}")
-        if outcome.raw_stdout:
-            stdout.append(f"===== {origin} =====\n{outcome.raw_stdout}")
-        if outcome.raw_stderr:
-            stderr.append(f"===== {origin} =====\n{outcome.raw_stderr}")
-        usage_by_lane[origin] = outcome.usage
-        combined.permission_denials.extend(outcome.permission_denials)
-        combined.errors.extend(outcome.errors)
-        combined.tools_advertised.extend(
-            name for name in outcome.tools_advertised if name not in combined.tools_advertised
-        )
-        combined.tool_uses.extend(outcome.tool_uses)
-        for call in outcome.tool_calls:
-            tagged = dict(call)
-            tagged["search_origin"] = origin
-            combined.tool_calls.append(tagged)
-
-        combined.is_error = combined.is_error or outcome.is_error
-        combined.cancelled = combined.cancelled or outcome.cancelled
-        combined.timed_out = combined.timed_out or outcome.timed_out
-        combined.auth_required = combined.auth_required or outcome.auth_required
-        combined.rate_limited = combined.rate_limited or outcome.rate_limited
-        combined.tool_budget_exceeded = (
-            combined.tool_budget_exceeded or outcome.tool_budget_exceeded
-        )
-        combined.content_read_budget_exceeded = (
-            combined.content_read_budget_exceeded
-            or outcome.content_read_budget_exceeded
-        )
-        combined.tools_uncontrollable = (
-            combined.tools_uncontrollable or outcome.tools_uncontrollable
-        )
-        combined.tools_must_be_disabled = (
-            combined.tools_must_be_disabled or outcome.tools_must_be_disabled
-        )
-        if outcome.error_message and not combined.error_message:
-            combined.error_message = outcome.error_message
-        if outcome.exit_code not in (None, 0) and combined.exit_code == 0:
-            combined.exit_code = outcome.exit_code
-        if outcome.terminal_reason not in (None, "completed"):
-            combined.terminal_reason = outcome.terminal_reason
-
-    combined.result_text = "\n\n".join(narratives)
-    combined.raw_stdout = "\n\n".join(stdout)
-    combined.raw_stderr = "\n\n".join(stderr)
-    combined.usage = {"search_lanes": usage_by_lane}
-    return combined
 
 
 class JobRunner:
@@ -480,869 +316,6 @@ class JobRunner:
         )
         return True
 
-    async def _run_epo_channel(
-        self,
-        *,
-        job_id: str,
-        values: dict,
-        policy: search_channels.ChannelPolicy,
-        provider,
-        model,
-        timeout: int,
-        work_dir: Path,
-        claim_text: str,
-        spec_text: str,
-        emit,
-    ) -> tuple[dict, list]:
-        """EPO 채널을 돈다. 웹 결과에는 어떤 경우에도 영향을 주지 않는다.
-
-        꺼져 있거나 자격증명이 없으면 **모델도 OPS 도 부르지 않고** 빈 기록을
-        돌려준다. 그때 이 함수가 하는 일은 사유를 적는 것뿐이다.
-
-        레인 하나가 실패해도 다른 레인은 계속한다. EPO 는 보조 채널이고, 한
-        레인의 실패로 나머지를 버리면 초기 보정에 쓸 자료가 사라진다.
-
-        (감사 기록, 살아 있는 EpoSearchRun 목록) 을 돌려준다. 뒤엣것은 이
-        실행 안에서만 쓴다 — 레인이 이미 받은 청구항·초록 본문이 들어 있어서
-        공식 검증 단계가 같은 자료를 다시 내려받지 않게 해 준다. 직렬화된
-        기록에는 그 본문이 없다(매니페스트를 특허 본문의 사본으로 만들지 않는다).
-        """
-        from ..patent_search import epo_agent
-
-        if not policy.runs(search_channels.CHANNEL_EPO):
-            return search_manifest.empty_epo_section(
-                enabled=False,
-                reason=policy.reason(search_channels.CHANNEL_EPO)
-                or "EPO OPS 연동이 꺼져 있습니다.",
-            ), []
-
-        with session_scope() as session:
-            backend = settings_service.epo_backend_for(session)
-        if not backend.has_credentials:
-            return search_manifest.empty_epo_section(
-                enabled=True,
-                reason="Consumer Key/Secret 가 설정되지 않아 EPO 채널을 건너뜁니다.",
-            ), []
-
-        # 채널 예산은 **작업당**이다(명세: "작업당 OPS 검색 요청 최대 6회",
-        # "EPO 채널 전체 제한시간 180초"). 레인마다 만들면 레인 수만큼 예산이
-        # 늘어난다.
-        # fallback 숫자를 여기 적지 않는다. 설정이 누락된 경로에서 코드에 박힌
-        # 옛 숫자로 돌아가면, 화면에서 줄인 값이 그 경로에서만 조용히 무시된다.
-        channel = epo_agent.ChannelBudget(
-            max_search_calls=_setting(values, "epo_max_search_calls"),
-            max_detail_fetches=_setting(values, "epo_max_detail_fetches"),
-            deadline_seconds=float(_setting(values, "epo_channel_timeout_seconds")),
-        )
-        channel.start()
-
-        # 레인 예산. 채널 예산(위)과 다른 축이며, 상한은 전부 설정에서 온다 —
-        # 코드에 박아 두면 화면에서 줄여도 실제로는 줄지 않는다.
-        lane_budget = epo_agent.EpoAgentBudget(
-            max_search_calls=channel.max_search_calls,
-            max_detail_fetches=channel.max_detail_fetches,
-            max_results_per_query=_setting(values, "epo_max_results_per_query"),
-            shortlist_limit=_setting(values, "epo_shortlist_limit"),
-        )
-
-        origins = [search_manifest.ORIGIN_CLAIM_ONLY]
-        if spec_text.strip():
-            origins.append(search_manifest.ORIGIN_SPEC_ASSISTED)
-
-        lanes: list[dict] = []
-        runs: list = []
-        section_error = ""
-        for origin in origins:
-            lane = search_manifest.lane_id(search_manifest.LANE_CHANNEL_EPO, origin)
-            if job_id in self._cancel_requested:
-                lanes.append(
-                    search_manifest.epo_lane_record(
-                        origin=origin, run=None, status="cancelled",
-                        error="사용자가 실행을 취소했습니다.",
-                    )
-                )
-                continue
-
-            await emit(
-                job_id,
-                "stage",
-                {
-                    "stage": "executing",
-                    "search_origin": origin,
-                    "lane": lane,
-                    "message": (
-                        "EPO 특허 DB 검색 중"
-                        if origin == search_manifest.ORIGIN_CLAIM_ONLY
-                        else "EPO 명세서 보조 확장 검색 중"
-                    ),
-                },
-            )
-
-            async def lane_emit(event_type: str, payload: dict, _lane=lane) -> None:
-                await emit(job_id, event_type, {**payload, "lane": _lane})
-
-            agent = epo_agent.EpoSearchAgent(
-                job_id=job_id,
-                provider=provider,
-                model=model,
-                timeout_seconds=timeout,
-                work_dir=work_dir / lane.replace(":", "-"),
-                claim_text=claim_text,
-                spec_text=(
-                    spec_text
-                    if origin == search_manifest.ORIGIN_SPEC_ASSISTED
-                    else ""
-                ),
-                backend=backend,
-                budget=lane_budget,
-                channel=channel,
-                lane_id=lane,
-                emit=lane_emit,
-                is_cancelled=lambda: job_id in self._cancel_requested,
-            )
-            try:
-                run = await agent.run()
-            except Exception as exc:  # noqa: BLE001 - 레인 하나의 실패로 끝내지 않는다
-                lanes.append(
-                    search_manifest.epo_lane_record(
-                        origin=origin, run=None, status="failed", error=str(exc)
-                    )
-                )
-                section_error = section_error or str(exc)
-                continue
-            runs.append(run)
-            # 예외가 없었다는 이유만으로 ok 를 적지 않는다. 종료 사유가
-            # 무엇이었는지가 이 레인의 상태다.
-            lanes.append(
-                search_manifest.epo_lane_record(
-                    origin=origin,
-                    run=run,
-                    status=epo_agent.lane_status(run),
-                    error=(
-                        run.termination_detail
-                        if run.termination_reason in epo_agent.FAILED_TERMINATIONS
-                        else ""
-                    ),
-                )
-            )
-            if run.termination_reason in epo_agent.FAILED_TERMINATIONS:
-                section_error = section_error or (
-                    run.termination_detail
-                    or f"EPO 검색이 {run.termination_reason} 로 끝났습니다."
-                )
-
-        # 사용량은 실행 뒤에 반드시 저장한다. 여기서 빠뜨리면 나간 바이트가
-        # 메모리에만 남는다.
-        try:
-            settings_service.persist_epo_quota(backend.ledger)
-        except Exception:  # pragma: no cover - 저장 실패는 화면 경고로 드러난다
-            pass
-
-        return {
-            "enabled": True,
-            "backend_id": search_manifest.EPO_BACKEND_ID,
-            "reason": "",
-            "channel_budget": channel.to_dict(),
-            # 레인 예산도 남긴다. 채널 예산만 적으면 "결과를 몇 건까지 받았나",
-            # "shortlist 를 몇 건까지 올렸나" 를 나중에 알 수 없다.
-            "lane_budget": lane_budget.to_dict(),
-            "lanes": lanes,
-            "usage": backend.usage(),
-            "error": section_error,
-        }, runs
-
-    def _kiwee_channel_record(
-        self, policy: search_channels.ChannelPolicy, values: dict
-    ) -> dict:
-        """Kiwee 채널의 기록을 만든다. **네트워크를 열지 않는다.**
-
-        정책이 이 채널을 돌지 않기로 했으면 사유만 적는다. 정책이 돌기로 했더라도
-        백엔드가 스스로 미구성이라고 답하면 그 사유를 적는다 — 어느 쪽이든 검색을
-        흉내 내지 않고, 후보를 만들지 않고, 요청을 보내지 않는다.
-
-        골격을 만든 목적이 '연동 지점을 모듈로 고정'하는 것이므로, 실행 경로에서도
-        그 지점이 눈에 보여야 한다. 채널이 아예 없는 것과 채널이 있는데 아직
-        구현되지 않은 것은 다른 상태다.
-        """
-        if not policy.runs(search_channels.CHANNEL_KIWEE):
-            section = search_manifest.empty_kiwee_section(
-                enabled=bool(values.get("kiwee_integration_enabled", False)),
-                reason=policy.reason(search_channels.CHANNEL_KIWEE),
-            )
-            section["skip_kind"] = (
-                policy.skip_kind(search_channels.CHANNEL_KIWEE)
-                or section["skip_kind"]
-            )
-            return section
-
-        # 여기 오는 경우는 지금 없다(UNIMPLEMENTED). 나중에 구현이 붙었을 때를
-        # 위해 백엔드의 자기 신고를 그대로 옮긴다.
-        status = patent_search.describe(values, "kiwee")
-        return search_manifest.empty_kiwee_section(
-            enabled=True,
-            reason=str(getattr(status, "detail", "") or "실행하지 않았습니다."),
-        )
-
-    async def _run_literature_channel(
-        self,
-        *,
-        job_id: str,
-        values: dict,
-        policy: search_channels.ChannelPolicy,
-        observed: dict | None,
-        claim_text: str,
-        plan: search_plan.SearchPlan | None = None,
-    ) -> tuple[dict, object]:
-        """ARIA 가 직접 서지 DB 에 물어 **식별된** 논문 후보를 만든다.
-
-        왜 필요한가
-        -----------
-        웹 검색 채널은 논문을 식별하지 못한다. agy 의 search_web 은 결과 목록이
-        아니라 줄글 요약과 익명 각주를 돌려주고(2026-09-01 실측: 검색 16회에
-        각주 84개, 전부 제목도 DOI 도 없는 리다이렉트 주소), 그 리다이렉트는 이
-        PC 의 네트워크가 차단한다. 그래서 모델이 후보로 적을 수 있는 것은 요약문이
-        우연히 제목을 써 준 문헌뿐이었고, 84개 중 2건만 후보가 됐다.
-
-        여기서는 각주를 해석하려 하지 않는다. **모델이 실제로 사용한 검색어**를
-        가져와 ARIA 가 Crossref 와 Europe PMC 에 직접 묻는다. 두 곳 다 제목과
-        DOI 가 붙은 결과를 주므로, 받은 문헌은 그대로 후보가 된다.
-
-        모델의 검색어를 쓰는 이유
-        -------------------------
-        청구항에서 검색어를 다시 뽑으면 두 번째 검색기가 되고, 그 품질을 우리가
-        보증해야 한다. 모델이 이미 만든 검색어를 쓰면 이 단계가 하는 일은 하나로
-        좁혀진다 — **같은 질문을 식별 가능한 곳에 다시 묻는 것.**
-        """
-        section = search_manifest.empty_literature_section()
-        if not policy.runs(search_channels.CHANNEL_LITERATURE):
-            return search_manifest.empty_literature_section(
-                reason=policy.reason(search_channels.CHANNEL_LITERATURE)
-                or (
-                    "비특허문헌(Crossref·Europe PMC) 연동이 꺼져 있어 ARIA "
-                    "서지 검색을 하지 않았습니다."
-                )
-            ), None
-
-        limit = _positive(values.get("literature_max_queries"), 6)
-        queries = _literature_queries(observed, limit=limit)
-        query_source = "observed"
-        if not queries and plan is not None:
-            # 웹 레인이 실패했거나 검색어를 한 건도 관측하지 못한 실행. 예전에는
-            # 여기서 채널을 통째로 건너뛰었고, 그 결과 웹 채널 하나의 실패가 논문
-            # 채널까지 함께 없앴다. 채널 격리를 지키려면 대체 입력이 있어야 한다.
-            #
-            # 대체 입력은 모델의 문장이 아니라 ARIA 의 내부 검색 계획이다. 계획은
-            # 청구항과 사용자 전략 본문에서 기계적으로 뽑은 것이므로, 이 경로가
-            # 모델 출력에 의존하지 않는다는 성질이 유지된다.
-            queries = [
-                {"query": text, "search_origins": [search_manifest.ORIGIN_CLAIM_ONLY]}
-                for text in plan.query_texts()[:limit]
-            ]
-            query_source = "plan"
-        if not queries:
-            return search_manifest.empty_literature_section(
-                enabled=True,
-                reason=(
-                    "모델이 실행한 검색어를 관측하지 못했고 내부 검색 계획에서도 "
-                    "질의를 만들지 못해 ARIA 서지 검색을 하지 않았습니다."
-                ),
-            ), None
-
-        backend = patent_search.LiteratureBackend()
-        backend.configure(values)
-        rows = _positive(values.get("literature_max_results_per_query"), 10)
-        section = search_manifest.empty_literature_section(enabled=True)
-        section["limits"] = {
-            "max_queries": len(queries),
-            "max_results_per_query": rows,
-        }
-        # 이 채널이 무엇을 물었는지의 출처. 모델이 실제로 쓴 검색어인지, 모델
-        # 출력을 얻지 못해 ARIA 의 내부 계획으로 대체했는지는 다른 사실이다.
-        section["query_source"] = query_source
-
-        await self._emit(
-            job_id,
-            "stage",
-            {
-                "stage": "searching",
-                "message": (
-                    f"모델이 쓴 검색어 {len(queries)}개로 ARIA 가 Crossref·"
-                    "Europe PMC 를 직접 조회하는 중"
-                ),
-            },
-        )
-
-        by_doi: dict = {}
-        for entry in queries:
-            record = {
-                "query": entry["query"],
-                "normalized": patent_search.plain_query(entry["query"]),
-                "search_origins": entry["search_origins"],
-                "found": 0,
-                "error": "",
-                "notes": [],
-            }
-            if job_id in self._cancel_requested:
-                record["error"] = "사용자가 실행을 취소했습니다."
-                section["queries"].append(record)
-                break
-            try:
-                response = await asyncio.to_thread(
-                    backend.search,
-                    patent_search.PatentSearchQuery(
-                        text=entry["query"], max_results=rows
-                    ),
-                )
-            except Exception as exc:  # 서지 채널 고장으로 웹 결과를 잃지 않는다
-                record["error"] = f"{type(exc).__name__}: {exc}"
-                section["queries"].append(record)
-                continue
-            record["notes"] = list(response.notes)
-            record["found"] = len(response.records)
-            # 두 서지 DB 가 모두 실패했으면 이 질의는 실패다. 예외가 올라오지
-            # 않았다는 이유로 성공이라고 적으면, 전부 죽은 실행이 "결과 0건"
-            # 으로 보인다 — 그 둘은 사용자가 할 일이 다르다.
-            record["failed_sources"] = list(response.failed_sources)
-            if response.failed_sources and not response.records:
-                record["error"] = "; ".join(
-                    note for note in response.notes if note
-                ) or ("서지 DB 조회에 모두 실패했습니다: "
-                      + ", ".join(response.failed_sources))
-            section["queries"].append(record)
-
-            for item in response.records:
-                doi = str(item.doc_number or "").lower()
-                if not doi:
-                    continue
-                row = by_doi.get(doi)
-                if row is None:
-                    fields = item.fields or {}
-                    row = {
-                        "doi": doi,
-                        "doc_number": doi,
-                        "title": item.title,
-                        "authors": (fields.get("authors").value
-                                    if "authors" in fields else ""),
-                        "container": (fields.get("container").value
-                                      if "container" in fields else ""),
-                        "url": item.source_url,
-                        "artifact_ids": [],
-                        "evidence_fields": sorted(fields),
-                        "sources": [],
-                        "queries": [],
-                        "search_origins": [],
-                    }
-                    by_doi[doi] = row
-                for value in (item.fields or {}).values():
-                    ref = value.evidence
-                    if ref is None or not ref.artifact_id:
-                        continue
-                    if ref.artifact_id not in row["artifact_ids"]:
-                        row["artifact_ids"].append(ref.artifact_id)
-                    source = (
-                        "crossref"
-                        if ref.profile_id == patent_search.PROFILE_CROSSREF_JSON
-                        else "europepmc"
-                    )
-                    if source not in row["sources"]:
-                        row["sources"].append(source)
-                if entry["query"] not in row["queries"]:
-                    row["queries"].append(entry["query"])
-                for origin in entry["search_origins"]:
-                    if origin not in row["search_origins"]:
-                        row["search_origins"].append(origin)
-
-        # --- 후보표에 올릴 것을 고른다 -----------------------------------
-        #
-        # 받은 것을 전부 올리지 않는다. 한 실행에서 60건 넘게 오는데(2026-09-01
-        # 실측: 질의 6개에 62건), 그것을 그대로 후보표에 넣으면 모델이 검토한
-        # 후보와 검색 결과 목록이 같은 위계로 읽힌다. EPO 채널에 shortlist 상한을
-        # 둔 것과 같은 이유다.
-        #
-        # 무엇을 위로 올릴 것인가에 ARIA 는 관련성 판단을 만들지 않는다. 대신
-        # **교차 확인**을 신호로 쓴다.
-        #
-        #   1. 서로 다른 질의 여러 개가 같은 문헌을 데려왔는가
-        #   2. 두 서지 DB 가 모두 그 문헌을 데려왔는가
-        #
-        # 둘 다 "이 문헌이 이 주제에 반복해서 걸린다"는 관측이지 우리의 의견이
-        # 아니다. 같은 순위 안에서는 먼저 나온 순서를 지킨다(안정 정렬).
-        discovered = list(by_doi.values())
-        for position, row in enumerate(discovered):
-            row["query_count"] = len(row["queries"])
-            row["source_count"] = len(row["sources"])
-            row["first_seen_position"] = position
-        ranked = sorted(
-            discovered,
-            key=lambda row: (
-                -row["query_count"],
-                -row["source_count"],
-                row["first_seen_position"],
-            ),
-        )
-        shortlist = _positive(values.get("literature_shortlist_limit"), 10)
-        promoted = ranked[:shortlist]
-        promoted_keys = {row["doi"] for row in promoted}
-        for row in discovered:
-            row["promoted"] = row["doi"] in promoted_keys
-        section["limits"]["shortlist_limit"] = shortlist
-        # 후보표에 올린 것과 받은 것 전부를 나눠 남긴다. 상한에 걸려 빠진 문헌이
-        # 기록에서 사라지면 "서지 검색이 못 찾았다"와 "찾았는데 안 올렸다"가
-        # 같은 말이 된다.
-        section["candidates"] = promoted
-        section["discovered"] = [
-            {
-                "doi": row["doi"],
-                "title": row["title"],
-                "sources": row["sources"],
-                "query_count": row["query_count"],
-                "promoted": row["promoted"],
-            }
-            for row in ranked
-        ]
-        section["usage"] = backend.usage()
-        return section, backend
-
-    async def _epo_official_bundles(
-        self,
-        *,
-        job_id: str,
-        values: dict,
-        reported: dict | None,
-        fetch_budget: int | None,
-        epo_runs: list | None,
-    ) -> "_EpoStage":
-        """EPO 공식 응답을 확보하는 구간. 2차 분류는 호출부가 돈다.
-
-        _run_official_verification 에서 갈라져 나왔다. 이유는 하나다 — 논문
-        후보의 근거(Crossref·Europe PMC)는 EPO 와 **무관하게** 확보되므로, EPO 가
-        꺼져 있거나 자격증명이 없다고 해서 2차 분류까지 건너뛰면 안 된다. 예전에는
-        이 구간의 조기 반환이 곧 단계 전체의 종료였다.
-
-        조기 종료는 실패가 아니라 "이 채널로는 받지 못했다"이며, 그 사유는
-        completed=False 인 _EpoStage 의 section 에 그대로 담겨 호출부로 간다.
-        """
-        if not patent_search.is_enabled(values, "epo"):
-            detail = (
-                "EPO OPS 연동이 꺼져 있어 공식 문헌 대조를 하지 않았습니다. "
-                "각 후보는 1차 분류 그대로 남습니다."
-            )
-            reported = search_verification.annotate_not_attempted(
-                reported, reason_code="epo_disabled", detail=detail
-            )
-            return _EpoStage(reported, False, search_verification.section(
-                attempted=False,
-                reason=detail,
-            ))
-
-        with session_scope() as session:
-            backend = settings_service.epo_backend_for(session)
-        if not backend.has_credentials:
-            detail = (
-                "EPO Consumer Key/Secret가 없어 공식 문헌을 확보하지 "
-                "못했습니다. 각 후보는 1차 분류 그대로 남습니다."
-            )
-            reported = search_verification.annotate_not_attempted(
-                reported, reason_code="epo_credentials_missing", detail=detail
-            )
-            return _EpoStage(reported, False, search_verification.section(
-                attempted=False,
-                reason=detail,
-            ))
-
-        if fetch_budget is None:
-            fetch_budget = _setting(values, "epo_max_detail_fetches")
-        fetch_budget = max(0, int(fetch_budget))
-        # 검증 대상 수와 조회 예산은 다른 축이다. 후보 하나에 청구항·초록·서지
-        # 세 번을 부를 수 있으므로, 조회 예산만으로 "몇 명을 검증할 것인가"를
-        # 정하면 상한이 실행마다 달라진다.
-        target_limit = _setting(values, "epo_verification_targets")
-        limits = {
-            "verification_targets": target_limit,
-            "detail_fetches": fetch_budget,
-            "configured_detail_fetches": _setting(values, "epo_max_detail_fetches"),
-        }
-        # EPO 검색 레인이 이미 받아 둔 자료. 있으면 그것으로 시작하고 모자란
-        # 구성요소만 더 받는다. 무엇이 모자란지는 여기서 세어 둔다 — 묶음이
-        # 있다는 것과 추가 조회가 없다는 것은 다른 말이다.
-        prefetched = search_verification.reuse_bundles(epo_runs or [])
-        reuse = search_verification.reuse_plan(prefetched)
-        if fetch_budget == 0 and not prefetched:
-            detail = "EPO 상세 조회 예산을 앞선 검색 채널에서 모두 사용했습니다."
-            reported = search_verification.annotate_not_attempted(
-                reported, reason_code="epo_budget_exhausted", detail=detail
-            )
-            return _EpoStage(reported, False, search_verification.section(
-                attempted=False, reason=detail, limits=limits
-            ))
-        dropped: list[dict] = []
-        selection_order: list[dict] = []
-        found = search_verification.targets(
-            reported,
-            limit=target_limit,
-            dropped=dropped,
-            # 이미 받아 둔 아티팩트가 있는 후보를 먼저 고른다. 배열 순서로
-            # 자르면 웹 후보가 앞자리를 다 차지해 EPO 후보가 통째로 빠진다.
-            # 계획에는 후보마다 예상 추가 조회 횟수가 들어 있다.
-            reuse=reuse,
-            order=selection_order,
-        )
-        if not found:
-            detail = "EPO OPS로 조회할 수 있는 특허번호 후보가 없습니다."
-            reported = search_verification.annotate_not_attempted(
-                reported, reason_code="no_epo_compatible_identifier", detail=detail
-            )
-            return _EpoStage(reported, False, search_verification.section(
-                attempted=False,
-                reason=detail,
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ))
-
-        started_at = _utcnow().isoformat()
-        await self._emit(
-            job_id,
-            "stage",
-            {
-                "stage": "verifying",
-                "message": (
-                    f"후보 {len(found)}건의 공식 초록·청구항을 EPO에서 "
-                    "확인하는 중"
-                ),
-            },
-        )
-        try:
-            bundles = await asyncio.to_thread(
-                search_verification.fetch_official,
-                found,
-                backend,
-                max_fetches=fetch_budget,
-                is_cancelled=lambda: job_id in self._cancel_requested,
-                prefetched=prefetched,
-            )
-        except Exception as exc:  # 공식 채널 고장으로 1차 검색을 잃지 않는다
-            detail = f"공식 문헌 조회 단계 오류: {type(exc).__name__}: {exc}"
-            reported = search_verification.annotate_not_attempted(
-                reported,
-                reason_code="official_fetch_stage_failed",
-                detail=detail,
-            )
-            return _EpoStage(reported, False, search_verification.section(
-                attempted=True,
-                reason="공식 문헌 조회 단계가 실패해 후보를 잠정 분류로 남겼습니다.",
-                classification_error=detail,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                target_count=len(found),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ))
-        finally:
-            # 성공·실패와 무관하게 실제 OPS 사용량을 저장한다.
-            with contextlib.suppress(Exception):
-                settings_service.persist_epo_quota(backend.ledger)
-
-        return _EpoStage(
-            reported,
-            True,
-            None,
-            bundles,
-            dropped,
-            limits,
-            selection_order,
-            started_at,
-            backend,
-        )
-
-
-    async def _run_official_verification(
-        self,
-        *,
-        job_id: str,
-        values: dict,
-        provider,
-        model,
-        reasoning_effort: str,
-        timeout: int,
-        work_dir: Path,
-        claim_text: str,
-        reported: dict | None,
-        fetch_budget: int | None = None,
-        epo_runs: list | None = None,
-        literature_bundles: dict | None = None,
-        literature_dropped: list | None = None,
-    ) -> tuple[dict | None, dict, ExecutionOutcome | None, list[str]]:
-        """후보를 공식 문헌으로 확인하고 도구 없는 2차 분류를 돈다.
-
-        **Provider 이름으로 갈라지지 않는다.** 예전에는 Codex 실행에서만 돌았다.
-        Codex 는 web_search 의 URL 조회 성공을 스트림에 내지 않아 웹 게이트를
-        통과할 수 없고, 이 경로가 유일한 산출 통로였기 때문이다. 그런데 그것은
-        이 단계를 '보완'으로 만드는 이유이지 '한 Provider 전용'으로 만드는
-        이유가 아니다. 페이지를 열었다는 관측은 그 페이지에 그 문장이 있었다는
-        확인이 아니므로(search_manifest._mapping_row 주석), agy·Claude 후보에도
-        같은 대조를 적용한다.
-
-        2차 분류는 **검색에 쓴 것과 같은 Provider·모델·추론강도**로 돈다.
-        중간에 Provider 를 갈아타면 사용자가 고르지 않은 CLI 를 호출하게 되고
-        한 실행의 사용량이 두 계정으로 쪼개진다.
-
-        승격되지 못한 후보를 강등하지는 않는다. 공식 조회 실패는 문헌 부재가
-        아니다 — search_verification._keep_provisional 주석을 보라.
-        """
-        if reported is None:
-            return reported, search_verification.section(
-                attempted=False,
-                reason="1차 후보 목록을 읽지 못해 공식 문헌 검증을 시작하지 않았습니다.",
-            ), None, []
-
-        literature_bundles = dict(literature_bundles or {})
-        stage = await self._epo_official_bundles(
-            job_id=job_id,
-            values=values,
-            reported=reported,
-            fetch_budget=fetch_budget,
-            epo_runs=epo_runs,
-        )
-        reported = stage.reported
-        if not stage.completed and not literature_bundles:
-            # 예전과 정확히 같은 경로다. 논문 근거가 하나도 없으면 EPO 가 돌지
-            # 못한 것이 곧 이 단계의 결과다.
-            return reported, stage.section, None, []
-
-        bundles = dict(stage.bundles)
-        # 논문 근거를 같은 묶음에 넣는다. 2차 분류 턴은 특허와 논문을 구분하지
-        # 않는다 — 청구항과 겨루는 문헌이라는 점에서 같고, 근거의 출처는 각
-        # 묶음의 backend_id 와 아티팩트 참조가 들고 있다.
-        bundles.update(literature_bundles)
-        dropped = list(stage.dropped)
-        # 후보에게 사유를 적을 때만 논문 채널의 상한 제외를 함께 본다. EPO 검증
-        # 구간의 excluded_candidates 에 섞으면 특허 상한이 논문 후보를 잘라 낸
-        # 것처럼 읽힌다 — 두 상한은 다른 설정이고 다른 예산이다.
-        annotation_dropped = dropped + [
-            row for row in (literature_dropped or []) if isinstance(row, dict)
-        ]
-        limits = dict(stage.limits)
-        selection_order = list(stage.order)
-        started_at = stage.started_at or _utcnow().isoformat()
-        backend = stage.backend
-        # EPO 가 돌지 못한 실행에서도 아티팩트 저장소는 있어야 한다. 두 채널이
-        # 같은 디렉터리를 쓰므로 어느 쪽 저장소든 같은 바이트를 읽는다.
-        artifact_store = (
-            backend.artifact_store
-            if backend is not None
-            else patent_search.LiteratureBackend().artifact_store
-        )
-        if not stage.completed:
-            notes_prefix = [
-                "EPO 공식 조회는 돌지 못했지만 확보한 논문 서지가 있어 2차 분류를 "
-                "이어 갔습니다: " + str((stage.section or {}).get("reason") or "")
-            ]
-        else:
-            notes_prefix = []
-
-        reported = search_verification.annotate_bundles(
-            reported, bundles, annotation_dropped
-        )
-
-        verified = [bundle for bundle in bundles.values() if bundle.verified]
-        if job_id in self._cancel_requested:
-            return reported, search_verification.section(
-                attempted=True,
-                reason="사용자가 공식 문헌 검증 중 실행을 취소했습니다.",
-                bundles=bundles,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), None, notes_prefix
-        if not verified:
-            return reported, search_verification.section(
-                attempted=True,
-                reason="공식 응답에서 2차 분류에 사용할 본문을 확보하지 못했습니다.",
-                bundles=bundles,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), None, notes_prefix
-
-        system_prompt = search_verification.classification_system_prompt()
-        user_message = search_verification.classification_message(claim_text, bundles)
-        prompt_sha = hashlib.sha256(
-            (system_prompt + "\n\x00\n" + user_message).encode("utf-8")
-        ).hexdigest()
-        verify_dir = work_dir / "official-verification"
-        verify_dir.mkdir(parents=True, exist_ok=True)
-        (verify_dir / "final_prompt.txt").write_text(
-            "===== SYSTEM PROMPT =====\n"
-            + system_prompt
-            + "\n\n===== USER MESSAGE =====\n"
-            + user_message,
-            encoding="utf-8",
-        )
-
-        # 검증 단계가 크다는 이유로 1차 후보까지 실패시키지는 않는다. 전송 상한을
-        # 넘으면 사유를 남기고 잠정 분류로 보고한다.
-        byte_budget = getattr(provider, "max_input_bytes", None)
-        if byte_budget is not None:
-            measure = getattr(provider, "payload_bytes", None)
-            payload_bytes = (
-                measure(system_prompt, user_message)
-                if callable(measure)
-                else len(system_prompt.encode("utf-8"))
-                + len(user_message.encode("utf-8"))
-            )
-            if payload_bytes > byte_budget:
-                detail = (
-                    "2차 공식 근거 프롬프트가 Provider 전송 상한을 넘었습니다 "
-                    f"({payload_bytes:,} > {byte_budget:,} bytes)."
-                )
-                reported = search_verification.annotate_classification_failure(
-                    reported, bundles, detail=detail, dropped=annotation_dropped
-                )
-                return reported, search_verification.section(
-                    attempted=True,
-                    reason=detail,
-                    bundles=bundles,
-                    classification_error=detail,
-                    prompt_sha256=prompt_sha,
-                    started_at=started_at,
-                    completed_at=_utcnow().isoformat(),
-                    dropped=dropped,
-                    limits=limits,
-                    order=selection_order,
-                ), None, notes_prefix
-
-        await self._emit(
-            job_id,
-            "stage",
-            {
-                "stage": "verifying",
-                "message": (
-                    f"확보한 공식 문헌 {len(verified)}건을 "
-                    f"{getattr(provider, 'display_name', '') or '모델'}이 "
-                    "A/B로 분류하는 중"
-                ),
-            },
-        )
-
-        async def classify_emit(event_type: str, payload: dict) -> None:
-            await self._emit(
-                job_id,
-                event_type,
-                {**dict(payload), "phase": "official_classification"},
-            )
-
-        request = ExecutionRequest(
-            job_id=job_id,
-            work_dir=verify_dir,
-            system_prompt=system_prompt,
-            user_message=user_message,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            timeout_seconds=timeout,
-            tool_policy=NO_TOOLS,
-        )
-        try:
-            classification_outcome = await provider.execute(request, classify_emit)
-        except Exception as exc:  # 1차 검색 결과는 보존하는 fail-soft 경로
-            detail = f"2차 분류 실행 오류: {type(exc).__name__}: {exc}"
-            reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=annotation_dropped
-            )
-            return reported, search_verification.section(
-                attempted=True,
-                reason="공식 문헌은 확보했지만 2차 분류를 완료하지 못했습니다.",
-                bundles=bundles,
-                classification_error=detail,
-                prompt_sha256=prompt_sha,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), None, notes_prefix
-        classification_verdict = evaluate(
-            classification_outcome, [], fail_on_tool_use=True
-        )
-        if classification_verdict.status != JobStatus.SUCCEEDED:
-            detail = " / ".join(classification_verdict.errors) or (
-                classification_outcome.error_message or "2차 분류 실행이 실패했습니다."
-            )
-            reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=annotation_dropped
-            )
-            return reported, search_verification.section(
-                attempted=True,
-                reason="공식 문헌은 확보했지만 2차 분류를 완료하지 못했습니다.",
-                bundles=bundles,
-                classification_error=detail,
-                prompt_sha256=prompt_sha,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), classification_outcome, notes_prefix
-
-        try:
-            payload = search_verification.parse_classification(
-                classification_outcome.result_text
-            )
-            updated, notes = search_verification.apply_classification(
-                reported, payload, bundles, artifact_store, dropped=annotation_dropped
-            )
-        except search_verification.ClassificationError as exc:
-            detail = str(exc)
-            reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=annotation_dropped
-            )
-            return reported, search_verification.section(
-                attempted=True,
-                reason="2차 분류 출력을 구조화하지 못해 잠정 분류로 남겼습니다.",
-                bundles=bundles,
-                classification_error=detail,
-                prompt_sha256=prompt_sha,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), classification_outcome, notes_prefix
-        except Exception as exc:  # 증거 대조 오류도 1차 후보를 없애지 않는다
-            detail = f"공식 근거 대조 오류: {type(exc).__name__}: {exc}"
-            reported = search_verification.annotate_classification_failure(
-                reported, bundles, detail=detail, dropped=annotation_dropped
-            )
-            return reported, search_verification.section(
-                attempted=True,
-                reason="공식 근거를 대조하지 못해 후보를 잠정 분류로 남겼습니다.",
-                bundles=bundles,
-                classification_error=detail,
-                prompt_sha256=prompt_sha,
-                started_at=started_at,
-                completed_at=_utcnow().isoformat(),
-                dropped=dropped,
-                limits=limits,
-                order=selection_order,
-            ), classification_outcome, notes_prefix
-
-        return updated, search_verification.section(
-            attempted=True,
-            reason="",
-            bundles=bundles,
-            prompt_sha256=prompt_sha,
-            started_at=started_at,
-            completed_at=_utcnow().isoformat(),
-            dropped=dropped,
-            limits=limits,
-            order=selection_order,
-        ), classification_outcome, notes_prefix + notes
-
     async def _run(self, job_id: str) -> None:
         try:
             await self._run_inner(job_id)
@@ -1376,7 +349,10 @@ class JobRunner:
             prior_report = job.prior_report or ""
             prior_mapping = job.prior_citation_mapping
             search_focus = job.search_focus
-            capabilities = list(job.prompt_capabilities or [])
+            # 선택적 검색 기준일. 빈 문자열이면 **날짜 조건이 없다**는 뜻이고,
+            # 여기서 오늘 날짜로 채우지 않는다.
+            search_cutoff = search_dates.normalize_cutoff(job.search_cutoff_date)
+            search_depth = job.search_depth or "standard"
             output_mode = job.output_mode
             work_dir = Path(job.work_dir) if job.work_dir else PATHS.run_dir(job_id)
             # 「분석에 포함」을 푼 자료는 여기서 빠진다. preflight 가 크기를
@@ -1416,13 +392,8 @@ class JobRunner:
         # Provider 를 만든 뒤 그 Provider 가 선언한 검색 정책으로 교체한다.
         tool_policy: ToolPolicy = NO_TOOLS
         search_budget = int(values.get("max_search_tool_calls", 40))
-
-        # --- 채널 실행 정책 --------------------------------------------------
-        #
-        # 프롬프트 본문을 보지 않는다. 어떤 채널이 도는지는 작업 종류와 설정이
-        # 정하며, 프롬프트에 "검색하지 마라"라고 적혀 있어도 이 판정은 바뀌지
-        # 않는다. 반대로 프롬프트가 채널을 켜지도 못한다.
-        channel_policy = search_channels.resolve(values)
+        if job_kind is JobKind.SIMILARITY_SEARCH:
+            search_budget, timeout = search_channels.execution_limits(values, search_depth)
 
         await self._emit(job_id, "stage", {"stage": "queued", "message": "실행 대기 중"})
 
@@ -1450,7 +421,9 @@ class JobRunner:
                     )
                     return
                 tool_policy = replace(
-                    selected_policy, max_tool_calls=max(1, search_budget)
+                    selected_policy,
+                    max_tool_calls=max(1, search_budget),
+                    mcp_tools=(),
                 )
 
             if job_kind is JobKind.PATENT_ANALYSIS and not attachments:
@@ -1491,10 +464,6 @@ class JobRunner:
             spec_boundary_neutralized = False
             focus_boundary_neutralized = False
             spec_document: dict | None = None
-            search_assemblies: dict[str, object] = {}
-            lane_budgets: dict[str, int] = {}
-            content_budget = 0
-            content_lane_budgets: dict[str, int] = {}
             try:
                 assembly = job_assembly.assemble_job(
                     job_kind=job_kind,
@@ -1505,6 +474,8 @@ class JobRunner:
                     max_chars=max_chars,
                     claim_text=claim_text,
                     focus_text=render_search_focus(search_focus),
+                    search_cutoff=search_cutoff,
+                    search_tool_status=search_channels.availability(values, provider_id),
                     search_prompt_id=prompt_id or search_prompt.SEARCH_PROMPT_ID,
                     followup_instruction=followup_instruction,
                     prior_claim_text=prior_claim_text,
@@ -1525,7 +496,6 @@ class JobRunner:
                 )
                 assembled = assembly.representative
                 if job_kind is JobKind.SIMILARITY_SEARCH:
-                    search_assemblies = dict(assembly.lanes)
                     spec_document = assembly.spec_document
                     search_prompt_sha = assembly.search_prompt_sha
                     search_runtime_context_sha = assembly.search_runtime_context_sha
@@ -1537,68 +507,6 @@ class JobRunner:
                         assembly.strategy_boundary_neutralized
                     )
 
-                    lane_budgets = _search_lane_budgets(
-                        search_budget, spec_document is not None
-                    )
-                    # 본문 읽기 상한은 사용자 설정이 아니라 정책 상수다. 검색
-                    # 횟수와 달리 비용·범위를 정하는 값이 아니라, 한 문헌을 몇
-                    # 조각으로 나눠 읽는지에 딸린 값이기 때문이다.
-                    content_budget = int(
-                        getattr(tool_policy, "max_content_read_calls", 0) or 0
-                    )
-                    content_lane_budgets = (
-                        _search_lane_budgets(
-                            content_budget, spec_document is not None
-                        )
-                        if content_budget
-                        else {}
-                    )
-                    if content_budget and not content_lane_budgets:
-                        # 나눌 수 없을 만큼 작은 상한. 0 은 '상한 없음'이라
-                        # 여기서 쓰면 정반대가 되므로 레인마다 1회로 둔다.
-                        content_lane_budgets = {
-                            origin: 1 for origin in search_assemblies
-                        }
-                    # 검색 호출과 URL 조회 상한도 같은 방식으로 레인에 나눈다.
-                    # 나누지 않으면 두 레인이 한 예산을 놓고 경쟁해서 먼저 도는
-                    # 레인이 다 써 버린다.
-                    search_call_budget = int(
-                        getattr(tool_policy, "max_search_calls", 0) or 0
-                    )
-                    search_call_lane_budgets = (
-                        _search_lane_budgets(
-                            search_call_budget, spec_document is not None
-                        )
-                        if search_call_budget
-                        else {}
-                    )
-                    if search_call_budget and not search_call_lane_budgets:
-                        search_call_lane_budgets = {
-                            origin: 1 for origin in search_assemblies
-                        }
-                    url_lookup_budget = int(
-                        getattr(tool_policy, "max_url_lookup_calls", 0) or 0
-                    )
-                    url_lookup_lane_budgets = (
-                        _search_lane_budgets(
-                            url_lookup_budget, spec_document is not None
-                        )
-                        if url_lookup_budget
-                        else {}
-                    )
-                    if url_lookup_budget and not url_lookup_lane_budgets:
-                        url_lookup_lane_budgets = {
-                            origin: 1 for origin in search_assemblies
-                        }
-                    if spec_document is not None and not lane_budgets:
-                        await self._fail(
-                            job_id,
-                            ErrorCode.SEARCH_BUDGET_EXCEEDED,
-                            "출원발명 문서를 사용한 검색은 청구항 단독·명세서 보조 "
-                            "두 독립 실행이 필요합니다. 검색 1회당 최대 도구 호출 "
-                            "수를 2 이상으로 설정하십시오.",
-                        )
-                        return
             except job_assembly.SpecUnreadable as exc:
                 await self._fail(
                     job_id,
@@ -1745,44 +653,13 @@ class JobRunner:
             delivery_manifest = assembly.delivery_manifest(provider)
 
             prompt_path = work_dir / "final_prompt.txt"
-            if job_kind is JobKind.SIMILARITY_SEARCH and len(search_assemblies) > 1:
-                prompt_parts: list[str] = []
-                for origin, lane_assembled in search_assemblies.items():
-                    lane_dir = work_dir / origin
-                    lane_dir.mkdir(parents=True, exist_ok=True)
-                    lane_prompt = (
-                        f"===== SYSTEM PROMPT =====\n{lane_assembled.system_prompt}\n\n"
-                        f"===== USER MESSAGE =====\n{lane_assembled.user_message}"
-                    )
-                    (lane_dir / "final_prompt.txt").write_text(
-                        lane_prompt, encoding="utf-8"
-                    )
-                    prompt_parts.append(
-                        f"===== SEARCH LANE: {origin} =====\n{lane_prompt}"
-                    )
-                prompt_text = "\n\n".join(prompt_parts)
-            else:
-                prompt_text = (
-                    f"===== SYSTEM PROMPT =====\n{assembled.system_prompt}\n\n"
-                    f"===== USER MESSAGE =====\n{assembled.user_message}"
-                )
+            prompt_text = (
+                f"===== SYSTEM PROMPT =====\n{assembled.system_prompt}\n\n"
+                f"===== USER MESSAGE =====\n{assembled.user_message}"
+            )
             prompt_path.write_text(prompt_text, encoding="utf-8")
-            if job_kind is JobKind.SIMILARITY_SEARCH and len(search_assemblies) > 1:
-                lane_identity = "\n".join(
-                    f"{origin}:{lane_assembled.sha256}"
-                    for origin, lane_assembled in search_assemblies.items()
-                )
-                final_prompt_sha = hashlib.sha256(
-                    lane_identity.encode("utf-8")
-                ).hexdigest()
-                final_prompt_chars = sum(
-                    lane_assembled.total_chars
-                    for lane_assembled in search_assemblies.values()
-                )
-            else:
-                # 기존 분석·단일 검색 필드의 의미를 바꾸지 않는다.
-                final_prompt_sha = assembled.sha256
-                final_prompt_chars = assembled.total_chars
+            final_prompt_sha = assembled.sha256
+            final_prompt_chars = assembled.total_chars
 
             with session_scope() as session:
                 job = session.get(ExecutionJob, job_id)
@@ -1807,11 +684,7 @@ class JobRunner:
             # 검색 작업은 도구 호출이 곧 진행 상황이다. 화면이 "무엇을 검색하고
             # 어디를 열어 보는 중"인지 보여줄 수 있도록 관측한 호출을 단계로
             # 옮긴다. 보고서를 기다리는 동안 아무 일도 없어 보이면 안 된다.
-            # counted 는 이미 센 호출의 (레인, ID). 같은 호출이 시작·완료 두 번
-            # 오므로 이것이 없으면 두 번 세거나, 종류를 알기 전에 세게 된다.
-            # 레인을 키에 넣는 이유: 두 레인은 각자 별도의 CLI 프로세스이고 호출
-            # ID 는 프로세스 안에서만 고유하다. ID 만 쓰면 명세서 보조 검색의
-            # 첫 호출이 청구항 단독 검색의 같은 ID 와 겹쳐 통째로 누락된다.
+            # 호출의 시작·완료 이벤트를 같은 ID로 중복 집계하지 않는다.
             search_state = {
                 "searches": 0,
                 "fetches": 0,
@@ -1819,741 +692,202 @@ class JobRunner:
                 "counted": set(),
             }
 
-            def make_emit(search_origin: str | None = None):
-                async def emit(event_type: str, payload: dict) -> None:
-                    payload = dict(payload)
-                    if search_origin:
-                        payload["search_origin"] = search_origin
-                    await self._emit(job_id, event_type, payload)
-                    if job_kind is not JobKind.SIMILARITY_SEARCH:
-                        return
-                    if event_type not in ("tool_use", "tool_use_resolved"):
-                        return
-                    counts_as = _progress_counts_as(event_type, payload)
-                    name = str(payload.get("name") or "")
-                    if not counts_as and name not in (
-                        tool_policy.content_read_tools or ()
-                    ):
-                        return
-                    if not _progress_should_count(
-                        search_state["counted"],
-                        search_origin,
-                        str(payload.get("id") or ""),
-                    ):
-                        return
-                    summary = payload.get("input") or {}
-                    origin_label = (
-                        "청구항 단독"
-                        if search_origin == search_manifest.ORIGIN_CLAIM_ONLY
-                        else "명세서 확장"
-                    )
-                    if counts_as == PROGRESS_URL_LOOKUP:
-                        # 검색도 아니고 페이지 열람도 아니다. 성공 여부를 알 수
-                        # 없으므로 "시도" 로만 알린다.
-                        search_state["url_lookups"] = (
-                            search_state.get("url_lookups", 0) + 1
-                        )
-                        await self._emit(
-                            job_id,
-                            "search_progress",
-                            {
-                                "phase": "url_lookup",
-                                "search_origin": search_origin,
-                                "searches": search_state["searches"],
-                                "fetches": search_state["fetches"],
-                                "url_lookups": search_state["url_lookups"],
-                                "message": (
-                                    f"{origin_label} URL 조회 "
-                                    f"{search_state['url_lookups']}건째"
-                                    " (열람 성공 여부는 확인되지 않음): "
-                                    f"{str(summary.get('url', ''))[:120]}"
-                                ),
-                            },
-                        )
-                    elif counts_as == PROGRESS_SEARCH:
-                        search_state["searches"] += 1
-                        await self._emit(
-                            job_id,
-                            "search_progress",
-                            {
-                                "phase": "search",
-                                "search_origin": search_origin,
-                                "searches": search_state["searches"],
-                                "fetches": search_state["fetches"],
-                                "query": summary.get("query", ""),
-                                "message": (
-                                    f"{origin_label} 검색 "
-                                    f"{search_state['searches']}회째: "
-                                    f"{str(summary.get('query', ''))[:120]}"
-                                ),
-                            },
-                        )
-                    elif counts_as == PROGRESS_FETCH:
-                        search_state["fetches"] += 1
-                        await self._emit(
-                            job_id,
-                            "search_progress",
-                            {
-                                "phase": "fetch",
-                                "search_origin": search_origin,
-                                "searches": search_state["searches"],
-                                "fetches": search_state["fetches"],
-                                "url": summary.get("url", ""),
-                                "message": (
-                                    f"{origin_label} 원문 페이지 확인 "
-                                    f"{search_state['fetches']}건째: "
-                                    f"{str(summary.get('url', ''))[:120]}"
-                                ),
-                            },
-                        )
-                    elif name in (tool_policy.content_read_tools or ()):
-                        # 본문을 나눠 읽는 구간. 검색도 열람도 늘지 않으므로
-                        # 표시하지 않으면 화면이 멈춘 것처럼 보인다.
-                        search_state["reads"] += 1
-                        await self._emit(
-                            job_id,
-                            "search_progress",
-                            {
-                                "phase": "read",
-                                "search_origin": search_origin,
-                                "searches": search_state["searches"],
-                                "fetches": search_state["fetches"],
-                                "reads": search_state["reads"],
-                                "message": (
-                                    f"{origin_label} 페이지 본문 확인 "
-                                    f"{search_state['reads']}회째"
-                                ),
-                            },
-                        )
-
-                return emit
-
-            # --- 내부 검색 계획 ------------------------------------------
-            #
-            # 검색을 시작하기 전에 ARIA 가 자기 스키마로 만든다. 사용자 전략
-            # 프롬프트와 청구항이 입력이고, 이 스키마는 그 프롬프트에 노출되지
-            # 않는다. 계획한 것과 실제로 실행된 검색어는 감사 기록에서 서로 다른
-            # 자리에 남는다(plan vs observed).
-            plan: search_plan.SearchPlan | None = None
-            if job_kind is JobKind.SIMILARITY_SEARCH:
-                plan = search_plan.build(
-                    claim_text=claim_text,
-                    strategy_body=master_prompt,
-                    strategy_prompt_id=prompt_id,
-                    strategy_prompt_sha256=search_prompt_sha,
-                    search_focus=search_focus,
-                    spec_provided=spec_document is not None,
-                )
-                await self._emit(
-                    job_id,
-                    "search_plan_ready",
-                    {
-                        "terms": len(plan.terms),
-                        "queries": len(plan.queries),
-                        "components": len(plan.components),
-                        "classifications": list(plan.classifications),
-                    },
-                )
-
-            search_lane_outcomes: list[tuple[str, ExecutionOutcome]] = []
-            search_lane_records: list[dict] = []
-            lane_verdicts: list[Verdict] = []
-            epo_section: dict = search_manifest.empty_epo_section()
-            # 살아 있는 EPO 레인 결과. 직렬화된 기록에는 본문이 없으므로,
-            # 공식 검증 단계가 같은 자료를 다시 받지 않으려면 이것이 필요하다.
-            epo_runs: list = []
-
-            if job_kind is JobKind.SIMILARITY_SEARCH:
-                for origin, lane_assembled in search_assemblies.items():
-                    lane_dir = work_dir / origin
-                    lane_dir.mkdir(parents=True, exist_ok=True)
-                    if await self._reject_if_over_byte_budget(
-                        job_id,
-                        provider,
-                        lane_assembled.system_prompt,
-                        lane_assembled.user_message,
-                    ):
-                        return
-                    lane_policy = replace(
-                        tool_policy,
-                        max_tool_calls=lane_budgets[origin],
-                        max_content_read_calls=content_lane_budgets.get(origin, 0),
-                        max_search_calls=search_call_lane_budgets.get(origin, 0),
-                        max_url_lookup_calls=url_lookup_lane_budgets.get(origin, 0),
-                    )
-                    lane_request = ExecutionRequest(
-                        job_id=job_id,
-                        work_dir=lane_dir,
-                        system_prompt=lane_assembled.system_prompt,
-                        user_message=lane_assembled.user_message,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        timeout_seconds=timeout,
-                        tool_policy=lane_policy,
-                    )
-                    if job_id in self._cancel_requested:
-                        lane_outcome = ExecutionOutcome(
-                            cancelled=True,
-                            terminal_reason="cancelled",
-                            tool_policy=lane_policy,
-                        )
-                        lane_verdict = evaluate(
-                            lane_outcome,
-                            attachments,
-                            fail_on_tool_use=fail_on_tool_use,
-                        )
-                        search_lane_outcomes.append((origin, lane_outcome))
-                        lane_verdicts.append(lane_verdict)
-                        search_lane_records.append(
-                            {
-                                "id": origin,
-                                "spec_in_context": (
-                                    origin == search_manifest.ORIGIN_SPEC_ASSISTED
-                                ),
-                                "prompt_sha256": lane_assembled.sha256,
-                                "max_tool_calls": lane_budgets[origin],
-                                "max_content_read_calls": (
-                                    content_lane_budgets.get(origin, 0)
-                                ),
-                                "started_at": _utcnow().isoformat(),
-                                "completed_at": _utcnow().isoformat(),
-                                "status": JobStatus.CANCELLED.value,
-                                "error_code": ErrorCode.CANCELLED.value,
-                            }
-                        )
-                        break
-                    label = (
-                        "미대응 구성 조합→개별 검색 중"
-                        if search_focus
-                        else (
-                            "청구항 단독 검색 중"
-                            if origin == search_manifest.ORIGIN_CLAIM_ONLY
-                            else "명세서 보조 확장 검색 중"
-                        )
+            async def emit(event_type: str, payload: dict) -> None:
+                payload = dict(payload)
+                await self._emit(job_id, event_type, payload)
+                if job_kind is not JobKind.SIMILARITY_SEARCH:
+                    return
+                if event_type not in ("tool_use", "tool_use_resolved"):
+                    return
+                counts_as = _progress_counts_as(event_type, payload)
+                name = str(payload.get("name") or "")
+                if not counts_as and name not in (
+                    tool_policy.content_read_tools or ()
+                ):
+                    return
+                if not _progress_should_count(
+                    search_state["counted"],
+                    str(payload.get("id") or ""),
+                ):
+                    return
+                summary = payload.get("input") or {}
+                origin_label = "에이전트"
+                if counts_as == PROGRESS_URL_LOOKUP:
+                    # 검색도 아니고 페이지 열람도 아니다. 성공 여부를 알 수
+                    # 없으므로 "시도" 로만 알린다.
+                    search_state["url_lookups"] = (
+                        search_state.get("url_lookups", 0) + 1
                     )
                     await self._emit(
                         job_id,
-                        "stage",
+                        "search_progress",
                         {
-                            "stage": "executing",
-                            "search_origin": origin,
-                            "message": label,
+                            "phase": "url_lookup",
+                            "searches": search_state["searches"],
+                            "fetches": search_state["fetches"],
+                            "url_lookups": search_state["url_lookups"],
+                            "message": (
+                                f"{origin_label} URL 조회 "
+                                f"{search_state['url_lookups']}건째"
+                                " (열람 성공 여부는 확인되지 않음): "
+                                f"{str(summary.get('url', ''))[:120]}"
+                            ),
                         },
                     )
-                    lane_started = _utcnow()
-                    lane_outcome = await provider.execute(
-                        lane_request, make_emit(origin)
-                    )
-                    lane_completed = _utcnow()
-                    lane_verdict = evaluate(
-                        lane_outcome, attachments, fail_on_tool_use=fail_on_tool_use
-                    )
-                    search_lane_outcomes.append((origin, lane_outcome))
-                    lane_verdicts.append(lane_verdict)
-                    search_lane_records.append(
+                elif counts_as == PROGRESS_SEARCH:
+                    search_state["searches"] += 1
+                    await self._emit(
+                        job_id,
+                        "search_progress",
                         {
-                            "id": origin,
-                            "spec_in_context": (
-                                origin == search_manifest.ORIGIN_SPEC_ASSISTED
+                            "phase": "search",
+                            "searches": search_state["searches"],
+                            "fetches": search_state["fetches"],
+                            "query": summary.get("query", ""),
+                            "message": (
+                                f"{origin_label} 검색 "
+                                f"{search_state['searches']}회째: "
+                                f"{str(summary.get('query', ''))[:120]}"
                             ),
-                            "prompt_sha256": lane_assembled.sha256,
-                            "max_tool_calls": lane_budgets[origin],
-                            "max_content_read_calls": (
-                                content_lane_budgets.get(origin, 0)
-                            ),
-                            "started_at": lane_started.isoformat(),
-                            "completed_at": lane_completed.isoformat(),
-                            "status": getattr(
-                                lane_verdict.status, "value", str(lane_verdict.status)
-                            ),
-                            "error_code": (
-                                getattr(
-                                    lane_verdict.error_code,
-                                    "value",
-                                    str(lane_verdict.error_code),
-                                )
-                                if lane_verdict.error_code is not None
-                                else None
-                            ),
-                        }
+                        },
                     )
-                    # 기본 검색이 실패했으면 명세서 검색으로 가려서 성공시키지
-                    # 않는다. 기본 후보 집합이 없는 결과는 합집합이 아니다.
-                    if lane_verdict.status != JobStatus.SUCCEEDED:
-                        break
-
-                # --- EPO 채널 ------------------------------------------
-                #
-                # 웹 레인이 끝난 **뒤에** 돈다. 순서를 이렇게 두면 EPO 가 어떤
-                # 식으로 실패해도 웹 결과는 이미 확정되어 있다. 두 채널은
-                # 논리적으로 격리되어야 하므로 EPO 는 웹의 후보도 검색어도
-                # 보지 않고, 같은 청구항만 입력으로 받는다.
-                epo_section, epo_runs = await self._run_epo_channel(
-                    job_id=job_id,
-                    values=values,
-                    policy=channel_policy,
-                    provider=provider,
-                    model=model,
-                    timeout=timeout,
-                    work_dir=work_dir,
-                    claim_text=claim_text,
-                    spec_text=getattr(assembly, "spec_text", ""),
-                    emit=self._emit,
-                )
-
-                outcome = _merge_search_outcomes(search_lane_outcomes, tool_policy)
-                failed_lane = next(
-                    (
-                        lane_verdict
-                        for lane_verdict in lane_verdicts
-                        if lane_verdict.status != JobStatus.SUCCEEDED
-                    ),
-                    None,
-                )
-                verdict = failed_lane or evaluate(
-                    outcome, attachments, fail_on_tool_use=fail_on_tool_use
-                )
-                # EPO 는 보조 채널이라 서버·인증·쿼터 실패가 웹 결과를
-                # 무효화하지는 않는다. 하지만 사용자가 누른 **작업 취소**는
-                # 별개다. EPO 레인이 취소를 확인한 뒤에도 웹의 성공 verdict 를
-                # 그대로 두면, 사용자가 멈춘 작업이 마지막에 SUCCEEDED 로
-                # 덮어써진다.
-                #
-                # 여기서 바로 return 하지 않는 이유는 이미 끝난 웹 결과와 EPO
-                # 부분 실행 기록을 아래 manifest 에 보존하기 위해서다. 최종 상태만
-                # CANCELLED 로 확정하고 정상적인 저장 경로를 끝까지 지난다.
-                if job_id in self._cancel_requested:
-                    verdict = Verdict(
-                        JobStatus.CANCELLED,
-                        ErrorCode.CANCELLED,
-                        list(verdict.errors),
+                elif counts_as == PROGRESS_FETCH:
+                    search_state["fetches"] += 1
+                    await self._emit(
+                        job_id,
+                        "search_progress",
+                        {
+                            "phase": "fetch",
+                            "searches": search_state["searches"],
+                            "fetches": search_state["fetches"],
+                            "url": summary.get("url", ""),
+                            "message": (
+                                f"{origin_label} 원문 페이지 확인 "
+                                f"{search_state['fetches']}건째: "
+                                f"{str(summary.get('url', ''))[:120]}"
+                            ),
+                        },
                     )
-            else:
-                if await self._reject_if_over_byte_budget(
-                    job_id,
-                    provider,
-                    assembled.system_prompt,
-                    assembled.user_message,
-                ):
-                    return
-                request = ExecutionRequest(
-                    job_id=job_id,
-                    work_dir=work_dir,
-                    system_prompt=assembled.system_prompt,
-                    user_message=assembled.user_message,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    timeout_seconds=timeout,
-                    tool_policy=tool_policy,
-                )
-                await self._emit(
-                    job_id,
-                    "stage",
-                    {"stage": "executing", "message": "Provider 실행 중"},
-                )
-                outcome = await provider.execute(request, make_emit())
-                verdict = evaluate(
-                    outcome, attachments, fail_on_tool_use=fail_on_tool_use
-                )
+                elif name in (tool_policy.content_read_tools or ()):
+                    # 본문을 나눠 읽는 구간. 검색도 열람도 늘지 않으므로
+                    # 표시하지 않으면 화면이 멈춘 것처럼 보인다.
+                    search_state["reads"] += 1
+                    await self._emit(
+                        job_id,
+                        "search_progress",
+                        {
+                            "phase": "read",
+                            "searches": search_state["searches"],
+                            "fetches": search_state["fetches"],
+                            "reads": search_state["reads"],
+                            "message": (
+                                f"{origin_label} 페이지 본문 확인 "
+                                f"{search_state['reads']}회째"
+                            ),
+                        },
+                    )
 
+
+            if await self._reject_if_over_byte_budget(
+                job_id, provider, assembled.system_prompt, assembled.user_message
+            ):
+                return
+            mcp_servers = {}
+            tool_availability = {}
+            if job_kind is JobKind.SIMILARITY_SEARCH:
+                tool_availability = search_channels.availability(values, provider_id)
+                if provider_id in ("claude", "codex"):
+                    mcp_servers = _search_mcp_servers(work_dir, search_cutoff, search_budget)
+                available_names = search_channels.available_mcp_names(tool_availability) if mcp_servers else ()
+                tool_policy = replace(
+                    tool_policy, mcp_tools=tuple(available_names),
+                    required_tools=(),
+                    max_search_calls=0, max_url_lookup_calls=0,
+                    max_content_read_calls=0,
+                )
+            request = ExecutionRequest(
+                job_id=job_id, work_dir=work_dir,
+                system_prompt=assembled.system_prompt,
+                user_message=assembled.user_message, model=model,
+                reasoning_effort=reasoning_effort, timeout_seconds=timeout,
+                tool_policy=tool_policy, mcp_servers=mcp_servers,
+            )
             await self._emit(
-                job_id, "stage", {"stage": "verifying", "message": "결과 검증 중"}
+                job_id, "stage", {"stage": "executing", "message": "Provider 실행 중"}
             )
-
-            # --- 문헌 매핑 -------------------------------------------------
-            # 프롬프트가 선언했을 때만 기대한다. 읽지 못해도 실행은 실패시키지
-            # 않는다. 매핑은 후속 기능이지 분석 요건이 아니다. 실패한 사유는
-            # citation_mapping_error 에 남겨서, 후속 버튼이 왜 잠겼는지 화면이
-            # 설명할 수 있게 한다.
-            # --- 검색 감사 기록과 보고서 생성 ------------------------------
-            # 모델이 쓴 산문을 사용자 보고서로 쓰지 않는다. 그 안에서 WebFetch
-            # 요약이 원문 인용처럼 표시돼도 ARIA 는 알아볼 수 없기 때문이다.
-            # 대신 검증된 구조화 필드에서 보고서를 직접 만든다. 그래서 감사
-            # 블록은 이 작업의 선택 기능이 아니라 필수 출력이다.
-            #
-            # 모델의 원문 출력은 버리지 않는다. model_report.md 와 stdout.log 에
-            # 그대로 남으므로 감사와 재검토가 가능하다.
-            manifest: dict | None = None
-            manifest_error: str | None = None
+            outcome = await provider.execute(request, emit)
+            verdict = evaluate(outcome, attachments, fail_on_tool_use=fail_on_tool_use)
+            if job_id in self._cancel_requested:
+                verdict = Verdict(JobStatus.CANCELLED, ErrorCode.CANCELLED, list(verdict.errors))
+            await self._emit(
+                job_id, "stage", {"stage": "verifying", "message": "식별자·근거 사실 검증 중"}
+            )
+            manifest = None
+            manifest_error = None
             model_narrative = ""
-            verification_narrative = ""
-            verification_outcome: ExecutionOutcome | None = None
-            verification_section: dict = search_verification.section(
-                attempted=False, reason="유사문헌 검색 작업이 아닙니다."
-            )
             if job_kind is JobKind.SIMILARITY_SEARCH:
                 model_narrative = outcome.result_text
-                reported: dict | None = None
-                notes: list[str] = []
-                lane_observed_sections: list[dict] = []
-                lane_reports: list[dict | None] = []
-                manifest_errors: list[str] = []
-                for origin, lane_outcome in search_lane_outcomes:
-                    # 후보의 URL 은 같은 독립 실행에서 성공한 WebFetch 와만
-                    # 대조한다. 다른 경로가 연 URL 로 증거 등급을 올리지 않는다.
-                    lane_observed = search_manifest.observed(
-                        lane_outcome.tool_calls,
-                        lane_outcome.tool_uses,
-                        search_origin=origin,
-                    )
-                    lane_observed_sections.append(lane_observed)
-                    try:
-                        lane_report, lane_notes = search_manifest.parse(
-                            lane_outcome.result_text,
-                            lane_observed,
-                            spec_provided=(
-                                origin == search_manifest.ORIGIN_SPEC_ASSISTED
-                            ),
-                            search_origin=origin,
+                reported = None
+                notes = []
+                journal = search_manifest.read_tool_journal(work_dir)
+                observed = search_manifest.observed(outcome.tool_calls, outcome.tool_uses)
+                try:
+                    if verdict.status != JobStatus.SUCCEEDED:
+                        raise search_manifest.SearchLogError(
+                            "실행이 정상 완료되지 않아 최종 후보로 확정하지 않았습니다."
                         )
-                        lane_reports.append(lane_report)
-                        label = (
-                            "청구항 단독"
-                            if origin == search_manifest.ORIGIN_CLAIM_ONLY
-                            else "명세서 확장"
-                        )
-                        notes.extend(f"[{label}] {note}" for note in lane_notes)
-                    except search_manifest.SearchLogError as exc:
-                        lane_reports.append(None)
-                        manifest_errors.append(f"{origin}: {exc}")
-
-                missing_lanes = [
-                    origin
-                    for origin in search_assemblies
-                    if origin not in {row["id"] for row in search_lane_records}
-                ]
-                if missing_lanes:
-                    manifest_errors.append(
-                        "실행되지 않은 검색 경로: " + ", ".join(missing_lanes)
-                    )
-
-                observed = search_manifest.merge_observed(*lane_observed_sections)
-                if not manifest_errors and all(
-                    lane_report is not None for lane_report in lane_reports
-                ):
-                    # 순서는 항상 claim_only, spec_assisted 이다. 병합 함수가
-                    # 기본 검색의 분류를 유지하고 후보 집합만 확장한다.
-                    reported = search_manifest.merge_reported(*lane_reports)
-                else:
-                    manifest_error = " / ".join(manifest_errors)
-                    # 권한 거부로 빈 응답이 온 실행에서는 "감사 블록이 없다"가
-                    # 별개의 원인이 아니라 그 거부의 후속 증상이다. 둘을 나란히
-                    # 적으면 사용자는 고칠 곳을 두 군데로 읽는데, 실제로 고칠
-                    # 곳은 허용 목록 하나뿐이다. 원래 파서 메시지는 버리지 않고
-                    # 정규화 메모로 내린다 — 증상도 기록이지만 원인은 아니다.
-                    if verdict.error_code is ErrorCode.SEARCH_PERMISSION_DENIED:
-                        notes.append(
-                            f"웹 채널 감사 블록 파싱 결과: {manifest_error}"
-                        )
-                        manifest_error = (
-                            "웹페이지 읽기 권한이 거부되어 이 채널이 빈 응답으로 "
-                            "끝났습니다. 감사 블록이 없는 것은 그 후속 증상입니다."
-                        )
-
-                # --- EPO 독립 검색 후보를 주 대응표에 연결 ------------------
-                #
-                # 여기서 합치는 것은 **후보 목록**뿐이다. epo.lanes 원본은 손대지
-                # 않고 검색 감사용으로 남는다. 같은 공개번호를 두 채널이 찾았으면
-                # 후보를 하나로 두고 발견 경로를 둘 다 남긴다.
-                #
-                # 이 시점에는 어떤 EPO 후보도 A/B 를 받지 않는다. 등급은 바로
-                # 아래 공식 검증이 보존 응답에 구성 대응을 대조한 뒤에만 붙는다.
-                #
-                # 웹 보고를 읽지 못했어도(reported is None) 완료된 EPO 검색이
-                # 있으면 빈 골격을 만들어 EPO 후보만으로 이어 간다. 두 채널은
-                # 격리되어 있고, 한쪽의 출력 형식 오류가 다른 쪽이 실제로 받아
-                # 보존한 공식 응답을 무효로 만들지 않는다. 웹의 실패 상태는
-                # manifest_error 와 reported.web_report_error 양쪽에 남는다.
-                web_report_missing = reported is None
-                epo_notes: list[str] = []
-                reported, epo_notes = search_manifest.merge_epo_discoveries(
-                    reported,
-                    epo_section,
-                    web_report_error=manifest_error or "",
-                )
-                notes.extend(epo_notes)
-
-                # --- ARIA 서지 검색 -----------------------------------------
-                #
-                # 웹 채널이 논문을 식별하지 못하는 실행에서 유일하게 제목과 DOI 가
-                # 붙은 후보를 만드는 경로다. 모델이 실제로 쓴 검색어를 그대로
-                # 가져가므로 새 검색 전략을 만들지 않는다.
-                literature_section, literature_backend = (
-                    await self._run_literature_channel(
-                        job_id=job_id,
-                        values=values,
-                        policy=channel_policy,
-                        observed=observed,
-                        claim_text=claim_text,
-                        plan=plan,
-                    )
-                )
-                reported, literature_notes = (
-                    search_manifest.merge_literature_discoveries(
-                        reported,
-                        literature_section,
-                        web_report_error=manifest_error or "",
-                    )
-                )
-                notes.extend(literature_notes)
-                epo_only_salvage = web_report_missing and reported is not None
-
-                # --- 논문 후보의 공식 서지 확보 -----------------------------
-                #
-                # EPO 조회와 **다른 예산**을 쓴다. 한 예산에 섞으면 특허 후보가
-                # 많은 실행에서 논문 조회가 조용히 0건이 되고, 그 0건이 "논문이
-                # 없다"로 읽힌다.
-                literature_bundles: dict = {}
-                literature_dropped: list = []
-                literature_order: list = []
-                literature_found: list = []
-                if literature_backend is not None and reported is not None:
-                    # 확보 목표와 시도 상한은 다른 축이다. 목표는 "대조 가능한
-                    # 문헌을 몇 건 확보할 것인가"이고, shortlist 상한은 그것을
-                    # 채우려고 **최대 몇 명까지 불러 볼 수 있는가**이다. 초록을
-                    # 등록하지 않는 발행사가 흔해서 둘을 같은 수로 두면 목표가
-                    # 실패 건수만큼 조용히 깎인다.
-                    literature_goal = _positive(
-                        values.get("literature_verification_targets"), 8
-                    )
-                    literature_shortlist = _positive(
-                        values.get("literature_shortlist_limit"), 10
-                    )
-                    literature_found = search_verification.literature_targets(
-                        reported,
-                        limit=literature_goal,
-                        shortlist_limit=literature_shortlist,
-                        dropped=literature_dropped,
-                        order=literature_order,
-                    )
-                    # 후보 하나에 초록·서지 두 번이 상한이다. shortlist 가 상한을
-                    # 함께 묶으므로 이월이 예산을 늘리지 않는다.
-                    literature_fetch_budget = 2 * len(literature_found)
-                    if literature_found:
-                        reserve = sum(
-                            1
-                            for target in literature_found
-                            if target.selection_role
-                            == search_verification.ROLE_BACKFILL
-                        )
-                        await self._emit(
-                            job_id,
-                            "stage",
-                            {
-                                "stage": "verifying",
-                                "message": (
-                                    f"논문 후보 {len(literature_found) - reserve}건의 "
-                                    "공식 초록을 Crossref·Europe PMC 에서 확인하는 중"
-                                    + (
-                                        f" (조회 실패 시 예비 {reserve}건으로 이월)"
-                                        if reserve
-                                        else ""
-                                    )
-                                ),
-                            },
-                        )
-                        try:
-                            literature_bundles = await asyncio.to_thread(
-                                search_verification.fetch_literature,
-                                literature_found,
-                                literature_backend,
-                                max_fetches=literature_fetch_budget,
-                                verification_targets=literature_goal,
-                                is_cancelled=(
-                                    lambda: job_id in self._cancel_requested
-                                ),
-                            )
-                        except Exception as exc:
-                            # 서지 확보 실패로 EPO 검증까지 잃지 않는다.
-                            notes.append(
-                                "논문 공식 서지 확보 단계 오류: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                    literature_summary = (
-                        search_verification.literature_verification_summary(
-                            literature_found,
-                            literature_bundles,
-                            verification_targets=literature_goal,
-                            shortlist_limit=literature_shortlist,
-                            max_fetches=literature_fetch_budget,
-                            order=literature_order,
-                        )
-                    )
-                    literature_section["verification"] = {
-                        **literature_summary,
-                        # 옛 기록을 읽는 코드를 위해 남긴다. 다만 이 값이 "고른
-                        # 수"인지 "부른 수"인지 모호했던 것이 이번 문제의 절반이라,
-                        # 새 코드는 selected/attempted 를 쓴다.
-                        "target_count": literature_summary["selected"],
-                        "excluded_candidates": literature_dropped,
-                        "selection_order": literature_order,
-                    }
-                    literature_section["usage"] = literature_backend.usage()
-
-                # 웹 게이트를 느슨하게 하지 않고, 후보 번호로 공식 문헌을 확보한
-                # 뒤 도구 없는 별도 턴에서 분류한다. Provider 를 가리지 않는다 —
-                # Codex 는 이 경로가 유일한 산출 통로이고, agy·Claude 는 페이지를
-                # 열었다는 관측을 문장 대조로 한 단계 올리는 경로다. 앞선 EPO 검색
-                # 레인이 사용한 상세 조회량을 빼서 작업 전체 상한을 공유한다.
-                configured_fetches = _positive(
-                    values.get("epo_max_detail_fetches"),
-                    int(SETTING_DEFAULTS["epo_max_detail_fetches"]),
-                )
-                epo_fetches = int(
-                    ((epo_section or {}).get("usage") or {}).get(
-                        "detail_fetches", 0
-                    )
-                    or 0
-                )
-                remaining_fetches = max(0, configured_fetches - epo_fetches)
-                (
-                    reported,
-                    verification_section,
-                    verification_outcome,
-                    verification_notes,
-                ) = await self._run_official_verification(
-                    job_id=job_id,
-                    values=values,
-                    provider=provider,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    timeout=timeout,
-                    work_dir=work_dir,
-                    claim_text=claim_text,
-                    reported=reported,
-                    fetch_budget=remaining_fetches,
-                    epo_runs=epo_runs,
-                    literature_bundles=literature_bundles,
-                    literature_dropped=literature_dropped,
-                )
-                notes.extend(verification_notes)
-                if verification_outcome is not None:
-                    verification_narrative = verification_outcome.result_text
-                    merged_usage = dict(outcome.usage or {})
-                    merged_usage["official_classification"] = dict(
-                        verification_outcome.usage or {}
-                    )
-                    outcome.usage = merged_usage
-                if job_id in self._cancel_requested:
-                    verdict = Verdict(
-                        JobStatus.CANCELLED,
-                        ErrorCode.CANCELLED,
-                        list(verdict.errors),
-                    )
-                # --- Kiwee 채널 ---------------------------------------
-                #
-                # 접속·인증이 구현되지 않았다. 검색을 흉내 내지 않고, 네트워크도
-                # 열지 않고, 기록에 사유만 남긴다. 이 줄이 없으면 "Kiwee 를 봤나"에
-                # 기록이 답할 수 없다.
-                kiwee_section = self._kiwee_channel_record(channel_policy, values)
-
+                    if not search_manifest.has_retrieval_attempt(outcome.tool_calls, outcome.tool_uses, journal):
+                        verdict = Verdict(JobStatus.FAILED, ErrorCode.SEARCH_NOT_PERFORMED, ["실제 검색 도구 호출이 없습니다."])
+                        raise search_manifest.SearchLogError("실제 검색 도구 호출이 없습니다.")
+                    reported, notes = search_manifest.parse(outcome.result_text, observed)
+                    reported = search_verification.verify(reported, observed, journal)
+                except search_manifest.SearchLogError as exc:
+                    manifest_error = str(exc)
+                date_filter = search_dates.filter_candidates(reported, search_cutoff)
                 manifest = search_manifest.build(
-                    claim_text=claim_text,
-                    # 이 실행이 실제로 고른 검색 전략 프롬프트. 예약 상수를
-                    # 적으면 어떤 전략으로 돌았는지가 기록에서 사라진다.
-                    prompt_id=prompt_id or search_prompt.SEARCH_PROMPT_ID,
-                    prompt_name=prompt_name,
-                    prompt_kind=prompt_store.KIND_SEARCH,
-                    prompt_template_mode=search_prompt_mode,
-                    strategy_boundary_neutralized=strategy_boundary_neutralized,
+                    claim_text=claim_text, provider=provider_id, model=model,
+                    prompt_id=prompt_id, prompt_name=prompt_name,
                     prompt_sha256=search_prompt_sha,
                     runtime_context_sha256=search_runtime_context_sha,
-                    reasoning_effort=reasoning_effort,
+                    spec_document=spec_document, search_focus=search_focus,
+                    started_at=started.isoformat(), completed_at=_utcnow().isoformat(),
+                    tool_calls=outcome.tool_calls, tool_uses=outcome.tool_uses,
+                    observed_section=observed, tool_journal=journal,
+                    tool_availability=tool_availability,
+                    reported=reported, notes=notes, error=manifest_error,
+                    date_filter=date_filter, max_tool_calls_total=search_budget,
+                    timeout_seconds=timeout, usage=outcome.usage, search_depth=search_depth,
+                    raw_output=model_narrative,
                     claim_boundary_neutralized=claim_boundary_neutralized,
-                    spec_document=spec_document,
                     spec_boundary_neutralized=spec_boundary_neutralized,
-                    search_focus=search_focus,
                     focus_boundary_neutralized=focus_boundary_neutralized,
-                    started_at=started.isoformat(),
-                    completed_at=_utcnow().isoformat(),
-                    tool_calls=outcome.tool_calls,
-                    tool_uses=outcome.tool_uses,
-                    tool_policy_name=tool_policy.name,
-                    allowed_tools=tool_policy.allowed_tools,
-                    advertised_tools_enforced=(
-                        tool_policy.enforce_advertised_allowlist
-                    ),
-                    observed_section=observed,
-                    search_strategy=(
-                        "combined_then_individual"
-                        if search_focus
-                        else (
-                            "isolated_union"
-                            if spec_document is not None
-                            else search_manifest.ORIGIN_CLAIM_ONLY
-                        )
-                    ),
-                    search_lanes=search_lane_records,
-                    lanes=[
-                        search_manifest.web_lane_record(record)
-                        for record in search_lane_records
-                    ]
-                    + list((epo_section or {}).get("lanes") or []),
-                    epo=epo_section,
-                    literature=literature_section,
-                    kiwee=kiwee_section,
-                    verification=verification_section,
-                    channel_policy=channel_policy.as_dict(),
-                    plan=plan.as_dict() if plan is not None else None,
-                    max_tool_calls_total=search_budget,
-                    lane_budgets=lane_budgets,
-                    max_content_reads_total=content_budget or None,
-                    content_read_lane_budgets=content_lane_budgets,
-                    reported=reported,
-                    notes=notes,
-                    error=manifest_error,
+                    template_mode=search_prompt_mode,
+                    strategy_boundary_neutralized=strategy_boundary_neutralized,
+                    tool_policy_name=tool_policy.name, allowed_tools=tool_policy.allowed_tools,
+                    mcp_tools=tool_policy.mcp_tools,
+                    advertised_tools_enforced=tool_policy.enforce_advertised_allowlist,
                 )
                 if reported is None:
-                    # 검증되지 않은 산문을 대신 내보내지 않는다. 실행 자체는
-                    # 끝났지만 사용자에게 줄 수 있는 보고서가 없다.
                     outcome.result_text = ""
                     if verdict.status == JobStatus.SUCCEEDED:
                         verdict = Verdict(
-                            JobStatus.FAILED,
-                            ErrorCode.INVALID_OUTPUT,
-                            [
-                                *verdict.errors,
-                                f"검색 감사 블록을 읽지 못했습니다: {manifest_error} "
-                                "검증되지 않은 모델 출력을 보고서로 내보내지 "
-                                "않습니다. 모델 원문은 실행 기록에 있습니다.",
-                            ],
+                            JobStatus.FAILED, ErrorCode.INVALID_OUTPUT,
+                            [*verdict.errors, manifest_error or "최종 JSON이 없습니다."],
                         )
                 else:
                     outcome.result_text = search_report.render(manifest)
-                    if epo_only_salvage:
-                        # 보고서는 나왔지만 웹 채널은 실패했다. 성공으로만 적으면
-                        # 그 실패가 기록에서 사라진다 — 이 실행의 후보에는 웹
-                        # 검색이 찾은 문헌이 하나도 없다는 사실이 남아야 한다.
-                        #
-                        # 다만 권한 거부가 원인일 때는 그 사유를 원인으로 다시
-                        # 적지 않는다. 이미 verdict.errors 의 첫 줄이 그것을
-                        # 말하고 있고, 여기서 또 적으면 원인 하나가 오류 두 개로
-                        # 보인다. 이 줄이 더할 것은 "그래서 어떻게 됐는가" 뿐이다.
-                        if verdict.error_code is ErrorCode.SEARCH_PERMISSION_DENIED:
-                            salvage = (
-                                "그 결과 웹 채널은 후보를 하나도 내지 못했습니다. "
-                                "완료된 EPO 독립 검색이 있어 EPO 후보만으로 "
-                                "보고서를 만들었습니다."
-                            )
-                        else:
-                            salvage = (
-                                "웹 채널의 검색 감사 블록을 읽지 못했습니다: "
-                                f"{manifest_error} 완료된 EPO 독립 검색이 있어 "
-                                "EPO 후보만으로 보고서를 만들었습니다."
-                            )
-                        verdict = Verdict(
-                            verdict.status,
-                            verdict.error_code,
-                            [*verdict.errors, salvage],
-                        )
-
-            # 2차 분류까지 취소 대상으로 남겨 둔다. 이보다 일찍 제거하면 사용자가
-            # 검증 중 취소해도 실행 중인 Provider 프로세스에 cancel이 전달되지 않는다.
             self._providers.pop(job_id, None)
+
+            # 두 블록의 출력 규칙은 ARIA 가 분석 프롬프트 뒤에 직접 붙인다
+            # (analysis_protocol). 그러니 읽는 쪽도 프롬프트의 capabilities 선언에
+            # 매달리지 않는다 — 사용자가 프롬프트를 자기 것으로 바꿔도 선언을 잊었다는
+            # 이유로 유사도 표와 번호 유지가 조용히 꺼지면 안 된다. 검색 실행은
+            # 규칙을 받지 않으므로 여기서도 제외한다.
+            expects_blocks = job_kind is not JobKind.SIMILARITY_SEARCH
 
             component_result: dict | None = None
             component_error: str | None = None
-            if analysis_manifest.CAPABILITY in capabilities:
+            if expects_blocks:
                 try:
                     component_result = analysis_manifest.parse(outcome.result_text)
                 except analysis_manifest.ComponentAnalysisError as exc:
@@ -2562,7 +896,7 @@ class JobRunner:
 
             mapping: dict | None = None
             mapping_error: str | None = None
-            if citation_mapping.CAPABILITY in capabilities:
+            if expects_blocks:
                 try:
                     mapping = citation_mapping.parse(
                         outcome.result_text, assembled.aliases
@@ -2600,39 +934,6 @@ class JobRunner:
                     encoding="utf-8",
                 )
                 artifacts.append(("model_report", narrative_path))
-
-            if verification_narrative.strip():
-                verification_dir = work_dir / "official-verification"
-                verification_dir.mkdir(parents=True, exist_ok=True)
-                verification_path = verification_dir / "model_report.md"
-                verification_path.write_text(
-                    "<!-- ARIA: 공식 문헌을 입력으로 한 2차 AI 분류 원문입니다. "
-                    "ARIA가 대조해 채택한 행은 search_manifest.json에 따로 "
-                    "표시됩니다. -->\n\n"
-                    + verification_narrative,
-                    encoding="utf-8",
-                )
-                artifacts.append(("verification_report", verification_path))
-
-            verification_prompt = work_dir / "official-verification" / "final_prompt.txt"
-            if verification_prompt.exists():
-                artifacts.append(("verification_prompt", verification_prompt))
-
-            if verification_outcome is not None and keep_raw:
-                verification_dir = work_dir / "official-verification"
-                verification_dir.mkdir(parents=True, exist_ok=True)
-                if verification_outcome.raw_stdout:
-                    verification_stdout = verification_dir / "stdout.log"
-                    verification_stdout.write_text(
-                        verification_outcome.raw_stdout, encoding="utf-8"
-                    )
-                    artifacts.append(("verification_stdout", verification_stdout))
-                if verification_outcome.raw_stderr:
-                    verification_stderr = verification_dir / "stderr.log"
-                    verification_stderr.write_text(
-                        verification_outcome.raw_stderr, encoding="utf-8"
-                    )
-                    artifacts.append(("verification_stderr", verification_stderr))
 
             if manifest is not None:
                 manifest_path = work_dir / "search_manifest.json"

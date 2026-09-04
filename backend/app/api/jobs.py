@@ -17,6 +17,7 @@ from .. import (
     citation_mapping,
     job_assembly,
     retrieval,
+    search_channels,
     settings_service,
 )
 from ..config import PATHS
@@ -28,6 +29,7 @@ from ..enums import (
     DeliveryPlan,
     JobKind,
     JobStatus,
+    OutputMode,
     RelationType,
 )
 from ..execution.bus import BUS
@@ -309,6 +311,8 @@ def _job_out(job: ExecutionJob) -> JobOut:
         search_manifest=job.search_manifest,
         search_manifest_error=job.search_manifest_error,
         search_focus=job.search_focus,
+        search_cutoff_date=job.search_cutoff_date or None,
+        search_depth=job.search_depth or "standard",
         delivery_plan=job.delivery_plan or DeliveryPlan.FULL_INLINE,
         delivery_manifest=job.delivery_manifest,
         retrieval_manifest=job.retrieval_manifest,
@@ -629,7 +633,6 @@ async def _create_search_job(
                 or analysis_manifest.DEFAULT_THRESHOLD
             ),
             # 사용자가 요청한 순서. 프롬프트와 감사 기록 모두 같은 값을 쓴다.
-            "strategy": "combined_then_individual",
             "components": selected,
         }
     elif not claim_text:
@@ -666,10 +669,14 @@ async def _create_search_job(
         prompt_id=prompt.id,
         prompt_name=prompt.name,
         prompt_snapshot=prompt.body,
-        output_mode=prompt.output_mode,
+        output_mode=OutputMode.MARKDOWN.value,
         claim_text=claim_text,
         prompt_capabilities=list(prompt.capabilities),
         search_focus=search_focus,
+        # 스키마가 이미 형식을 확인했다. 비어 있으면 None 이고, 그것이 "날짜
+        # 조건 없음"이다. 여기서 오늘 날짜를 채워 넣지 않는다.
+        search_cutoff_date=payload.search_cutoff_date or None,
+        search_depth=payload.search_depth,
         provider=provider_id,
         model=selected_model,
         status=JobStatus.QUEUED,
@@ -836,7 +843,7 @@ async def create_job(payload: JobCreate, session: Session = Depends(get_db)) -> 
         prompt_id=prompt.id,
         prompt_name=prompt.name,
         prompt_snapshot=prompt.body,
-        output_mode=prompt.output_mode,
+        output_mode=OutputMode.MARKDOWN.value,
         claim_text=payload.claim_text or "",
         source_job_id=source_job.id if source_job else None,
         source_job_label=source_label(source_job) if source_job else "",
@@ -1025,6 +1032,10 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             runtime_context_enabled=bool(values.get("runtime_context_enabled", True)),
             max_chars=max_chars,
             claim_text=payload.claim_text or "",
+            # 화면이 안내한 크기와 실제로 나가는 크기가 어긋나지 않게, 기준일
+            # 구간도 preflight 에서 같이 붙인다.
+            search_cutoff=payload.search_cutoff_date or "",
+            search_tool_status=search_channels.availability(values, provider_id),
             search_prompt_id=search_prompt_id or SEARCH_PROMPT_ID,
             followup_instruction=payload.followup_instruction or "",
             prior_claim_text=prior_claim_text,

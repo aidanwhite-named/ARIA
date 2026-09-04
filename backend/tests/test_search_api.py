@@ -88,8 +88,8 @@ def test_fabricated_excerpt_does_not_reach_the_user_report(client) -> None:
 
     assert FABRICATED_QUOTE not in report
     assert "3컬럼 12행" not in report
-    assert "원문에서 확인되지 않음" in report
-    assert "확인 필요" in report
+    assert "미검증" in report
+    assert "직접 인용 검증 불가" in report
     # 대응 설명 자체는 살아남아야 한다.
     assert "센서 모듈 110" in report
     assert "직렬 연결 구조가 같다" in report
@@ -137,7 +137,7 @@ def test_final_prompt_carries_claim_inside_the_boundary(client) -> None:
 
     # 검색 실행의 시스템 프롬프트는 신뢰 경계이자 증거 등급 계약이다.
     assert "WebFetch" in system
-    assert "직접 인용문처럼 표시하지" in system
+    assert "원문 확인이 불가능하면" in system
     # 첨부 분석용 런타임 컨텍스트가 섞이면 안 된다.
     assert "별도의 도구는 제공되지 않습니다" not in text
 
@@ -163,20 +163,16 @@ def test_stray_advertised_tool_fails_the_search(client) -> None:
     assert job["error_code"] == ErrorCode.TOOL_POLICY_VIOLATION
 
 
-def test_raw_original_claim_is_downgraded_end_to_end(client) -> None:
-    job = wait_for_job(client, _start(client, claim=f"{CLAIM}\nSEARCH_RAW_CLAIM")["id"])
+def test_raw_original_claim_is_not_certified_end_to_end(client):
+    job = wait_for_job(client, _start(client, claim=f"{CLAIM}\nSEARCH_RAW_ORIGINAL")["id"])
     assert job["status"] == JobStatus.SUCCEEDED
     candidate = job["search_manifest"]["reported"]["candidates"][0]
-    assert candidate["provenance"] == "webfetch_summary"
-    assert candidate["original_verified"] is False
-    assert candidate["verbatim_excerpt"] == "원문에서 확인되지 않음"
-    # 위치는 값이 있어도 보존하지 않는다.
-    assert candidate["source_location"] == "확인 필요"
-    assert candidate["mapping"][0]["source_location"] == "확인 필요"
-    assert candidate["mapping"][0]["verbatim_excerpt"] == "원문에서 확인되지 않음"
-    assert candidate["mapping"][0]["translation"] == "원문에서 확인되지 않음"
-    assert job["search_manifest"]["normalization_notes"]
-    assert "3컬럼 12행" not in (job["result_text"] or "")
+    assert candidate["evidence_level"] == "source_page_reviewed"
+    assert candidate["verbatim_excerpt"] == ""
+    assert candidate["source_location"] == ""
+    assert not candidate["mapping"][0]["quote_verified"]
+    assert candidate["mapping"][0]["translation"] == ""
+    assert "3컬럼 12행" not in job["result_text"]
 
 
 def test_reviewed_status_is_confirmed_against_observed_fetches(client) -> None:
@@ -185,70 +181,32 @@ def test_reviewed_status_is_confirmed_against_observed_fetches(client) -> None:
     candidate = job["search_manifest"]["reported"]["candidates"][0]
     # 대소문자와 끝 슬래시가 달라도 같은 페이지로 본다.
     assert candidate["url"] == "https://PATENTS.example.com/AB1234/"
-    assert candidate["page_fetch_succeeded"] is True
-    assert candidate["evidence_status"] == "source_page_reviewed"
+    assert candidate["evidence_level"] == "source_page_reviewed"
+    assert "identifier_unverified" in candidate["verification_issues"]
 
 
-def test_reviewed_claim_on_never_fetched_url_is_downgraded(client) -> None:
+def test_unread_page_does_not_erase_model_group_or_explanation(client):
     job = wait_for_job(client, _start(client, claim=f"{CLAIM}\nSEARCH_FAKE_URL")["id"])
     candidate = job["search_manifest"]["reported"]["candidates"][0]
-    assert candidate["page_fetch_succeeded"] is False
-    assert candidate["evidence_status"] == "candidate_only"
-    assert candidate["provenance"] == "search_snippet"
-    assert any(
-        "대조되지 않아" in note
-        for note in job["search_manifest"]["normalization_notes"]
-    )
-    # 열람 기록이 없는 후보의 A/B/C 제안은 숨기지 않고 잠정 그룹으로 간다.
-    report = job["result_text"] or ""
-    assert "## A. 전체 구조와 핵심 특징이 모두 강하게 유사" in report
-    assert "### 잠정 분류" in report
-    assert "### 정식 분류" not in report
-    # 명칭은 검증된 값으로 인쇄되지 않는다. 다만 지우지도 않는다 — 사용자가
-    # 직접 확인할 단서가 없으면 "다시 확인해 보라"가 실행 불가능한 안내가 된다.
-    # 등급 라벨과 상태 줄이 항상 함께 나가므로 검증된 명칭과 섞이지 않는다.
-    assert "- 명칭: 테스트 특허" not in report
-    assert "제목(검색 결과 기반·미검증): 테스트 특허" in report
-    assert "상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요" in report
-    assert candidate["title"] == ""
-    assert candidate["reported_title"] == "테스트 특허"
+    assert candidate["evidence_level"] == "search_snippet_only"
+    assert "source_not_read" in candidate["verification_issues"]
+    assert candidate["group"] == "A"
+    assert candidate["mapping"]
+    assert "LLM 그룹: A" in job["result_text"]
 
 
-def test_similarity_runner_calls_the_candidate_verification_stage(
-    client, monkeypatch
-) -> None:
-    """정의만 있고 죽어 있는 검증 함수로 다시 퇴행하지 않게 실행 연결을 고정한다.
-
-    test-search Provider 는 WEB_SEARCH 정책이다. 예전에는 Codex 실행이 아니라는
-    이유로 이 단계가 건너뛰어졌다. 이제는 Provider 를 가리지 않으므로, 시도하지
-    않는 사유는 EPO 연동 상태여야 한다.
-    """
-    from app.db import session_scope
-    from app.execution.runner import JobRunner
-    from app import settings_service
-
-    # 앞선 테스트가 켜 둔 EPO 설정이 남아 있으면 사유가 달라진다. 이 테스트가
-    # 보려는 것은 Provider 분기가 사라졌다는 사실이므로 상태를 고정한다.
-    with session_scope() as session:
-        settings_service.update(session, {"epo_integration_enabled": False})
-
-    calls: list[str] = []
-    original = JobRunner._run_official_verification
-
-    async def traced(self, **kwargs):
-        calls.append(kwargs["job_id"])
-        return await original(self, **kwargs)
-
-    monkeypatch.setattr(JobRunner, "_run_official_verification", traced)
+def test_runner_only_calls_mechanical_verification(client, monkeypatch):
+    from app import search_verification
+    original = search_verification.verify
+    calls = []
+    def verify(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(search_verification, "verify", verify)
     job = wait_for_job(client, _start(client)["id"])
-
-    assert calls == [job["id"]]
-    # Provider 이름으로 갈라지지 않는다. 이 실행에서 검증이 시도되지 않은 것은
-    # EPO 연동이 꺼져 있기 때문이며, 사유도 그렇게 적혀야 한다.
-    assert job["search_manifest"]["verification"]["attempted"] is False
-    reason = job["search_manifest"]["verification"]["reason"]
-    assert "EPO" in reason
-    assert "Codex" not in reason
+    assert job["status"] == "SUCCEEDED"
+    assert len(calls) == 1
+    assert "verification" not in job["search_manifest"]
 
 
 def test_reviewed_claim_on_failed_fetch_is_downgraded(client) -> None:
@@ -262,8 +220,8 @@ def test_reviewed_claim_on_failed_fetch_is_downgraded(client) -> None:
     assert paywalled not in manifest["observed"]["succeeded_fetch_urls"]
 
     candidate = manifest["reported"]["candidates"][0]
-    assert candidate["page_fetch_succeeded"] is False
-    assert candidate["evidence_status"] == "candidate_only"
+    assert candidate["evidence_level"] == "search_snippet_only"
+    assert "source_not_read" in candidate["verification_issues"]
 
 
 def test_missing_audit_block_fails_instead_of_shipping_unverified_prose(client) -> None:
@@ -338,15 +296,10 @@ def _lane_user_message(client, job_id: str, origin: str) -> str:
     return lane.split("===== USER MESSAGE =====", 1)[1]
 
 
-def _lane_parts(client, job_id: str, origin: str) -> tuple[str, str]:
-    """저장된 최종 프롬프트에서 한 레인의 시스템·사용자 본문을 떼어 낸다."""
+def _lane_parts(client, job_id, origin):
     text = client.get(f"/api/jobs/{job_id}/final-prompt").text
-    lane = text.split(f"===== SEARCH LANE: {origin} =====\n", 1)[1]
-    lane = lane.split("===== SEARCH LANE:", 1)[0]
-    system = lane.split("===== SYSTEM PROMPT =====\n", 1)[1]
-    system, user = system.split("\n\n===== USER MESSAGE =====\n", 1)
-    # 마지막 레인이 아니면 다음 구분자 앞의 개행 두 개가 붙어 온다.
-    return system, user[:-2] if user.endswith("\n\n") else user
+    system = text.split("===== SYSTEM PROMPT =====\n", 1)[1]
+    return tuple(system.split("\n\n===== USER MESSAGE =====\n", 1))
 
 
 def _upload_spec(client, name: str = "spec.txt", body: bytes | None = None) -> str:
@@ -358,94 +311,30 @@ def _upload_spec(client, name: str = "spec.txt", body: bytes | None = None) -> s
     return response.json()["batch_id"]
 
 
-def test_search_runs_claim_only_and_spec_assisted_in_isolated_contexts(client) -> None:
-    """기본 검색 컨텍스트에는 명세서가 한 글자도 들어가지 않는다."""
-    job = wait_for_job(
-        client, _start(client, batch_id=_upload_spec(client))["id"]
-    )
-    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+def test_search_keeps_claim_and_spec_in_one_execution(client):
+    from .fake_provider import RECEIVED
+    batch = _upload_spec(client)
+    job = wait_for_job(client, _start(client, batch_id=batch)["id"])
+    assert job["status"] == "SUCCEEDED", job["errors"]
+    requests = [r for r in RECEIVED if r.job_id == job["id"]]
+    assert len(requests) == 1
+    message = requests[0].user_message
+    assert message.index("<CLAIM_TEXT>") < message.index(CLAIM) < message.index("</CLAIM_TEXT>")
+    assert message.index("<SPEC_TEXT>") < message.index(SPEC) < message.index("</SPEC_TEXT>")
+    assert message.index("</CLAIM_TEXT>") < message.index("<SPEC_TEXT>")
+    assert job["search_manifest"]["input"]["spec_document"]["filename"] == "spec.txt"
+    assert "search_lanes" not in job["search_manifest"]
 
-    claim_message = _lane_user_message(client, job["id"], "claim_only")
-    assisted_message = _lane_user_message(client, job["id"], "spec_assisted")
-    assert "SPEC_TEXT" not in claim_message
-    assert SPEC not in claim_message
-    assert CLAIM in claim_message
 
-    # 명세서는 자기 경계 안에, 청구항 경계 밖에 있다.
-    spec_at = assisted_message.index(SPEC)
-    assert (
-        assisted_message.index("<SPEC_TEXT>")
-        < spec_at
-        < assisted_message.index("</SPEC_TEXT>")
-    )
-    assert assisted_message.index("</CLAIM_TEXT>") < spec_at
-    # 인용발명 문헌처럼 첨부 절로 붙지 않는다.
-    assert "[ATTACHMENTS / 첨부 자료]" not in assisted_message
-
-    spec = job["search_manifest"]["input"]["spec_document"]
-    assert spec["filename"] == "spec.txt"
-    assert spec["char_count"] == len(SPEC)
-    assert job["search_manifest"]["input"]["spec_boundary_neutralized"] is False
+def test_spec_expansion_is_the_single_models_output(client):
+    job = wait_for_job(client, _start(client, batch_id=_upload_spec(client))["id"])
     manifest = job["search_manifest"]
-    assert manifest["policy"]["search_strategy"] == "isolated_union"
-    assert manifest["policy"]["candidate_merge"] == "union"
-    assert sum(manifest["policy"]["lane_budgets"].values()) == 40
-    # 본문 읽기 상한은 검색 상한과 별개로 기록된다. 이 Provider 는 본문을
-    # 그대로 돌려주므로 나눌 예산이 없고, 그 사실도 기록에 남아야 한다.
-    assert "max_content_reads_total" in manifest["policy"]
-    assert manifest["policy"]["content_read_lane_budgets"] == {}
-    assert [lane["spec_in_context"] for lane in manifest["search_lanes"]] == [
-        False,
-        True,
-    ]
-    # 어떤 파일이 입력이었는지는 작업에도 남는다.
-    assert [a["role"] for a in job["attachments"]] == ["APPLICATION"]
+    assert manifest["reported"]["term_expansions"][0]["claim_term"] == "제어부"
+    assert [c["doc_number"] for c in manifest["reported"]["candidates"]] == ["AB1234", "CD5678"]
+    assert "candidate_merge" not in manifest["policy"]
 
 
-def test_spec_assisted_candidates_are_added_without_deleting_baseline(client) -> None:
-    job = wait_for_job(
-        client, _start(client, batch_id=_upload_spec(client))["id"]
-    )
-    manifest = job["search_manifest"]
-    rows = manifest["reported"]["term_expansions"]
-    assert rows[0]["claim_term"] == "제어부"
-    assert rows[0]["alternative_meanings"] == [
-        "일반적인 제어 회로",
-        "FPGA 로 구현된 신호 처리 회로",
-    ]
-    assert rows[0]["excluded_limitations"] == ["특정 FPGA 모델"]
 
-    candidates = manifest["reported"]["candidates"]
-    assert [row["doc_number"] for row in candidates] == ["AB1234", "CD5678"]
-    assert candidates[0]["search_origins"] == ["claim_only", "spec_assisted"]
-    assert candidates[1]["search_origins"] == ["spec_assisted"]
-    assert manifest["observed"]["search_queries_by_origin"] == {
-        "claim_only": ["테스트 검색식 A", "테스트 검색식 B"],
-        "spec_assisted": [
-            "명세서 확장 테스트 검색식 A",
-            "명세서 확장 테스트 검색식 B",
-        ],
-    }
-
-    report = job["result_text"]
-    assert "출원발명 문서를 이용한 별도 검색 확장" in report
-    assert "spec.txt" in report
-    assert "명세서 문단 [0021]" in report
-    assert "명세서 보조 검색으로 새로 추가된 후보 1건" in report
-    assert "두 검색에서 모두 발견된 후보 1건" in report
-
-
-def test_spec_dual_search_does_not_exceed_the_configured_total_budget(client) -> None:
-    client.put("/api/settings", json={"values": {"max_search_tool_calls": 1}})
-    try:
-        job = wait_for_job(
-            client, _start(client, batch_id=_upload_spec(client))["id"]
-        )
-    finally:
-        client.put("/api/settings", json={"values": {"max_search_tool_calls": 40}})
-    assert job["status"] == JobStatus.FAILED
-    assert job["error_code"] == ErrorCode.SEARCH_BUDGET_EXCEEDED
-    assert "2 이상" in " ".join(job["errors"])
 
 
 def test_search_without_a_spec_says_nothing_about_one(client) -> None:
@@ -604,7 +493,7 @@ def test_gap_search_uses_selected_components_in_combined_then_individual_order(
     assert response.status_code == 201, response.text
     created = response.json()
     assert created["claim_text"] == CLAIM
-    assert created["search_focus"]["strategy"] == "combined_then_individual"
+    assert "strategy" not in created["search_focus"]
     # 선택 순서가 아니라 원 분석의 구성 순서를 보존한다.
     assert [row["id"] for row in created["search_focus"]["components"]] == [
         "C002",
@@ -614,15 +503,15 @@ def test_gap_search_uses_selected_components_in_combined_then_individual_order(
     job = wait_for_job(client, created["id"])
     assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
     manifest = job["search_manifest"]
-    assert manifest["policy"]["search_strategy"] == "combined_then_individual"
+    assert "search_strategy" not in manifest["policy"]
     assert manifest["input"]["search_focus"]["source_job_id"] == source_id
     report = job["result_text"] or ""
     assert "# 미대응 구성 보완 검색 후보" not in report
     assert "## 검색 대상 미대응 구성" in report
-    assert "1차 조합 검색 → 2차 개별 검색" in (job["result_text"] or "")
+    assert "1차 조합 검색 → 2차 개별 검색" not in (job["result_text"] or "")
 
     final_prompt = client.get(f"/api/jobs/{job['id']}/final-prompt").text
-    assert final_prompt.index("1차 — 조합 검색") < final_prompt.index("2차 — 개별 검색")
+    assert "1차 — 조합 검색" not in final_prompt
     assert "<SEARCH_FOCUS>" in final_prompt
     assert "두 센서 신호를 결합하여 제어하는 구성" in final_prompt
     assert "결과를 원격 장치로 전송하는 구성" in final_prompt
@@ -732,7 +621,7 @@ def test_preflight_matches_what_the_runner_actually_sends(client) -> None:
 
     # 검색은 레인이 둘이고, 한도는 레인마다 따로 걸린다.
     lanes = {lane["id"]: lane for lane in ahead["lanes"]}
-    assert set(lanes) == {"claim_only", "spec_assisted"}
+    assert set(lanes) == {"single"}
     assert ahead["bytes"] == max(lane["bytes"] for lane in ahead["lanes"])
 
     # 실행이 남긴 레인 프롬프트와 대조한다. 저장 파일은 구분 머리글을 붙이므로
@@ -795,7 +684,7 @@ def test_blocked_pages_keep_the_audit_block_and_the_rest_of_the_search(
     candidates = manifest["reported"]["candidates"]
     assert len(candidates) == 2
     for item in candidates:
-        assert item["evidence_status"] == "candidate_only"
+        assert item["evidence_level"] == "search_snippet_only"
         assert item["group"] is None
         assert item["mapping"] == []
         # 열지 못했어도 검색 결과에서 본 제목은 남는다.
@@ -810,8 +699,8 @@ def test_blocked_pages_keep_the_audit_block_and_the_rest_of_the_search(
 
     # 보고서에도 미검증 제목이 링크·상태와 함께 나간다.
     report = job["result_text"]
-    assert "제목(검색 결과 기반·미검증): " in report
-    assert "상태: 페이지 직접 확인 안 됨 — 사용자가 수동 확인 필요" in report
+    assert "미검증" in report
+    assert "미확인" in report
 
 
 def test_a_host_outside_the_allowlist_is_never_opened(client) -> None:
@@ -825,5 +714,114 @@ def test_a_host_outside_the_allowlist_is_never_opened(client) -> None:
         for item in job["search_manifest"]["reported"]["candidates"]
         if "sciencedirect" in item["url"]
     )
-    assert blocked["evidence_status"] == "candidate_only"
-    assert blocked["page_fetch_succeeded"] is False
+    assert blocked["evidence_level"] == "search_snippet_only"
+    assert "source_not_read" in blocked["verification_issues"]
+
+
+# --- 선택적 검색 기준일 -----------------------------------------------------
+
+
+def test_a_search_without_a_cutoff_applies_no_date_condition(client) -> None:
+    """비어 있으면 날짜 조건이 없다. 실행일이 대신 들어가지 않는다."""
+    created = _start(client)
+    assert created["search_cutoff_date"] is None
+
+    job = wait_for_job(client, created["id"])
+    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+
+    date_filter = job["search_manifest"]["date_filter"]
+    assert date_filter["cutoff"] == ""
+    assert date_filter["applied"] is False
+    assert date_filter["excluded"] == []
+    assert "날짜 제한 없음" in job["result_text"]
+
+
+def test_an_empty_cutoff_string_is_stored_as_null(client) -> None:
+    """빈 문자열과 미지정을 다르게 저장하지 않는다. 둘 다 '조건 없음'이다."""
+    created = _start(client, search_cutoff_date="")
+    assert created["search_cutoff_date"] is None
+
+
+def test_a_search_with_a_cutoff_records_it_end_to_end(client) -> None:
+    created = _start(client, search_cutoff_date="2024-12-31")
+    assert created["search_cutoff_date"] == "2024-12-31"
+
+    job = wait_for_job(client, created["id"])
+    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+
+    date_filter = job["search_manifest"]["date_filter"]
+    assert date_filter["cutoff"] == "2024-12-31"
+    assert date_filter["applied"] is True
+    # 판정 기준은 공개일이다.
+    assert date_filter["basis"] == "publication_date"
+    # 어느 채널이 검색 단계에서 좁혔고 어느 채널이 뒤에서 걸렀는가.
+    assert "channel_applied" not in date_filter
+    assert "2024-12-31 까지 공개된 문헌" in job["result_text"]
+
+
+def test_a_compact_cutoff_is_normalised(client) -> None:
+    created = _start(client, search_cutoff_date="20241231")
+    assert created["search_cutoff_date"] == "2024-12-31"
+
+
+def test_an_unreadable_cutoff_is_refused(client) -> None:
+    """조용히 고치지 않는다. 검색어가 틀렸다는 것은 사람이 알아야 할 사실이다."""
+    body = {
+        "job_kind": JobKind.SIMILARITY_SEARCH.value,
+        "provider": "test-search",
+        "claim_text": CLAIM,
+        "search_cutoff_date": "2024/12/31",
+    }
+    response = client.post("/api/jobs", json=body)
+    assert response.status_code == 422
+
+
+def test_a_web_candidate_without_a_publication_date_is_marked_not_dropped(
+    client,
+) -> None:
+    """공개일을 모르는 것과 기준일 뒤에 공개된 것은 다른 사실이다.
+
+    웹 후보는 모델이 공개일을 보고하지 않으므로 이 상태로 도착하는 일이 흔하다.
+    그 후보를 지우면 "확인하지 못했다"가 "대상이 아니다"로 바뀐다.
+    """
+    created = _start(client, search_cutoff_date="1900-01-01")
+    job = wait_for_job(client, created["id"])
+    manifest = job["search_manifest"]
+
+    candidate = next(
+        item
+        for item in manifest["reported"]["candidates"]
+        if item["doc_number"] == "AB1234"
+    )
+    assert candidate["publication_date_status"] == "publication_date_unknown"
+    assert "공개일" in candidate["publication_date_detail"]
+
+    date_filter = manifest["date_filter"]
+    assert date_filter["applied"] is True
+    assert date_filter["unknown_publication_date"] >= 1
+    assert all(row["doc_number"] != "AB1234" for row in date_filter["excluded"])
+    # 보고서도 지우지 않았다는 사실을 적는다.
+    assert "공개일 미확인 후보" in job["result_text"]
+
+
+def test_search_prompt_never_carries_the_analysis_output_rules(client) -> None:
+    """분석용 기계 판독 블록 규칙은 검색 실행에 붙지 않는다.
+
+    규칙을 ARIA 가 붙이게 되면서, 붙이지 않는 경로를 못박아 둘 필요가 생겼다.
+    검색은 자기 출력 계약(search_manifest)이 따로 있다. 두 계약이 한 프롬프트에
+    같이 들어가면 모델이 어느 형식으로 답할지가 흔들린다.
+    """
+    created = _start(client)
+    job = wait_for_job(client, created["id"])
+    assert job["status"] == JobStatus.SUCCEEDED, job["errors"]
+
+    text = client.get(f"/api/jobs/{job['id']}/final-prompt").text
+    assert "ARIA_COMPONENT_ANALYSIS_V1" not in text
+    assert "ARIA_CITATION_MAPPING_V1" not in text
+
+    # 규칙을 주지 않았으니 읽지도 않는다. 없는 블록을 찾다 실패를 기록하면
+    # 검색 실행마다 근거 없는 오류가 남는다.
+    assert job["analysis_manifest"] is None
+    assert job["analysis_manifest_error"] is None
+    assert job["citation_mapping"] is None
+    assert job["citation_mapping_error"] is None

@@ -64,13 +64,6 @@ from .epo_backend import (
     EpoOpsBackend,
     check_credentials,
 )
-from .epo_actions import ActionError as EpoActionError, parse_response
-from .epo_agent import (
-    TERMINATION_REASONS,
-    EpoAgentBudget,
-    EpoSearchAgent,
-    EpoSearchRun,
-)
 from .epo_client import (
     MAX_RESULTS_PER_QUERY as EPO_MAX_RESULTS_PER_QUERY,
     OpsAuthError,
@@ -99,7 +92,6 @@ from .literature_backend import (
     CONSTITUENTS as LITERATURE_CONSTITUENTS,
     SETTING_ENABLED as LITERATURE_SETTING_ENABLED,
     SETTING_MAILTO as LITERATURE_SETTING_MAILTO,
-    SETTING_MAX_QUERIES as LITERATURE_SETTING_MAX_QUERIES,
     LiteratureBackend,
 )
 from .literature_client import (
@@ -168,7 +160,6 @@ __all__ = [
     "LITERATURE_CONSTITUENTS",
     "LITERATURE_SETTING_ENABLED",
     "LITERATURE_SETTING_MAILTO",
-    "LITERATURE_SETTING_MAX_QUERIES",
     "LiteratureBackend",
     "LiteratureBudgetExceeded",
     "LiteratureError",
@@ -186,12 +177,6 @@ __all__ = [
     "DateRange",
     "Group",
     "Term",
-    "EpoActionError",
-    "EpoAgentBudget",
-    "EpoSearchAgent",
-    "EpoSearchRun",
-    "TERMINATION_REASONS",
-    "parse_response",
     "OpsAuthError",
     "OpsBudgetExceeded",
     "OpsCancelled",

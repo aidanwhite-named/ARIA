@@ -82,6 +82,7 @@ type Persisted = {
   jobKind: JobKind;
   claimText: string;
   searchClaimText: string;
+  searchCutoffDate: string;
   followupInstruction: string;
   lineage: Lineage | null;
 };
@@ -107,6 +108,11 @@ export interface RunSession {
    *  모드를 오갈 때 한쪽 입력이 다른 쪽에 덮여 쓰이면 안 된다. */
   searchClaimText: string;
   setSearchClaimText: Dispatch<SetStateAction<string>>;
+  /** 선택적 검색 기준일(YYYY-MM-DD). 빈 문자열이 기본값이고 그것은 **날짜
+   *  조건 없음**을 뜻한다. 비었다고 오늘 날짜를 채우지 않는다 — 채우면 같은
+   *  청구항의 검색 범위가 실행한 날에 따라 달라진다. */
+  searchCutoffDate: string;
+  setSearchCutoffDate: Dispatch<SetStateAction<string>>;
   lineage: Lineage | null;
   setLineage: Dispatch<SetStateAction<Lineage | null>>;
   followupInstruction: string;
@@ -191,6 +197,10 @@ function readStored(): Persisted | null {
       claimText: typeof parsed.claimText === "string" ? parsed.claimText : "",
       searchClaimText:
         typeof parsed.searchClaimText === "string" ? parsed.searchClaimText : "",
+      searchCutoffDate:
+        typeof parsed.searchCutoffDate === "string"
+          ? parsed.searchCutoffDate
+          : "",
       followupInstruction:
         typeof parsed.followupInstruction === "string"
           ? parsed.followupInstruction
@@ -261,6 +271,9 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
   const [claimText, setClaimText] = useState(initial?.claimText ?? "");
   const [searchClaimText, setSearchClaimText] = useState(
     initial?.searchClaimText ?? "",
+  );
+  const [searchCutoffDate, setSearchCutoffDate] = useState(
+    initial?.searchCutoffDate ?? "",
   );
   const [lineage, setLineage] = useState<Lineage | null>(initial?.lineage ?? null);
   const [followupInstruction, setFollowupInstruction] = useState(
@@ -356,6 +369,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
         jobKind,
         claimText,
         searchClaimText,
+        searchCutoffDate,
         followupInstruction,
         lineage,
       };
@@ -374,6 +388,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
     jobKind,
     claimText,
     searchClaimText,
+    searchCutoffDate,
     followupInstruction,
     lineage,
   ]);
@@ -400,6 +415,8 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       setClaimText,
       searchClaimText,
       setSearchClaimText,
+      searchCutoffDate,
+      setSearchCutoffDate,
       lineage,
       setLineage,
       followupInstruction,
@@ -430,6 +447,7 @@ export function RunSessionProvider({ children }: { children: ReactNode }) {
       jobKind,
       claimText,
       searchClaimText,
+      searchCutoffDate,
       lineage,
       followupInstruction,
       citationFiles,

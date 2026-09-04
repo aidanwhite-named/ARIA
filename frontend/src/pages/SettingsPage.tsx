@@ -829,42 +829,11 @@ export default function SettingsPage() {
             </table>
             </div>
 
-            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 호출 예산</h3>
+            <h3 style={{ margin: "18px 0 4px", fontSize: 13 }}>EPO 사용량 안전 한도</h3>
             <div className="hint" style={{ marginBottom: 8 }}>
-              OPS HTTP 요청에 쓸 총 대기 시간입니다. AI 실행 전체 제한시간과는
-              별도입니다.
+              검색 전략과 별개로 OPS 응답 데이터 사용량을 제한합니다.
             </div>
             <div className="settings-limit-options">
-              <NumberField
-                label="OPS 네트워크 시간 예산 (초)"
-                value={v.epo_http_budget_seconds}
-                hint="10–600. 순수 HTTP 대기 시간입니다."
-                onSave={(n) => saveValue("epo_http_budget_seconds", n)}
-              />
-              <NumberField
-                label="공식 문헌조회 호출 상한"
-                value={v.epo_max_detail_fetches}
-                hint="공식 검증 단계가 OPS 를 부르는 총 횟수입니다. 후보 하나에 청구항·초록·서지 세 번까지 부릅니다. 기본 12회 = 후보 4건."
-                onSave={(n) => saveValue("epo_max_detail_fetches", n)}
-              />
-              <NumberField
-                label="검색 결과 상한 (질의 1건당)"
-                value={v.epo_max_results_per_query}
-                hint="1–20. OPS 가 한 질의로 돌려주는 최대 건수입니다. 기본 8건 — 크게 잡으면 선택 턴 입력이 커져 뒤쪽 후보가 잘립니다."
-                onSave={(n) => saveValue("epo_max_results_per_query", n)}
-              />
-              <NumberField
-                label="EPO 유망 후보(shortlist) 상한"
-                value={v.epo_shortlist_limit}
-                hint="EPO 독립 검색이 공식 검증으로 넘길 후보 수입니다. 검증 대상보다 하나 크게 두면 남는 후보가 미검증 참고 후보로 남습니다."
-                onSave={(n) => saveValue("epo_shortlist_limit", n)}
-              />
-              <NumberField
-                label="공식 검증 후보 수 상한"
-                value={v.epo_verification_targets}
-                hint="공식 문헌을 받아 대조할 후보 수입니다. 기본 4건 — 후보당 세 번을 부르므로 조회 상한(12회)과 맞춰 두십시오."
-                onSave={(n) => saveValue("epo_verification_targets", n)}
-              />
               <NumberField
                 label="시간당 사용량 상한 (bytes, 0 = 관측만)"
                 value={v.epo_hourly_quota_bytes}
@@ -878,14 +847,25 @@ export default function SettingsPage() {
         )}
       </div>
 
+      <div className="card">
+        <h2>전체 실행 상한</h2>
+        <p className="hint">검색 깊이 프리셋도 이 상한을 넘지 않습니다. 시간 상한은 분석 작업에도 적용됩니다.</p>
+        <NumberField label="검색 도구 호출 총 상한" value={v.max_search_tool_calls}
+          hint="1–200. 후보 수나 출처별 슬롯을 정하지 않습니다."
+          onSave={(n) => saveValue("max_search_tool_calls", n)} />
+        <NumberField label="실행 제한시간 (초)" value={v.default_timeout_seconds}
+          hint="전체 실행의 제한시간입니다."
+          onSave={(n) => saveValue("default_timeout_seconds", n)} />
+      </div>
+
       <div className="card settings-literature">
         <h2>비특허문헌 검색 연동 (Crossref · Europe PMC)</h2>
         <p className="muted settings-integration-copy">
-          모델이 실제로 사용한 검색어로 ARIA가 Crossref와 Europe PMC에 직접
-          질의해, <b>제목과 DOI가 확인된</b> 논문 후보를 만듭니다. 웹 검색은
+          선택한 LLM이 필요할 때 Crossref·Europe PMC 도구를 호출합니다.
+          ARIA가 논문 후보를 독립 검색하거나 최종 목록에 추가하지 않습니다. 웹 검색은
           결과를 요약문과 익명 링크로만 돌려주어 논문을 식별하지 못하는 경우가
-          많습니다. 후보의 초록은 발행사 사이트를 열지 않고 등록 서지에서 받으므로
-          접근이 막힌 저널에서도 확보됩니다. 자격증명은 필요하지 않습니다.
+          있습니다. 등록 서지에 초록이 있으면 발행사 사이트를 열지 않고 받을 수
+          있습니다. 초록 제공 여부는 문헌마다 다르며, 자격증명은 필요하지 않습니다.
         </p>
         <label className="checkbox">
           <input
@@ -921,36 +901,6 @@ export default function SettingsPage() {
               >
                 연락처 저장
               </button>
-            </div>
-            <div className="settings-limit-options">
-              <NumberField
-                label="ARIA가 보낼 질의 수 상한"
-                value={v.literature_max_queries}
-                hint="모델이 실행한 검색어 중 앞에서부터 이 수만큼만 다시 묻습니다. 문헌번호 확인용 질의는 제외합니다."
-                onSave={(n) => saveValue("literature_max_queries", n)}
-              />
-              <NumberField
-                label="질의당 결과 건수 상한"
-                value={v.literature_max_results_per_query}
-                hint="1–20. Crossref와 Europe PMC 각각에 적용됩니다."
-                onSave={(n) =>
-                  saveValue("literature_max_results_per_query", n)
-                }
-              />
-              <NumberField
-                label="서지 API 네트워크 시간 예산(초)"
-                value={v.literature_http_budget_seconds}
-                hint="HTTP 대기 시간의 총합입니다. 넘으면 남은 질의를 보내지 않고 사유를 기록합니다."
-                onSave={(n) => saveValue("literature_http_budget_seconds", n)}
-              />
-              <NumberField
-                label="논문 공식 검증 확보 목표"
-                value={v.literature_verification_targets}
-                hint="초록을 받아 실제로 대조할 논문 수입니다. 앞 후보의 초록 확보가 실패하면 후보 목록 상한 안에서 다음 후보로 이월해 이 수를 채웁니다. EPO 공식 검증 상한과 다른 축이라 서로 예산을 빼앗지 않습니다."
-                onSave={(n) =>
-                  saveValue("literature_verification_targets", n)
-                }
-              />
             </div>
           </div>
         )}
