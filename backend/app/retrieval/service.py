@@ -383,6 +383,7 @@ async def run_retrieval(
         # 예산 때문에 뺀 페이지. package_reductions 와 다른 채널이다 — 페이지를
         # 뺀 것은 근거를 뺀 것이 아니므로 구성 판정을 흔들지 않는다.
         "page_reductions": list((bundle or {}).get("page_reductions") or []),
+        "page_truncations": list((bundle or {}).get("page_truncations") or []),
         "evidence_chars": (bundle or {}).get("evidence_chars", 0),
         "components": [
             {
@@ -403,12 +404,12 @@ async def run_retrieval(
                 # 문헌별 검색 실행 기록. 0건이었던 검색도 들어 있다 —
                 # "찾지 못했다"와 "찾아보지 않았다"를 가르는 근거다.
                 "searched_documents": [
-                    record.to_dict() for record in state.searched.values()
+                    record.to_dict() for record in state.search_attempts.values()
                 ],
                 "unsearched_documents": [
                     document.alias
                     for document in documents
-                    if document.attachment_id not in state.searched
+                    if document.attachment_id not in state.search_attempts
                 ],
                 "candidate_ledger": state.top_candidates(),
                 "deferred_actions": [
@@ -424,13 +425,14 @@ async def run_retrieval(
         "deferred_pending": list(run.deferred_pending),
         "deferred_executed": run.deferred_executed,
         "notes": list(run.notes),
-        "budget_exhausted": run.budget_exhausted,
+        "budget_exhausted": run.budget_exhausted or bool((bundle or {}).get("budget_exhausted")),
+        "budget_limited": run.budget_limited or bool((bundle or {}).get("budget_limited")),
         "error": run.error or "",
         "error_code": run.error_code or "",
         "status": (
             "failed"
             if run.error_code
-            else ("partial" if run.budget_exhausted else "complete")
+            else ("partial" if run.budget_exhausted or (bundle or {}).get("budget_exhausted") else "complete")
         ),
     }
     manifest_path = base / "retrieval_manifest.json"
@@ -450,10 +452,13 @@ async def run_retrieval(
         # 조용히 넘겨 보내지 않는다. 넘기면 preflight 가 안내한 크기가 거짓이
         # 되고, 검색 비용을 다 쓴 뒤 Provider 호출 직전에 막힌다.
         needed = int(bundle.get("package_required_chars") or 0)
+        needed_bytes = int(bundle.get("package_required_bytes") or 0)
         result.error = (
-            f"근거 패키지가 설정한 예산({budget.max_evidence_chars:,}자)에 "
-            f"들어가지 않습니다. 최소 {needed:,}자가 필요합니다. 환경설정의 "
-            "「근거 패키지 최대 문자 수」를 올리거나, 청구항 구성 수 또는 "
+            f"근거 패키지가 이번 실행의 예산({budget.max_evidence_chars:,}자 / "
+            f"{budget.evidence_byte_limit:,} bytes)에 들어가지 않습니다. "
+            f"최소 {needed:,}자 / {needed_bytes:,} bytes가 필요합니다. "
+            "환경설정의 「근거 패키지 최대 문자 수」와 Provider 입력 한도를 "
+            "확인하거나, 청구항 구성 수 또는 "
             "인용문헌 수를 줄여 실행하십시오. ARIA 는 원문을 잘라서 맞추지 "
             "않습니다."
         )

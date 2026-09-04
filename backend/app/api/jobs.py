@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import (
+    analysis_completeness,
     analysis_manifest,
     citation_mapping,
     job_assembly,
@@ -308,6 +309,19 @@ def _job_out(job: ExecutionJob) -> JobOut:
         citation_mapping_error=job.citation_mapping_error,
         analysis_manifest=job.analysis_manifest,
         analysis_manifest_error=job.analysis_manifest_error,
+        # 저장하지 않고 조회 시점에 계산한다. 입력은 이미 이 행에 다 있고
+        # (retrieval_manifest, analysis_manifest), 이 값으로 검색하거나 정렬할
+        # 일이 없다. 컬럼을 늘리면 같은 사실이 두 곳에 남아 어긋날 수 있다.
+        analysis_completeness=(
+            analysis_completeness.check(
+                retrieval_manifest=job.retrieval_manifest,
+                analysis_manifest=job.analysis_manifest,
+                analysis_error=job.analysis_manifest_error,
+                process_succeeded=job.status == JobStatus.SUCCEEDED,
+            )
+            if job.job_kind != JobKind.SIMILARITY_SEARCH
+            else None
+        ),
         search_manifest=job.search_manifest,
         search_manifest_error=job.search_manifest_error,
         search_focus=job.search_focus,
@@ -1069,7 +1083,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
                 "명세서를 반영하지 못한 채로 검색하지 않습니다."
             ),
         )
-    except job_assembly.ModelInputTooLarge as exc:
+    except (job_assembly.ModelInputTooLarge, job_assembly.TransportInputTooLarge) as exc:
         return PreflightOut(
             job_kind=job_kind.value,
             provider=provider_id,
@@ -1124,6 +1138,7 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         and bool(payload.batch_id or payload.source_job_id)
     )
     retrieval_plan = assembly.delivery_plan == DeliveryPlan.LOCAL_RETRIEVAL
+    retrieval_budget = assembly.evidence_budget or retrieval_budget
     message = ""
     if no_material:
         message = job_assembly.NO_INCLUDED_MATERIAL
@@ -1132,8 +1147,9 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
             f"인용발명 문헌 전체를 넣으면 {assembly.full_inline_bytes:,} bytes 라, "
             "ARIA 가 문헌을 페이지·문단 단위로 로컬 색인한 뒤 AI 가 청구항 "
             "구성별로 검색한 구간만 근거 패키지로 전달합니다. 위 크기는 근거 "
-            f"패키지 예산({retrieval_budget.max_evidence_chars:,}자)을 모두 "
-            "썼을 때의 최댓값이며, 실제 실행은 이보다 작습니다. 문서를 자르거나 "
+            f"패키지 예산(최대 {retrieval_budget.max_evidence_chars:,}자, "
+            f"{retrieval_budget.evidence_byte_limit:,} bytes)으로 계산한 상한입니다. "
+            "바이트 예산은 이 실행의 청구항·지시문 크기와 입력 한도를 반영합니다. 문서를 자르거나 "
             "요약하지 않으므로 검색되지 않은 구간은 「확인하지 못한 범위」로 "
             "보고서에 남습니다."
         )
@@ -1179,6 +1195,9 @@ def preflight(payload: JobCreate, session: Session = Depends(get_db)) -> Preflig
         delivery_manifest=assembly.delivery_manifest(provider),
         evidence_budget_chars=(
             retrieval_budget.max_evidence_chars if retrieval_plan else None
+        ),
+        evidence_budget_bytes=(
+            retrieval_budget.evidence_byte_limit if retrieval_plan else None
         ),
         message=message,
     )

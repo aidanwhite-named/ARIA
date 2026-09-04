@@ -42,6 +42,7 @@ from ..models import Attachment, ExecutionEvent, ExecutionJob, ResultArtifact
 from .. import prompt_store
 from ..prompt_assembly import InputTooLarge
 from ..patent_search import retention as evidence_retention
+from .. import analysis_completeness, report_symbols
 from ..providers.base import (
     NO_TOOLS,
     ExecutionRequest,
@@ -52,7 +53,8 @@ from . import process as proc
 from .bus import BUS
 
 # UI 표시용 델타는 DB 에 남기지 않는다. 최종 결과 텍스트만 저장한다.
-_NON_PERSISTED = frozenset({"result_stream"})
+# UI 표시용 진행 신호는 DB 에 남기지 않는다. 최종 결과 텍스트만 저장한다.
+_NON_PERSISTED = frozenset({"result_progress"})
 
 # 조립은 job_assembly 가 한다. runner 와 preflight 가 같은 함수를 부르지 않으면
 # 화면이 안내한 크기와 실제로 나가는 크기가 어긋난다. 기존 import 경로를 쓰는
@@ -516,7 +518,7 @@ class JobRunner:
                     "않습니다.",
                 )
                 return
-            except (InputTooLarge, job_assembly.ModelInputTooLarge) as exc:
+            except (InputTooLarge, job_assembly.ModelInputTooLarge, job_assembly.TransportInputTooLarge) as exc:
                 await self._fail(job_id, ErrorCode.INPUT_TOO_LARGE, str(exc))
                 return
             except search_prompt.SearchPromptError as exc:
@@ -544,6 +546,7 @@ class JobRunner:
                 job_kind is JobKind.PATENT_ANALYSIS
                 and delivery_plan == DeliveryPlan.LOCAL_RETRIEVAL
             ):
+                retrieval_budget = assembly.evidence_budget or retrieval_budget
                 await self._emit(
                     job_id,
                     "stage",
@@ -554,6 +557,13 @@ class JobRunner:
                 )
 
                 async def retrieval_emit(event_type: str, payload: dict) -> None:
+                    # 로컬 검색 라운드의 모델 출력은 검색 계획과 action JSON 이며
+                    # 보고서 본문이 아니다. 실측(job d39dc2cc): 최종 보고서
+                    # 스트림 앞부분이 통째로 검색 라운드의 JSON 이었다. 라운드
+                    # 진행은 retrieval_progress 가 따로 알리므로 이 델타는
+                    # 밖으로 내보내지 않는다.
+                    if event_type == "result_stream":
+                        return
                     await self._emit(job_id, event_type, payload)
 
                 found = await retrieval.run_retrieval(
@@ -618,7 +628,7 @@ class JobRunner:
                             **delivery_policy,
                         )
                         assembled = assembly.representative
-                    except (InputTooLarge, job_assembly.ModelInputTooLarge) as exc:
+                    except (InputTooLarge, job_assembly.ModelInputTooLarge, job_assembly.TransportInputTooLarge) as exc:
                         self._save_retrieval(
                             job_id,
                             delivery_plan,
@@ -692,8 +702,22 @@ class JobRunner:
                 "counted": set(),
             }
 
+            # 모델 출력을 실시간으로 화면에 붙이지 않는다.
+            #
+            # 붙이면 완성 전의 원문이 그대로 보고서 자리에 흐른다 — 기계 판독
+            # 블록(구성별 분석·문헌 매핑)도 그 안에 있다. 실측(job d39dc2cc):
+            # 최종 스트림 5,748자 중 1,521자가 두 감사 블록이었다. 화면에
+            # 필요한 것은 "얼마나 받았는가"이고, 보고서는 블록을 걷어낸 최종
+            # 결과 하나로 충분하다. 원문은 stdout.log 에 그대로 남는다.
+            received = 0
+
             async def emit(event_type: str, payload: dict) -> None:
+                nonlocal received
                 payload = dict(payload)
+                if event_type == "result_stream":
+                    received += len(str(payload.get("delta") or ""))
+                    await self._emit(job_id, "result_progress", {"chars": received})
+                    return
                 await self._emit(job_id, event_type, payload)
                 if job_kind is not JobKind.SIMILARITY_SEARCH:
                     return
@@ -906,6 +930,24 @@ class JobRunner:
                 # 사람이 받아 갈 보고서에는 프로토콜 블록을 남기지 않는다.
                 # 원문은 stdout.log 에 그대로 있다.
                 outcome.result_text = citation_mapping.strip_block(outcome.result_text)
+
+            if expects_blocks:
+                # 등급 심볼. 프롬프트가 정의한 등급표에서만 읽으며 수치·등급명은
+                # 건드리지 않는다. 본문 하나를 고치므로 화면·복사·다운로드가
+                # 저절로 같아진다.
+                outcome.result_text = report_symbols.apply(
+                    outcome.result_text, master_prompt
+                )
+                # 프로세스 성공·블록 파싱 성공과 분석 완전성을 나눠서 확인한다.
+                completeness = analysis_completeness.check(
+                    retrieval_manifest=retrieval_manifest,
+                    analysis_manifest=component_result,
+                    analysis_error=component_error,
+                    process_succeeded=verdict.status == JobStatus.SUCCEEDED,
+                )
+                notice = analysis_completeness.render(completeness)
+                if notice and outcome.result_text.strip():
+                    outcome.result_text = outcome.result_text.rstrip() + notice
 
             # --- 저장 -----------------------------------------------------
             completed = _utcnow()

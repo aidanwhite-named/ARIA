@@ -63,6 +63,24 @@ def test_rejects_status_and_score_mismatch() -> None:
         )
 
 
+def test_rejects_zero_similarity_on_unreadable() -> None:
+    """판단 불가에 0% 를 적으면 받지 않는다.
+
+    실측한 실패다. 근거 패키지가 예산에 눌려 구성 상태가
+    coverage_insufficient 로 내려가면 모델은 본문에서 유사도를 생략하면서
+    블록에는 `"similarity":0` 을 적었고, 블록 전체가 거절되어
+    analysis_manifest 가 비었다. 0 을 여기서 조용히 null 로 바꾸지 않는다 —
+    0% 는 「확인 범위 기준 대응 없음」이라는 별개의 판단이므로, 섞으면 화면에서
+    판단 불가와 대응 없음이 한 칸이 된다. 계약은 규칙 쪽에서 분명히 한다
+    (analysis_protocol, test_analysis_protocol).
+    """
+    with pytest.raises(
+        analysis_manifest.ComponentAnalysisError,
+        match="유사도를 부여하지 않아야 합니다",
+    ):
+        analysis_manifest.parse(_block([_item(similarity=0, status="unreadable")]))
+
+
 def test_protocol_block_is_removed_from_user_report() -> None:
     report = _block([_item()])
     visible = analysis_manifest.strip_block(report)

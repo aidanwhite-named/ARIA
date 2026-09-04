@@ -44,18 +44,21 @@ from .actions import (
     SearchNumbersAndSymbols,
     parse_response,
 )
-from .prompts import AGENT_SYSTEM_PROMPT, render_round
+from .prompts import (
+    AGENT_SYSTEM_PROMPT,
+    dump_readable_json,
+    dump_round_json,
+    render_round,
+)
 from .search import IndexedDocument
 
 # 예산 기본값. 사용자가 설정에서 바꿀 수 있고, preflight 와 실행이 **같은
 # 계산**을 쓴다(retrieval.budget_from_settings).
-DEFAULT_MAX_ROUNDS = 10
+DEFAULT_MAX_ROUNDS = 5
 DEFAULT_MAX_PAGE_READS = 80
-# 근거 패키지 상한. 한글 1자는 UTF-8 3 bytes 이므로 최악의 경우 120,000 bytes 다.
-# agy 의 전송 한도(180,000 bytes)에서 Master Prompt(약 19 KB)와 청구항을 빼고도
-# 남는 크기로 잡았다. 여기를 올리면 preflight 가 계산하는 최댓값이 그만큼 커져서
-# 전송 한도가 작은 Provider 에서 실행이 막힐 수 있다.
-DEFAULT_EVIDENCE_CHARS = 40_000
+# 사용자가 요청하는 문자 상한. 전송 가능한 바이트 수는 실행마다 실제
+# 청구항·지시문 크기를 빼서 job_assembly 에서 별도로 정한다.
+DEFAULT_EVIDENCE_CHARS = 100_000
 # 근거 구간이 실린 페이지의 앞뒤로 더 담을 페이지 수. 0 이면 페이지 확장을
 # 하지 않고 예전처럼 청크와 앞뒤 청크만 담는다.
 DEFAULT_NEIGHBOR_PAGES = 1
@@ -63,11 +66,21 @@ DEFAULT_HITS_PER_DOCUMENT = 6
 
 # 한 라운드에서 모델에게 돌려주는 검색 결과 본문의 총 상한. 라운드 예산과 다른
 # 축이다 — 검색을 적게 하고도 페이지를 통째로 받아 가면 컨텍스트가 터진다.
-MAX_ROUND_RESULT_CHARS = 24_000
+MAX_ROUND_RESULT_CHARS = 56_000
+
+# 후보가 없는 구성의 첫 결과를 페이지 재열람이 밀어내지 않도록 예약한다.
+UNSEEDED_RESULT_SHARE = 0.30
 
 # 검색 결과 한 줄에서 모델에게 보여주는 본문 길이. 근거 패키지에는 청크
 # 전체가 들어가므로 여기서 자른 것이 최종 보고서에 영향을 주지 않는다.
 SNIPPET_CHARS = 900
+
+# 검색 hit 앞뒤로 함께 실어 보내는 문맥. 같은 페이지의 인접 청크를 붙여서
+# 모델이 후보 하나를 볼 때마다 read_page 를 다시 요청하지 않아도 되게 한다.
+# 한 청크만 보여 주면 모델은 문맥을 확인하려고 페이지 전문을 부르고, 그
+# 페이지 읽기가 라운드 예산과 페이지 예산을 동시에 갉아먹는다.
+CONTEXT_NEIGHBOUR_CHUNKS = 1
+CONTEXT_CHARS = 500
 
 # 이 구성에 대해 ARIA 가 관측한 서로 다른 검색어가 이보다 적으면, 모델이
 # not_found 를 주장해도 확정하지 않는다. 모델의 자기 보고가 아니라 실제 실행된
@@ -102,17 +115,25 @@ class RetrievalBudget:
     max_rounds: int = DEFAULT_MAX_ROUNDS
     max_page_reads: int = DEFAULT_MAX_PAGE_READS
     max_evidence_chars: int = DEFAULT_EVIDENCE_CHARS
+    max_evidence_bytes: int | None = None
     hits_per_document: int = DEFAULT_HITS_PER_DOCUMENT
     max_round_result_chars: int = MAX_ROUND_RESULT_CHARS
     # 근거 구간이 실린 페이지의 앞뒤로 더 담을 페이지 수. 페이지 전문은
     # max_evidence_chars 안에서 자리를 얻고, 모자라면 가장 먼저 줄어든다.
     neighbor_pages: int = DEFAULT_NEIGHBOR_PAGES
 
+    @property
+    def evidence_byte_limit(self) -> int:
+        if self.max_evidence_bytes is not None:
+            return max(0, self.max_evidence_bytes)
+        return max(0, self.max_evidence_chars * 3)
+
     def to_dict(self) -> dict:
         return {
             "max_rounds": self.max_rounds,
             "max_page_reads": self.max_page_reads,
             "max_evidence_chars": self.max_evidence_chars,
+            "max_evidence_bytes": self.evidence_byte_limit,
             "hits_per_document": self.hits_per_document,
             "max_round_result_chars": self.max_round_result_chars,
             "neighbor_pages": self.neighbor_pages,
@@ -130,6 +151,7 @@ class RoundRecord:
     input_sha256: str = ""
     output_sha256: str = ""
     input_chars: int = 0
+    input_bytes: int = 0
     output_chars: int = 0
     actions: int = 0
     error: str = ""
@@ -144,6 +166,7 @@ class RoundRecord:
             "input_sha256": self.input_sha256,
             "output_sha256": self.output_sha256,
             "input_chars": self.input_chars,
+            "input_bytes": self.input_bytes,
             "output_chars": self.output_chars,
             "actions": self.actions,
             "error": self.error,
@@ -204,8 +227,10 @@ class ComponentState:
     failed_channels: list[str] = field(default_factory=list)
     hit_chunks: dict[str, dict] = field(default_factory=dict)
     reviewed_pages: dict[str, set] = field(default_factory=dict)
-    # 문헌별 검색 실행 기록. 키는 attachment_id.
+    # 후보가 실제 반환된 문헌. 0-hit 시도는 여기 넣지 않아 첫 후보 우선권을 유지한다.
     searched: dict[str, DocumentSearchRecord] = field(default_factory=dict)
+    # 0건/누락/실패도 감사와 부재 판정에는 필요하므로 별도로 보존한다.
+    search_attempts: dict[str, DocumentSearchRecord] = field(default_factory=dict)
 
     def record_candidate(
         self,
@@ -289,17 +314,17 @@ class ComponentState:
         """최초 중요도와 실제 검색 불확실성으로 매 라운드 재평가한다."""
         total_documents = len(corpus)
         searched_count = sum(
-            1 for document in corpus if document.attachment_id in self.searched
+            1 for document in corpus if document.attachment_id in self.search_attempts
         )
         self.coverage_ratio = (
             searched_count / total_documents if total_documents else 1.0
         )
         unsearched = max(0, total_documents - searched_count)
-        omitted = sum(record.omitted for record in self.searched.values())
-        failed = sum(len(record.failed_channels) for record in self.searched.values())
+        omitted = sum(record.omitted for record in self.search_attempts.values())
+        failed = sum(len(record.failed_channels) for record in self.search_attempts.values())
         underexpanded = sum(
             1
-            for record in self.searched.values()
+            for record in self.search_attempts.values()
             if len(record.queries) < MIN_EXPANSION_TERMS
         )
         candidates = len(self.hit_chunks)
@@ -383,9 +408,11 @@ class ComponentState:
         hits: int,
         omitted: int = 0,
     ) -> None:
-        record = self.searched.get(attachment_id)
+        record = self.search_attempts.get(attachment_id)
         if record is None:
             record = DocumentSearchRecord(attachment_id=attachment_id, alias=alias)
+            self.search_attempts[attachment_id] = record
+        if hits > 0:
             self.searched[attachment_id] = record
         for query in queries:
             text = str(query).strip()
@@ -405,6 +432,82 @@ class ComponentState:
 
 
 @dataclass
+class CarryoverState:
+    """한 문헌에 대해 **한 번** 실행한 검색의 후보 목록을 고정해 둔다.
+
+    이월은 새 탐색이 아니다. 이미 조회한 결과 중 아직 모델에게 전달하지 못한
+    나머지를 돌려주는 일이다. 그래서 목록은 최초 조회 시점에 얼어붙고, 전달할
+    때마다 delivered 만 늘어난다. 검색 엔진을 다시 부르지 않으므로 이월 도중에
+    후보가 늘어나는 일이 없다.
+
+    열쇠는 (attachment_id, chunk_id) 다. chunk_id 는 문헌 안에서만 고유해서
+    문헌이 다르면 같은 값이 다른 본문을 가리킨다.
+    """
+
+    token: str
+    action: str
+    component_id: str
+    attachment_id: str
+    alias: str
+    terms: list[str]
+    request_key: str = ""
+    channels: list[dict] = field(default_factory=list)
+    hits: list = field(default_factory=list)
+    delivered: list[str] = field(default_factory=list)
+
+    @property
+    def pending(self) -> list:
+        done = set(self.delivered)
+        return [hit for hit in self.hits if hit.row.chunk_id not in done]
+
+    def mark_delivered(self, chunk_ids) -> None:
+        done = set(self.delivered)
+        for chunk_id in chunk_ids:
+            value = str(chunk_id or "")
+            if value and value not in done:
+                done.add(value)
+                self.delivered.append(value)
+
+
+@dataclass(frozen=True)
+class CarryoverDelivery:
+    """고정된 후보 목록의 미전달분을 돌려주는 내부 action.
+
+    모델이 만드는 action 이 아니다. ARIA 가 스스로 큐에 넣는다. 새 검색어나
+    넓힌 범위는 여기로 오지 않고 별도의 검색으로 처리된다.
+    """
+
+    token: str
+    action: str
+    component_id: str
+    attachment: str
+
+    def model_dump(self, mode: str | None = None) -> dict:
+        return {
+            "action": self.action,
+            "component_id": self.component_id,
+            "attachment": self.attachment,
+            "carryover": self.token,
+        }
+
+    def model_copy(self, update: dict | None = None):
+        values = {
+            "token": self.token,
+            "action": self.action,
+            "component_id": self.component_id,
+            "attachment": self.attachment,
+        }
+        values.update(
+            {key: value for key, value in (update or {}).items() if key in values}
+        )
+        return CarryoverDelivery(**values)
+
+
+SEARCH_ITEMS = (SearchDocument, SearchExact, SearchNumbersAndSymbols)
+SEARCH_OR_CARRYOVER = (*SEARCH_ITEMS, CarryoverDelivery)
+
+
+@dataclass
 class DeferredAction:
     """라운드 반환 한도 때문에 다음 라운드로 자동 이월된 action."""
 
@@ -416,10 +519,13 @@ class DeferredAction:
     def to_dict(self) -> dict:
         payload = self.item.model_dump() if hasattr(self.item, "model_dump") else {}
         payload.pop("exclude_chunk_ids", None)
+        if payload.pop("carryover", None):
+            payload["carryover"] = True
         return {
             "action": payload.get("action", getattr(self.item, "action", "?")),
             "component_id": payload.get("component_id", ""),
             "attachment": payload.get("attachment", ""),
+            "carryover": bool(payload.get("carryover")),
             "first_round": self.first_round,
             "attempts": self.attempts,
             "reason": self.reason,
@@ -457,6 +563,8 @@ class RetrievalRun:
     deferred_executed: int = 0
     notes: list[str] = field(default_factory=list)
     budget_exhausted: bool = False
+    # 중간에 제한을 만난 이력. 종료 시 미처리 범위 여부와 분리한다.
+    budget_limited: bool = False
 
 
 def _utcnow() -> str:
@@ -475,11 +583,11 @@ def json_size(value) -> int:
     get_document_status 처럼 본문이 없는 action 이 소비량 0 으로 잡히고,
     문헌 20개짜리 상태 조회 하나가 예산의 두 배를 만들어 낸다(실측 8,318자).
 
-    render_round 와 같은 직렬화(indent=2)를 쓴다. 중첩 깊이 때문에 실제
-    프롬프트에서는 들여쓰기가 조금 더 붙지만, 그만큼 이 값이 보수적으로
-    작게 잡히지 않도록 한 단계 들여쓴 상태로 잰다.
+    render_round 와 **같은 직렬화**를 쓴다(prompts.dump_round_json). 재는 형식과
+    보내는 형식이 다르면 예산이 조용히 어긋난다 — 들여쓰기로 재고 압축해서
+    보내면 예산을 남기고, 반대면 예산을 넘긴다.
     """
-    return len(json.dumps(value, ensure_ascii=False, indent=2))
+    return len(dump_round_json(value))
 
 
 def _compact_channels(channels: list[dict]) -> list[dict]:
@@ -581,8 +689,34 @@ class RetrievalAgent:
         self.semantic_encoder = semantic_encoder
         self._by_alias = {document.alias: document for document in corpus}
         self._components: dict[str, ComponentState] = {}
+        self._component_aliases: dict[str, str] = {}
         self._order: list[str] = []
         self._deferred_actions: list[DeferredAction] = []
+        self._active_deferred: DeferredAction | None = None
+        # 조회 결과를 보관한다. 라운드마다 새 모델 호출이므로 캐시 적중 때도
+        # 원문을 현재 반환 예산에 맞춰 다시 싣는다. 조회 완료는 전달 완료가 아니다.
+        self._search_cache: dict[
+            str, tuple[int, list[search_module.DocumentSearchResult]]
+        ] = {}
+        self._page_cache: dict[tuple[str, int], tuple[list, dict]] = {}
+        # 고정된 후보 목록. token -> CarryoverState. 이월은 여기서만 꺼낸다.
+        self._carryovers: dict[str, CarryoverState] = {}
+        self._latest_carryovers: dict[str, CarryoverState] = {}
+        self._budget_pending_pages: set[tuple[str, int]] = set()
+        self._round_limit_reached = False
+        # 이번 실행에서 이미 전문을 돌려준 (attachment_id, page).
+        self._served_pages: dict[tuple[str, int], int] = {}
+        # --- 아래 셋은 **한 라운드 = 한 LLM 호출** 안에서만 유효하다.
+        # 라운드가 바뀌면 비운다. 앞 라운드의 results 는 다음 프롬프트에 다시
+        # 실리지 않으므로, 라운드를 넘어 원문을 생략하면 모델은 그 원문을 영영
+        # 보지 못한다. "위에 이미 있다"고 말할 수 있는 범위는 같은 메시지뿐이다.
+        self._round_scope: int | None = None
+        # 이번 호출에서 본문을 이미 실은 chunk_id -> {"ref": …, "snippet": …}
+        # 열쇠는 (attachment_id, chunk_id) 다. chunk_id(P0001-001)는 문헌 안에서만
+        # 고유해서 문헌이 다르면 같은 값이 다른 본문을 가리킨다.
+        self._round_text_chunks: dict[tuple[str, str], dict] = {}
+        # 이번 호출에서 본문을 이미 실은 (attachment_id, page) -> ref
+        self._round_pages: dict[tuple[str, int], dict] = {}
 
     # ------------------------------------------------------------- 유틸리티
 
@@ -590,7 +724,20 @@ class RetrievalAgent:
         await self.emit(event_type, payload)
 
     def _component(self, component_id: str) -> ComponentState | None:
-        return self._components.get(str(component_id or "").strip())
+        key = str(component_id or "").strip()
+        return self._components.get(self._component_aliases.get(key, key))
+
+    def _canonical_action(self, item):
+        if isinstance(item, FinalizeEvidence):
+            return item.model_copy(update={
+                "components": [self._canonical_action(row) for row in item.components]
+            })
+        if not hasattr(item, "component_id"):
+            return item
+        state = self._component(item.component_id)
+        if state is None or item.component_id == state.id:
+            return item
+        return item.model_copy(update={"component_id": state.id})
 
     def _refresh_priorities(self, round_no: int) -> None:
         for state in self._components.values():
@@ -612,7 +759,7 @@ class RetrievalAgent:
         level = component.current_priority if component else IMPORTANCE_MEDIUM
         score = PRIORITY_WEIGHT.get(level, PRIORITY_WEIGHT[IMPORTANCE_MEDIUM])
 
-        if isinstance(item, (SearchDocument, SearchExact, SearchNumbersAndSymbols)):
+        if isinstance(item, SEARCH_OR_CARRYOVER):
             score += 60
             if component is not None:
                 requested = str(getattr(item, "attachment", ALL_DOCUMENTS) or "")
@@ -644,7 +791,7 @@ class RetrievalAgent:
             # 반환 예산에 여러 번 밀린 요청은 새 요청만 계속 처리하면 영구히
             # 굶을 수 있다. 이월 횟수에 비례해 우선순위를 올려 다음 라운드에
             # 반드시 실행 기회를 얻도록 한다.
-            score += min(deferred_attempts, 5) * 100
+            score += deferred_attempts * 100
         return score
 
     def _enqueue_deferred(
@@ -655,14 +802,24 @@ class RetrievalAgent:
         round_no: int,
         reason: str,
         first_round: int | None = None,
-        attempts: int = 0,
+        attempts: int | None = None,
     ) -> None:
+        # _search/_read 가 부분 반환 뒤 만드는 후속 요청도 같은 대기 이력을
+        # 잇는다. 여기서 0 으로 되돌리면 오래 기다린 요청이 매번 새 요청이 된다.
+        parent = self._active_deferred
+        first_round = first_round or (parent.first_round if parent else round_no)
+        if attempts is None:
+            attempts = parent.attempts + 1 if parent else 0
+        item = self._canonical_action(item)
         key = self._action_key(item)
-        if any(self._action_key(entry.item) == key for entry in self._deferred_actions):
-            return
+        for entry in self._deferred_actions:
+            if self._action_key(entry.item) == key:
+                entry.first_round = min(entry.first_round, first_round)
+                entry.attempts = max(entry.attempts, attempts)
+                return
         deferred = DeferredAction(
             item=item,
-            first_round=first_round or round_no,
+            first_round=first_round,
             reason=reason,
             attempts=attempts,
         )
@@ -678,6 +835,7 @@ class RetrievalAgent:
         seen: set[str] = set()
         position = 0
         for deferred in pending:
+            deferred.item = self._canonical_action(deferred.item)
             key = self._action_key(deferred.item)
             if key in seen:
                 continue
@@ -685,6 +843,7 @@ class RetrievalAgent:
             scheduled.append((deferred.item, deferred, position))
             position += 1
         for item in items:
+            item = self._canonical_action(item)
             if isinstance(item, FinalizeEvidence):
                 continue
             key = self._action_key(item)
@@ -695,6 +854,10 @@ class RetrievalAgent:
             position += 1
         scheduled.sort(
             key=lambda row: (
+                # 열람을 먼저 묶으면 페이지 본문을 뒤의 검색 후보도 참조할 수
+                # 있다. 새 광범위 검색이 이월 열람의 반환 공간을 차지하지 않는다.
+                0 if isinstance(row[0], (ReadPage, ReadPages, ReadParagraph))
+                else 1 if row[1] is not None else 2,
                 -self._action_priority(
                     row[0],
                     deferred=row[1] is not None,
@@ -706,9 +869,23 @@ class RetrievalAgent:
         return [(item, deferred) for item, deferred, _position in scheduled]
 
     def _deferred_preview(self) -> dict:
+        # 같은 사유로 밀린 action 이 스무 개면 같은 문장이 스무 번 실린다.
+        # 사유별로 묶는다. 어떤 요청이 왜 미처리인지는 그대로 남는다.
+        groups: list[dict] = []
+        by_reason: dict[str, dict] = {}
+        for entry in self._deferred_actions[:20]:
+            row = entry.to_dict()
+            reason = row.pop("reason", "")
+            row = {key: value for key, value in row.items() if value not in ("", 0)}
+            group = by_reason.get(reason)
+            if group is None:
+                group = {"reason": reason, "items": []}
+                by_reason[reason] = group
+                groups.append(group)
+            group["items"].append(row)
         return {
             "count": len(self._deferred_actions),
-            "items": [entry.to_dict() for entry in self._deferred_actions[:20]],
+            "deferred": groups,
             "note": (
                 "ARIA 가 다음 action 을 자동 이월합니다. 같은 요청을 반복하지 "
                 "말고, 이번 라운드에 반환된 새 결과와 구성별 우선순위를 "
@@ -731,6 +908,32 @@ class RetrievalAgent:
 
     def _sync_deferred_pending(self, run: RetrievalRun) -> None:
         run.deferred_pending = [entry.to_dict() for entry in self._deferred_actions]
+        # 이월할 때마다 같은 누락 수를 누적하지 않고 실제 잔여 목록으로 센다.
+        for component in self._components.values():
+            for attachment_id, record in component.search_attempts.items():
+                states = [state for state in self._carryovers.values()
+                          if state.component_id == component.id
+                          and state.attachment_id == attachment_id]
+                if not states:
+                    continue
+                record.omitted = sum(len(state.pending) for state in states)
+                latest = [state for state in self._latest_carryovers.values()
+                          if state.component_id == component.id
+                          and state.attachment_id == attachment_id]
+                record.failed_channels = list(dict.fromkeys(
+                    channel["channel"] for state in latest for channel in state.channels
+                    if channel.get("error") or (channel.get("requested") and not channel.get("executed"))
+                ))
+            component.failed_channels = list(dict.fromkeys(
+                channel for record in component.search_attempts.values()
+                for channel in record.failed_channels
+            ))
+        run.budget_exhausted = bool(
+            self._round_limit_reached or self._budget_pending_pages
+            or self._deferred_actions
+            or any(state.pending for state in self._carryovers.values())
+        )
+        run.budget_limited = run.budget_limited or run.budget_exhausted
 
     def _documents_for(self, attachment: str) -> tuple[list[IndexedDocument], str]:
         """action 의 attachment 값을 실제 문헌 목록으로 바꾼다.
@@ -771,10 +974,17 @@ class RetrievalAgent:
             user_message = render_round(payload)
             round_dir = self.work_dir / "rounds"
             round_dir.mkdir(parents=True, exist_ok=True)
+            # .in.txt 는 **실제로 보낸 것 그대로**다. 해시(input_sha256)도 이
+            # 문자열에서 나온다. 사람이 읽기 위한 들여쓰기 사본은 아래에 다른
+            # 이름으로 따로 쓴다 — 둘을 한 파일에 섞으면 어느 쪽이 전송분인지
+            # 나중에 알 수 없다.
             (round_dir / f"round-{round_no:02d}.in.txt").write_text(
                 f"===== SYSTEM PROMPT =====\n{AGENT_SYSTEM_PROMPT}\n\n"
                 f"===== USER MESSAGE =====\n{user_message}",
                 encoding="utf-8",
+            )
+            (round_dir / f"round-{round_no:02d}.payload.readable.json").write_text(
+                dump_readable_json(payload) + "\n", encoding="utf-8"
             )
 
             record = RoundRecord(
@@ -813,9 +1023,9 @@ class RetrievalAgent:
             # 자르는 주체는 모델이 아니라 CLI 다. 넘겨 보내면 뒷부분이 조용히
             # 사라진 채로 검색이 돈다.
             provider_budget = getattr(self.provider, "max_input_bytes", None)
-            payload_bytes = len(AGENT_SYSTEM_PROMPT.encode("utf-8")) + len(
-                user_message.encode("utf-8")
-            )
+            # CLI 래퍼와 JSON 이스케이프까지 포함한 실제 전송 크기.
+            payload_bytes = self.provider.payload_bytes(AGENT_SYSTEM_PROMPT, user_message)
+            record.input_bytes = payload_bytes
             if provider_budget and payload_bytes > provider_budget:
                 record.status = "input_too_large"
                 record.error = (
@@ -891,6 +1101,7 @@ class RetrievalAgent:
 
             pending_error = ""
             self._declare_components(response, run)
+            response.actions = [self._canonical_action(item) for item in response.actions]
             self._refresh_priorities(round_no)
             record.actions = len(response.actions)
             if response.notes:
@@ -970,7 +1181,8 @@ class RetrievalAgent:
                 response.actions, run, round_no
             )
 
-        run.budget_exhausted = True
+        self._round_limit_reached = True
+        run.budget_limited = True
         run.notes.append(
             f"검색 라운드 상한({self.budget.max_rounds})에 도달해 루프를 끝냈습니다. "
             "모인 근거만으로 패키지를 만듭니다."
@@ -1109,6 +1321,29 @@ class RetrievalAgent:
             )
             self._components[component_id] = state
             self._order.append(component_id)
+        # 중복 label이나 다른 구성의 정식 ID와 충돌한 label은 추측해 연결하지 않는다.
+        labels: dict[str, list[str]] = {}
+        for state in self._components.values():
+            labels.setdefault(state.label, []).append(state.id)
+        self._component_aliases = {
+            label: ids[0] for label, ids in labels.items()
+            if len(ids) == 1 and label not in self._components
+        }
+        for state in self._components.values():
+            state.depends_on = [self._component_aliases.get(key, key) for key in state.depends_on]
+        # 선언 전에 보류된 요청도 같은 ID 체계로 옮기고 대기 이력은 유지한다.
+        unique_pending: dict[str, DeferredAction] = {}
+        for entry in self._deferred_actions:
+            entry.item = self._canonical_action(entry.item)
+            key = self._action_key(entry.item)
+            prior = unique_pending.get(key)
+            if prior is None:
+                unique_pending[key] = entry
+            else:
+                prior.first_round = min(prior.first_round, entry.first_round)
+                prior.attempts = max(prior.attempts, entry.attempts)
+        self._deferred_actions = list(unique_pending.values())
+        self._sync_deferred_pending(run)
         run.components = [self._components[key] for key in self._order]
         self.trace.write(
             "components",
@@ -1124,6 +1359,29 @@ class RetrievalAgent:
                 ]
             },
         )
+
+    @staticmethod
+    def _chunks_with_text(results: list[dict]) -> set:
+        """이번 메시지의 results 안에 본문이 실린 (문헌 alias, chunk_id).
+
+        같은 메시지에 원문이 이미 있는 구간은 후보 장부에서 발췌를 뺀다.
+        chunk_id 는 남으므로 어느 후보인지, 어떤 구성에 연결됐는지는 그대로다.
+        chunk_id 만으로는 문헌을 가릴 수 없어 문헌 식별자와 짝으로 센다.
+        """
+        shown: set = set()
+        for entry in results or []:
+            for document in entry.get("documents") or []:
+                for hit in document.get("hits") or []:
+                    if hit.get("text") and hit.get("chunk_id"):
+                        shown.add((str(hit.get("alias") or ""), str(hit["chunk_id"])))
+            alias = str(entry.get("attachment") or "")
+            for page in entry.get("pages") or []:
+                if not page.get("text"):
+                    continue
+                for chunk in page.get("chunks") or []:
+                    if chunk.get("chunk_id"):
+                        shown.add((alias, str(chunk["chunk_id"])))
+        return shown
 
     def _round_payload(
         self, round_no: int, results: list[dict], pending_error: str
@@ -1154,6 +1412,7 @@ class RetrievalAgent:
                 for document in self.corpus
             ],
         }
+        shown_chunks = self._chunks_with_text(results)
         if self._order:
             component_rows = []
             for key in self._order:
@@ -1177,15 +1436,7 @@ class RetrievalAgent:
                         "queries_total": len(state.queries),
                         "candidates_found": len(state.hit_chunks),
                         "candidate_ledger": [
-                            {
-                                "attachment": candidate.get("alias"),
-                                "chunk_id": candidate.get("chunk_id"),
-                                "page": candidate.get("page_number"),
-                                "score": round(float(candidate.get("score") or 0), 6),
-                                "channels": candidate.get("channels") or [],
-                                "snippet": candidate.get("snippet") or "",
-                                "seen_count": candidate.get("seen_count", 1),
-                            }
+                            self._ledger_row(candidate, shown_chunks)
                             for candidate in state.top_candidates()
                         ],
                     }
@@ -1204,6 +1455,27 @@ class RetrievalAgent:
             payload["results"] = results
         return payload
 
+    @staticmethod
+    def _ledger_row(candidate: dict, shown_chunks: set) -> dict:
+        """후보 장부 한 줄. 출처(문헌·페이지·채널)는 남기고 중복만 줄인다."""
+        chunk_id = str(candidate.get("chunk_id") or "")
+        alias = str(candidate.get("alias") or "")
+        row = {
+            "attachment": candidate.get("alias"),
+            "chunk_id": chunk_id,
+            "page": candidate.get("page_number"),
+            # 소수점 여섯 자리는 후보 순서를 바꾸지 않는다. 순서를 가릴 만큼만 남긴다.
+            "score": round(float(candidate.get("score") or 0), 3),
+            "channels": candidate.get("channels") or [],
+            "seen_count": candidate.get("seen_count", 1),
+        }
+        if (alias, chunk_id) in shown_chunks:
+            # 같은 메시지의 results 에 원문이 이미 실려 있다.
+            row["text_shown_in_this_round"] = True
+        else:
+            row["snippet"] = candidate.get("snippet") or ""
+        return row
+
     async def _execute_actions(
         self, items: list, run: RetrievalRun, round_no: int
     ) -> list[dict]:
@@ -1215,11 +1487,52 @@ class RetrievalAgent:
         실린다. 그러면 Provider 전송 한도에 걸려 검색 비용을 다 쓰고 나서
         실행이 실패한다.
         """
+        if self._round_scope != round_no:
+            # 새 LLM 호출이 시작됐다. 같은 메시지 안이라는 전제가 깨지므로
+            # 중복 판정 근거를 모두 버린다.
+            self._round_scope = round_no
+            self._round_text_chunks.clear()
+            self._round_pages.clear()
         results: list[dict] = []
         budget_left = self.budget.max_round_result_chars
         scheduled = self._scheduled_actions(items)
 
+        # 후보 0건 구성마다 첫 검색 하나를 먼저 실행한다. 예약 몫을 나눠서
+        # 한 구성의 전체문헌 검색 하나가 다른 미확보 구성을 밀어내지 못하게 한다.
+        reserved = []
+        ordinary = []
+        unseeded_ids: set[str] = set()
+        for row in scheduled:
+            item, _deferred = row
+            component = self._component(getattr(item, "component_id", ""))
+            if (
+                isinstance(item, SEARCH_OR_CARRYOVER)
+                and component is not None and not component.hit_chunks
+                and component.id not in unseeded_ids
+            ):
+                reserved.append(row)
+                unseeded_ids.add(component.id)
+            else:
+                ordinary.append(row)
+        scheduled = reserved + ordinary
+        reserved_left = (
+            int(budget_left * UNSEEDED_RESULT_SHARE) if ordinary else budget_left
+        )
+
         for position, (item, deferred) in enumerate(scheduled):
+            action_budget = budget_left
+            if position < len(reserved):
+                action_budget = min(budget_left, reserved_left // (len(reserved) - position))
+            elif isinstance(item, SEARCH_OR_CARRYOVER):
+                # 먼저 받은 큰 검색 하나가 남은 반환 공간을 독점하지 않도록
+                # 나눈다. 남은 후보는 기존 이월 큐에 보존하며 검색 범위를 버리지 않는다.
+                remaining_searches = sum(
+                    isinstance(next_item, SEARCH_OR_CARRYOVER)
+                    for next_item, _ in scheduled[position:]
+                )
+                action_budget = min(
+                    budget_left, max(4000, budget_left // max(1, remaining_searches))
+                )
             if self.is_cancelled():
                 run.cancelled = True
                 if deferred is not None:
@@ -1245,7 +1558,7 @@ class RetrievalAgent:
                         "reason": reason,
                     }
                 )
-                run.budget_exhausted = True
+                run.budget_limited = True
                 self._enqueue_deferred(
                     item,
                     run=run,
@@ -1256,9 +1569,13 @@ class RetrievalAgent:
                 )
                 continue
 
-            entry, _reported = await self._execute_one(
-                item, run, round_no, budget_left
-            )
+            self._active_deferred = deferred
+            try:
+                entry, _reported = await self._execute_one(
+                    item, run, round_no, action_budget
+                )
+            finally:
+                self._active_deferred = None
             if entry is None:
                 continue
             # 소비량은 handler 의 자기 보고가 아니라 **실제 직렬화 크기**로
@@ -1266,7 +1583,7 @@ class RetrievalAgent:
             # 여기서 재는 것은 "실제로 얼마가 나갔나"다. 둘을 같은 값으로
             # 두면 세지 않는 필드가 생기는 순간 예산이 조용히 뚫린다.
             entry_size = json_size(entry)
-            if entry_size > budget_left:
+            if entry_size > action_budget:
                 reason = (
                     "action 결과 자체가 이번 라운드의 남은 반환 문자 예산보다 "
                     "커서 다음 라운드로 자동 이월합니다."
@@ -1279,7 +1596,7 @@ class RetrievalAgent:
                         "reason": reason,
                     }
                 )
-                run.budget_exhausted = True
+                run.budget_limited = True
                 self._enqueue_deferred(
                     item,
                     run=run,
@@ -1290,15 +1607,21 @@ class RetrievalAgent:
                 )
                 continue
             budget_left -= entry_size
+            if position < len(reserved):
+                reserved_left -= entry_size
             results.append(entry)
             if deferred is not None:
                 run.deferred_executed += 1
+        self._sync_deferred_pending(run)
         return results
 
     async def _execute_one(
         self, item, run: RetrievalRun, round_no: int, budget_left: int
     ) -> tuple[dict | None, int]:
         action_name = item.action
+        if isinstance(item, CarryoverDelivery):
+            # 이월은 조회가 아니라 전달이다. 문헌 목록도, 인덱스 접근도 없다.
+            return await self._deliver_carryover(item, run, round_no, budget_left)
         attachment = getattr(item, "attachment", ALL_DOCUMENTS)
         documents, error = self._documents_for(attachment)
         if error:
@@ -1314,6 +1637,8 @@ class RetrievalAgent:
 
         if isinstance(item, GetDocumentStatus):
             entry, reported = self._document_status(documents, action_name, budget_left)
+            if json_size(entry) > budget_left:
+                return entry, reported
             for alias in entry.get("omitted_by_budget") or []:
                 # 상태 조회도 문헌 수가 많으면 반환 예산으로 잘릴 수 있다.
                 # 누락된 문헌만 다음 라운드에 다시 조회해 전체 상태를 보존한다.
@@ -1328,7 +1653,7 @@ class RetrievalAgent:
         if isinstance(item, (ReadPage, ReadPages, ReadParagraph)):
             return await self._read(item, documents, run, round_no, budget_left)
 
-        if isinstance(item, (SearchDocument, SearchExact, SearchNumbersAndSymbols)):
+        if isinstance(item, SEARCH_ITEMS):
             return await self._search(item, documents, run, round_no, budget_left)
 
         return None, 0
@@ -1342,14 +1667,22 @@ class RetrievalAgent:
         된다(실측 8,318자). 본문이 없다는 이유로 소비량을 0 으로 두면 이 action
         만 반복해서 라운드 예산을 통째로 우회할 수 있다.
         """
-        entry: dict = {"action": action_name, "documents": []}
+        # 문헌마다 같은 문장을 반복하지 않는다. action 당 한 번이면 뜻은 같다.
+        # 파일명은 매 라운드 payload 의 documents 목록에 이미 실린다.
+        entry: dict = {
+            "action": action_name,
+            "note": (
+                "OCR 은 수행하지 않았습니다. 아래 목록의 페이지는 내용이 "
+                "없다는 뜻이 아니라 텍스트를 얻지 못했다는 뜻입니다."
+            ),
+            "documents": [],
+        }
         spent = json_size(entry)
         omitted: list[str] = []
 
         for document in documents:
             row = {
                 "attachment": document.alias,
-                "filename": document.filename,
                 "pdf_sha256": document.sha256,
                 **{
                     key: document.report.get(key)
@@ -1366,10 +1699,6 @@ class RetrievalAgent:
                         "status",
                     )
                 },
-                "note": (
-                    "OCR 은 수행하지 않았습니다. 위 목록의 페이지는 내용이 "
-                    "없다는 뜻이 아니라 텍스트를 얻지 못했다는 뜻입니다."
-                ),
             }
             cost = json_size(row)
             if spent + cost > budget_left:
@@ -1396,6 +1725,140 @@ class RetrievalAgent:
             finish()
         return entry, json_size(entry)
 
+    def _carryover_token(
+        self, item, *, attachment_id: str, terms: list[str], excluded_ids: set
+    ) -> str:
+        """고정 후보 목록의 열쇠.
+
+        문헌 id 를 포함한다 — chunk_id 는 문헌 안에서만 고유하다. limit 도
+        포함한다: 모델이 더 넓은 limit 으로 다시 요청하는 것은 나머지 전달이
+        아니라 **새로운 탐색**이므로 별도의 목록을 얻어야 한다.
+        """
+        payload = json.dumps(
+            {
+                "action": getattr(item, "action", "?"),
+                "component_id": getattr(item, "component_id", ""),
+                "attachment_id": attachment_id,
+                "terms": sorted(
+                    {str(value).strip().lower() for value in terms if str(value).strip()}
+                ),
+                "exclude": sorted(str(value) for value in excluded_ids),
+                "limit": int(getattr(item, "limit", 0) or 0),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return _sha256(payload)
+
+    def _open_carryover(
+        self,
+        *,
+        item,
+        result: search_module.DocumentSearchResult,
+        terms: list[str],
+        excluded_ids: set,
+        round_no: int,
+    ) -> CarryoverState:
+        """이 문헌의 후보 목록을 최초 조회 시점 그대로 고정한다.
+
+        제외 목록은 여기서 **복사본에** 적용한다. 캐시에 든
+        DocumentSearchResult 를 직접 고치면 같은 결과를 공유하는 다른 요청의
+        후보가 사라진다.
+        """
+        attachment_id = result.document.attachment_id
+        request_key = self._carryover_token(
+            item,
+            attachment_id=attachment_id,
+            terms=terms,
+            excluded_ids=excluded_ids,
+        )
+        # 짧은 검색어 때문에 trigram을 생략하는 등 정상적인 skip은 재시도
+        # 대상 오류와 다르다. 조회 캐시와 같은 오류 기준을 사용한다.
+        failed = any(channel.get("error") for channel in result.channels)
+        # 실패/부분 성공 결과도 전달할 후보가 있을 수 있어 자기 목록을 유지한다.
+        # 재시도는 별도 목록을 만들고, 성공한 목록만 같은 요청에서 재사용한다.
+        token = (_sha256(f"{request_key}:failed:{len(self._carryovers)}")
+                 if failed else request_key)
+        state = self._carryovers.get(token)
+        if state is not None:
+            self._latest_carryovers[request_key] = state
+            return state
+        hits = [
+            hit
+            for hit in result.hits
+            if not excluded_ids or hit.row.chunk_id not in excluded_ids
+        ]
+        state = CarryoverState(
+            token=token,
+            request_key=request_key,
+            action=getattr(item, "action", "?"),
+            component_id=getattr(item, "component_id", ""),
+            attachment_id=attachment_id,
+            alias=result.document.alias,
+            terms=list(terms),
+            channels=list(result.channels),
+            hits=hits,
+        )
+        self._carryovers[token] = state
+        self._latest_carryovers[request_key] = state
+        self.trace.write(
+            "carryover_opened",
+            {
+                "token": token,
+                "action": state.action,
+                "component_id": state.component_id,
+                "attachment": state.alias,
+                "candidates": len(hits),
+            },
+            round_no=round_no,
+        )
+        return state
+
+    @staticmethod
+    def _search_signature(
+        item, queries: list[str], phrases: list[str], literals: list[str],
+        excluded_ids: set,
+    ) -> str:
+        """같은 조회인지 가리는 열쇠.
+
+        검색어 순서와 대소문자·주변 공백은 결과를 바꾸지 않으므로 정규화한다.
+        같은 열쇠면 인덱스를 다시 뒤지지 않는다. 이월은 여기로 오지 않는다 —
+        고정된 후보 목록에서 미전달분만 꺼내므로 조회 자체가 없다.
+        """
+        terms = sorted(
+            {str(value).strip().lower() for value in (*queries, *phrases, *literals) if str(value).strip()}
+        )
+        return json.dumps(
+            {
+                "action": getattr(item, "action", "?"),
+                "component_id": getattr(item, "component_id", ""),
+                "attachment": str(getattr(item, "attachment", ALL_DOCUMENTS) or ""),
+                "terms": terms,
+                "exclude": sorted(str(value) for value in excluded_ids),
+                "limit": int(item.limit),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+    def _chunk_context(self, document: IndexedDocument, chunk_id: str) -> tuple[str, str]:
+        """후보 청크의 같은 페이지 앞뒤 문맥.
+
+        여기서 붙여 보내는 문맥에는 chunk_id 를 달지 않는다. 근거로 인용할 수
+        있는 것은 여전히 반환된 hit 의 chunk_id 뿐이고(run.exposed_chunks),
+        이 문자열은 모델이 "이 구간이 무엇을 말하는 자리인가"를 판단하기
+        위한 읽을거리다.
+        """
+        try:
+            before, after = document.index.neighbours(
+                chunk_id,
+                before=CONTEXT_NEIGHBOUR_CHUNKS,
+                after=CONTEXT_NEIGHBOUR_CHUNKS,
+            )
+        except Exception:
+            return "", ""
+        return (before or "")[-CONTEXT_CHARS:], (after or "")[:CONTEXT_CHARS]
+
     async def _search(
         self,
         item,
@@ -1414,37 +1877,155 @@ class RetrievalAgent:
             phrases = item.phrases
         else:
             literals = item.terms
+        terms = [*queries, *phrases, *literals]
 
-        # 이월 검색은 이미 모델에게 전달한 청크를 제외하고 다음 후보를
-        # 가져온다. limit 만 그대로 재사용하면 같은 상위 후보가 반복되어
-        # 반환 예산을 다시 낭비하므로 제외 수만큼 조회 폭을 넓힌다.
         excluded_ids = set(getattr(item, "exclude_chunk_ids", []) or [])
-        search_limit = min(
-            20,
-            max(
-                self.budget.hits_per_document,
-                int(item.limit) + len(excluded_ids),
-            ),
-        )
-        results = search_module.search_corpus(
-            documents,
-            queries=queries,
-            phrases=phrases,
-            literals=literals,
-            per_document_limit=search_limit,
-            semantic_encoder=self.semantic_encoder,
-        )
-        for result in results:
-            if excluded_ids:
-                result.hits = [
-                    hit for hit in result.hits if hit.row.chunk_id not in excluded_ids
-                ]
+        signature = self._search_signature(item, queries, phrases, literals, excluded_ids)
+        cached = self._search_cache.get(signature)
+        first_round = round_no
+        if cached is not None:
+            first_round, results = cached
+            self.trace.write(
+                "search_repeated",
+                {
+                    "action": item.action,
+                    "component_id": getattr(item, "component_id", ""),
+                    "attachment": getattr(item, "attachment", ALL_DOCUMENTS),
+                    "queries": terms,
+                    "first_round": first_round,
+                },
+                round_no=round_no,
+            )
+        else:
+            # 조회 폭은 요청과 예산 설정만으로 정한다. 이월 때문에 넓히지
+            # 않는다 — 넓히면 나머지를 전달하는 도중에 새 후보가 계속 붙는다.
+            search_limit = min(
+                20, max(self.budget.hits_per_document, int(item.limit))
+            )
+            results = search_module.search_corpus(
+                documents,
+                queries=queries,
+                phrases=phrases,
+                literals=literals,
+                per_document_limit=search_limit,
+                semantic_encoder=self.semantic_encoder,
+            )
+            # 실패한 검색은 다음 요청에서 재시도할 수 있게 한다.
+            if not any(channel.get("error") for result in results for channel in result.channels):
+                self._search_cache[signature] = (round_no, results)
 
+        # 모델용 최소 필드와 감사 자료를 분리한다. UUID/점수/채널별 순위는
+        # 원문 검증과 재현에 필요하지만 매 호출의 프롬프트에는 필요하지 않다.
+        self.trace.write(
+            "search_candidates",
+            {
+                "component_id": getattr(item, "component_id", ""),
+                "documents": [
+                    {
+                        "attachment": result.document.alias,
+                        "channels": result.channels,
+                        "hits": [
+                            {**hit.to_dict(), "channel_ranks": dict(hit.ranks)}
+                            for hit in result.hits
+                        ],
+                    }
+                    for result in results
+                ],
+            },
+            round_no=round_no,
+        )
+
+        deliveries: list[tuple] = []
+        for result in results:
+            state = self._open_carryover(
+                item=item,
+                result=result,
+                terms=terms,
+                excluded_ids=excluded_ids,
+                round_no=round_no,
+            )
+            # 아직 전달하지 못한 후보가 있으면 그것부터 돌려준다. 모두 전달한
+            # 목록을 모델이 같은 조건으로 다시 요청하면 고정 목록을 그대로
+            # 다시 보여 준다 — 새 후보를 보충하지는 않는다.
+            hits = state.pending or list(state.hits)
+            deliveries.append((result.document, list(result.channels), hits, state))
+
+        return await self._deliver(
+            item=item,
+            component=component,
+            deliveries=deliveries,
+            run=run,
+            round_no=round_no,
+            budget_left=budget_left,
+            terms=terms,
+            repeated_first_round=first_round if cached is not None else None,
+            carryover=False,
+        )
+
+    async def _deliver_carryover(
+        self,
+        item: CarryoverDelivery,
+        run: RetrievalRun,
+        round_no: int,
+        budget_left: int,
+    ) -> tuple[dict | None, int]:
+        """고정 목록의 미전달분만 돌려준다. 인덱스를 다시 뒤지지 않는다."""
+        state = self._carryovers.get(item.token)
+        if state is None:
+            return None, 0
+        pending = state.pending
+        document = self._by_alias.get(state.alias)
+        if not pending or document is None:
+            # 남은 후보가 없으면 이 이월 작업은 끝난 것이다. 다시 큐에 넣지
+            # 않는다(경고를 숨기는 것이 아니라 실제로 소진했다).
+            self.trace.write(
+                "carryover_complete",
+                {
+                    "token": state.token,
+                    "action": state.action,
+                    "component_id": state.component_id,
+                    "attachment": state.alias,
+                    "delivered": len(state.delivered),
+                },
+                round_no=round_no,
+            )
+            return None, 0
+        return await self._deliver(
+            item=item,
+            component=self._component(state.component_id),
+            deliveries=[(document, list(state.channels), pending, state)],
+            run=run,
+            round_no=round_no,
+            budget_left=budget_left,
+            terms=list(state.terms),
+            repeated_first_round=None,
+            carryover=True,
+        )
+
+    async def _deliver(
+        self,
+        *,
+        item,
+        component,
+        deliveries: list,
+        run: RetrievalRun,
+        round_no: int,
+        budget_left: int,
+        terms: list[str],
+        repeated_first_round: int | None,
+        carryover: bool,
+    ) -> tuple[dict, int]:
+        """고정된 후보 목록을 이번 라운드 반환 예산 안에서 payload 로 만든다.
+
+        후보를 고르는 일은 여기서 하지 않는다. 여기서 정하는 것은 "이번에
+        어디까지 실어 보내는가"뿐이고, 싣지 못한 나머지는 목록에 그대로 남아
+        다음 라운드에 이어서 나간다.
+        """
         # 완성된 action envelope 를 포함한 JSON 전체를 직접 재면서 후보를 넣는다.
         # 문헌 row 크기만 더하면 component_id와 생략 안내가 마지막에 붙어 상한을
         # 다시 넘는다. 실제로 4,000자 예산에서 최종 entry 가 5,813자가 됐었다.
         payload_documents: list[dict] = []
-        omitted_aliases = [result.document.alias for result in results]
+        omitted_aliases = [document.alias for document, _c, _h, _s in deliveries]
         preview_limit = 40
         include_hint = True
         omission_hint = (
@@ -1455,10 +2036,15 @@ class RetrievalAgent:
 
         def make_payload(document_rows: list[dict], aliases: list[str]) -> dict:
             payload: dict = {
-                "action": item.action,
+                "action": getattr(item, "action", "?"),
                 "component_id": getattr(item, "component_id", ""),
                 "documents": document_rows,
             }
+            if repeated_first_round is not None:
+                payload["repeated_search"] = True
+                payload["first_executed_round"] = repeated_first_round
+            if carryover:
+                payload["carryover"] = True
             if aliases:
                 payload["omitted_document_count"] = len(aliases)
                 if preview_limit:
@@ -1480,39 +2066,41 @@ class RetrievalAgent:
                 break
 
         base_cost = json_size(make_payload([], omitted_aliases))
+        if base_cost > budget_left:
+            # 바깥 실행기가 원래 요청 하나를 이월한다. 여기에 문헌별 후속
+            # 요청까지 만들면 원래 전체 검색과 그 자식 검색이 중복 대기한다.
+            # 고정 목록은 손대지 않았으므로 후보는 하나도 잃지 않는다.
+            return make_payload([], omitted_aliases), base_cost
         available = max(0, budget_left - base_cost)
 
-        for position, result in enumerate(results):
+        for position, (document, channels, hits, state) in enumerate(deliveries):
             executed = [
-                entry["channel"] for entry in result.channels if entry.get("executed")
+                entry["channel"] for entry in channels if entry.get("executed")
             ]
             failed = [
                 entry["channel"]
-                for entry in result.channels
+                for entry in channels
                 if entry.get("requested") and not entry.get("executed")
             ]
             prefix_limit = base_cost + (
-                available * (position + 1) // max(1, len(results))
+                available * (position + 1) // max(1, len(deliveries))
             )
             document_entry: dict = {
-                "attachment": result.document.alias,
-                "filename": result.document.filename,
-                "channels": _compact_channels(result.channels),
+                "attachment": document.alias,
+                "channels": _compact_channels(channels),
                 "hits": [],
             }
-            if result.hits:
-                document_entry["omitted_by_budget"] = len(result.hits)
+            if hits:
+                document_entry["omitted_by_budget"] = len(hits)
 
             # 채널별 순위는 **모델에게 보내지 않고** 감사 기록에만 남긴다.
             # 라운드 payload 는 예산이 걸린 자리라, 모델이 쓰지 않는 값을 넣으면
             # 그만큼 실제 근거가 밀린다. 반대로 "어느 채널이 몇 위로 올렸는가"는
             # 나중에 후보 선정을 되짚을 때 필요하다.
-            ranks_by_chunk = {
-                hit.row.chunk_id: dict(hit.ranks) for hit in result.hits
-            }
+            hits_by_chunk = {hit.row.chunk_id: hit for hit in hits}
 
             candidate_aliases = [
-                alias for alias in omitted_aliases if alias != result.document.alias
+                alias for alias in omitted_aliases if alias != document.alias
             ]
             trial = make_payload(
                 [*payload_documents, document_entry], candidate_aliases
@@ -1521,51 +2109,94 @@ class RetrievalAgent:
             if accepted:
                 omitted_aliases = candidate_aliases
                 payload_documents.append(document_entry)
-                for hit in result.hits:
+                for hit in hits:
                     snippet = hit.row.text[: SNIPPET_CHARS]
                     row = {
-                        **hit.to_dict(include_text=False),
-                        "text": snippet,
-                        "truncated": len(hit.row.text) > SNIPPET_CHARS,
+                        "alias": hit.alias,
+                        "chunk_id": hit.row.chunk_id,
+                        "pdf_page": hit.row.page_number,
+                        "section": hit.row.section,
+                        "extraction_status": hit.row.extraction_status,
                     }
+                    # 같은 호출 안에서 이미 실은 구간이면 본문을 한 번만 보낸다.
+                    # 후보 행 자체는 남으므로 구성-근거 연결은 그대로다.
+                    text_key = (document.attachment_id, hit.row.chunk_id)
+                    shown = self._round_text_chunks.get(text_key)
+                    if shown is not None:
+                        row["text_shown_in_this_round"] = shown["ref"]
+                    else:
+                        row["text"] = snippet
+                        before, after = self._chunk_context(
+                            document, hit.row.chunk_id
+                        )
+                        if before:
+                            row["context_before"] = before
+                        if after:
+                            row["context_after"] = after
                     document_entry["hits"].append(row)
-                    omitted = len(result.hits) - len(document_entry["hits"])
+                    omitted = len(hits) - len(document_entry["hits"])
                     if omitted:
                         document_entry["omitted_by_budget"] = omitted
                     else:
                         document_entry.pop("omitted_by_budget", None)
                     if json_size(make_payload(payload_documents, omitted_aliases)) > prefix_limit:
                         document_entry["hits"].pop()
-                        omitted = len(result.hits) - len(document_entry["hits"])
+                        omitted = len(hits) - len(document_entry["hits"])
                         document_entry["omitted_by_budget"] = omitted
                         break
 
             returned_rows = document_entry["hits"] if accepted else []
-            omitted = len(result.hits) - len(returned_rows)
+            omitted = len(hits) - len(returned_rows)
             if not accepted or omitted:
-                run.budget_exhausted = True
+                run.budget_limited = True
 
             # 예산 조정이 끝난 다음, 실제 payload 에 남은 행만 노출로 기록한다.
             # 잠깐 넣었다 뺀 행을 먼저 기록하면 AI 가 못 본 청크가 근거가 된다.
             for row in returned_rows:
-                attachment_id = str(row.get("attachment_id") or "")
+                attachment_id = document.attachment_id
                 chunk_id = str(row.get("chunk_id") or "")
                 if not attachment_id or not chunk_id:
                     continue
                 run.exposed_chunks.add((attachment_id, chunk_id))
+                original = hits_by_chunk[chunk_id]
+                ledger_snippet = row.get("text") or (
+                    (
+                        self._round_text_chunks.get((attachment_id, chunk_id)) or {}
+                    ).get("snippet")
+                    or original.row.text[:SNIPPET_CHARS]
+                )
+                if "text" in row:
+                    self._round_text_chunks.setdefault(
+                        (attachment_id, chunk_id),
+                        {
+                            "ref": {
+                                "action": getattr(item, "action", "?"),
+                                "component_id": getattr(item, "component_id", ""),
+                                "attachment": document.alias,
+                            },
+                            "snippet": row["text"],
+                        },
+                    )
                 if component is not None:
                     component.record_candidate(
                         attachment_id=attachment_id,
-                        alias=row.get("alias") or result.document.alias,
+                        alias=row.get("alias") or document.alias,
                         chunk_id=chunk_id,
-                        page_number=row.get("page_number"),
-                        paragraph=row.get("paragraph") or "",
-                        channels=list(row.get("channels") or []),
-                        ranks=ranks_by_chunk.get(chunk_id, {}),
-                        score=float(row.get("score") or 0.0),
-                        snippet=row.get("text") or "",
+                        page_number=original.row.page_number,
+                        paragraph=original.row.paragraph,
+                        channels=list(original.channels),
+                        ranks=dict(original.ranks),
+                        score=float(original.score or 0.0),
+                        snippet=ledger_snippet,
                         round_no=round_no,
                     )
+
+            # 실제로 전달한 것만 고정 목록에서 소진 처리한다. 예산 때문에 한
+            # 건도 전달하지 못했으면 목록은 그대로 남아 다음 라운드에 이어진다.
+            if state is not None:
+                state.mark_delivered(
+                    str(row.get("chunk_id") or "") for row in returned_rows
+                )
 
             if component is not None:
                 for channel in executed:
@@ -1575,64 +2206,58 @@ class RetrievalAgent:
                     if channel not in component.failed_channels:
                         component.failed_channels.append(channel)
                 component.record_search(
-                    attachment_id=result.document.attachment_id,
-                    alias=result.document.alias,
-                    queries=[*queries, *phrases, *literals],
+                    attachment_id=document.attachment_id,
+                    alias=document.alias,
+                    queries=terms,
                     channels_used=executed,
                     failed_channels=failed,
                     hits=len(returned_rows),
                     omitted=omitted,
                 )
 
-            # 결과 본문이 반환 예산에 걸린 경우 문헌 단위로 남은 후보를
-            # 이월한다. 다음 라운드에 같은 검색어를 반복하지 않도록 실제로
-            # 반환한 chunk_id 를 내부 제외 목록에 넣는다. 이 목록은 모델에게
-            # 공개하지 않고 ARIA 가 관리한다.
-            if component is not None and omitted:
-                returned_ids = [
-                    str(row.get("chunk_id") or "")
-                    for row in returned_rows
-                    if row.get("chunk_id")
-                ]
-                retry_excludes = list(
-                    dict.fromkeys([*excluded_ids, *returned_ids])
+            # 남은 후보는 **같은 고정 목록**을 가리키는 이월 작업으로 넘긴다.
+            # 새 검색이 아니므로 검색어도 limit 도 바뀌지 않고, 인덱스를 다시
+            # 뒤지지도 않는다. 목록을 다 전달하면 이월은 스스로 끝난다.
+            if state is not None and state.pending:
+                self._enqueue_deferred(
+                    CarryoverDelivery(
+                        token=state.token,
+                        action=state.action,
+                        component_id=state.component_id,
+                        attachment=state.alias,
+                    ),
+                    run=run,
+                    round_no=round_no,
+                    reason=(
+                        f"{document.alias} 검색 후보 {len(state.pending)}건이 "
+                        "라운드 반환 예산으로 누락됨"
+                    ),
                 )
-                try:
-                    retry_item = item.model_copy(
-                        update={
-                            "attachment": result.document.alias,
-                            "exclude_chunk_ids": retry_excludes,
-                            # 다음 호출에서 제외된 후보 뒤의 결과를 가져온다.
-                            "limit": min(
-                                20,
-                                max(int(item.limit), len(retry_excludes) + 1),
-                            ),
-                        }
-                    )
-                except Exception:
-                    retry_item = None
-                if retry_item is not None:
-                    self._enqueue_deferred(
-                        retry_item,
-                        run=run,
-                        round_no=round_no,
-                        reason=(
-                            f"{result.document.alias} 검색 후보 {omitted}건이 "
-                            "라운드 반환 예산으로 누락됨"
-                        ),
-                    )
+            elif state is not None:
+                self.trace.write(
+                    "carryover_complete",
+                    {
+                        "token": state.token,
+                        "action": state.action,
+                        "component_id": state.component_id,
+                        "attachment": state.alias,
+                        "delivered": len(state.delivered),
+                    },
+                    round_no=round_no,
+                )
 
         if component is not None:
-            for value in (*queries, *phrases, *literals):
+            for value in terms:
                 component.record_query(value)
 
         self.trace.write(
             "search",
             {
-                "action": item.action,
+                "action": getattr(item, "action", "?"),
                 "component_id": getattr(item, "component_id", ""),
                 "attachment": getattr(item, "attachment", ALL_DOCUMENTS),
-                "queries": [*queries, *phrases, *literals],
+                "queries": terms,
+                "carryover": carryover,
                 "hits": sum(len(entry["hits"]) for entry in payload_documents),
             },
             round_no=round_no,
@@ -1642,10 +2267,10 @@ class RetrievalAgent:
             {
                 "phase": "search",
                 "round": round_no,
-                "queries": [*queries, *phrases, *literals][:5],
+                "queries": terms[:5],
                 "message": (
-                    "로컬 인덱스 검색: "
-                    + ", ".join([*queries, *phrases, *literals][:3])[:120]
+                    ("이월 후보 전달: " if carryover else "로컬 인덱스 검색: ")
+                    + ", ".join(terms[:3])[:120]
                 ),
             },
         )
@@ -1705,10 +2330,20 @@ class RetrievalAgent:
             if component is not None
             else set()
         )
+        # 이미 전달한 페이지는 읽기 횟수를 다시 차감하지 않는다. 다만 새 모델
+        # 호출에서도 원문을 볼 수 있도록 캐시 본문을 반환 문자 예산 안에 싣는다.
+        repeated = [
+            page
+            for page in valid
+            if (document.attachment_id, page) in self._served_pages
+        ]
+        repeated_set = set(repeated)
+        fresh = [page for page in valid if page not in repeated_set]
         page_budget = max(0, self.budget.max_page_reads - run.pages_read)
-        eligible = valid[:page_budget]
-        skipped_budget = valid[page_budget:]
-        skipped_chars = list(eligible)
+        eligible = fresh[:page_budget]
+        skipped_budget = fresh[page_budget:]
+        self._budget_pending_pages.update((document.attachment_id, page) for page in valid)
+        skipped_chars = [*repeated, *eligible]
         served: list[dict] = []
         served_rows: dict[int, list] = {}
         include_hint = True
@@ -1720,7 +2355,14 @@ class RetrievalAgent:
                 "action": item.action,
                 "attachment": document.alias,
                 "pages": page_rows,
-                "pages_read_total": starting_pages_read + len(page_rows),
+                "pages_read_total": starting_pages_read
+                + len(
+                    [
+                        row
+                        for row in page_rows
+                        if row["pdf_page"] not in repeated_set
+                    ]
+                ),
                 "page_read_budget": self.budget.max_page_reads,
             }
             if rejected:
@@ -1752,16 +2394,25 @@ class RetrievalAgent:
             else:
                 break
 
-        for page in eligible:
-            rows = index.page_rows(page)
-            status = index.page_status(page) or {}
-            body = "\n\n".join(row.text for row in rows)
+        if json_size(make_payload([], skipped_chars)) > budget_left:
+            # 응답 골격도 못 담으면 상태를 바꾸거나 자식 요청을 만들지 않는다.
+            payload = make_payload([], skipped_chars)
+            return payload, json_size(payload)
+
+        for page in [*repeated, *eligible]:
+            is_repeat = page in repeated_set
+            page_key = (document.attachment_id, page)
+            if page_key not in self._page_cache:
+                self._page_cache[page_key] = (
+                    index.page_rows(page), index.page_status(page) or {}
+                )
+            rows, status = self._page_cache[page_key]
             page_entry = {
                 "pdf_page": page,
                 "printed_page": status.get("printed_page"),
                 "extraction_status": status.get("status"),
                 "extraction_error": status.get("extraction_error"),
-                "already_read": page in already,
+                "already_read": is_repeat or page in already,
                 "chunks": [
                     {
                         "chunk_id": row.chunk_id,
@@ -1770,30 +2421,60 @@ class RetrievalAgent:
                     }
                     for row in rows
                 ],
-                "text": body,
             }
+            if is_repeat:
+                page_entry["first_served_round"] = self._served_pages[
+                    (document.attachment_id, page)
+                ]
+            # 같은 호출 안에서 이미 실은 페이지면 본문을 한 번만 보낸다.
+            # 라운드가 바뀌면 registry 가 비므로 다음 호출에는 전문이 다시 실린다.
+            shown = self._round_pages.get(page_key)
+            if shown is not None:
+                page_entry["text_shown_in_this_round"] = shown
+            else:
+                page_entry["text"] = "\n\n".join(row.text for row in rows)
             candidate_skipped = [value for value in skipped_chars if value != page]
             trial = make_payload([*served, page_entry], candidate_skipped)
             if json_size(trial) > budget_left:
-                run.budget_exhausted = True
+                run.budget_limited = True
                 continue
             served.append(page_entry)
             served_rows[page] = rows
             skipped_chars = candidate_skipped
+            if "text" in page_entry:
+                ref = {
+                    "action": item.action,
+                    "component_id": getattr(item, "component_id", ""),
+                    "attachment": document.alias,
+                    "pdf_page": page,
+                }
+                self._round_pages.setdefault(page_key, ref)
+                for row in rows:
+                    self._round_text_chunks.setdefault(
+                        (document.attachment_id, row.chunk_id),
+                        {"ref": ref, "snippet": row.text[:SNIPPET_CHARS]},
+                    )
 
         # 선택이 끝난 뒤 실제로 반환되는 페이지에 대해서만 관측 상태를 갱신한다.
         for page_entry in served:
             page = int(page_entry["pdf_page"])
+            self._budget_pending_pages.discard((document.attachment_id, page))
+            if page in repeated_set:
+                run.repeat_page_reads += 1
+                if component is not None:
+                    component.record_page(document.attachment_id, page)
+                continue
             if page in already:
                 run.repeat_page_reads += 1
             for row in served_rows.get(page, []):
                 run.exposed_chunks.add((document.attachment_id, row.chunk_id))
             run.pages_read += 1
+            self._served_pages.setdefault((document.attachment_id, page), round_no)
             if component is not None:
                 component.record_page(document.attachment_id, page)
 
         if skipped_budget or skipped_chars:
-            run.budget_exhausted = True
+            run.budget_limited = True
 
         if skipped_chars and component is not None:
             # 페이지 본문 자체를 잘라서 반환하지 않는다. 반환 예산이 다시

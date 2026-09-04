@@ -12,7 +12,8 @@ const STAGE_LABEL: Record<string, string> = {
 
 export interface JobStreamState {
   events: StreamEvent[];
-  streamText: string;
+  /** 최종 결과 도착 전까지 받은 글자 수. 본문은 완료 후 job.result_text 로 온다. */
+  resultChars: number;
   status: JobStatus | null;
   stage: string;
   finished: boolean;
@@ -27,7 +28,7 @@ export interface JobStreamState {
 
 const EMPTY: JobStreamState = {
   events: [],
-  streamText: "",
+  resultChars: 0,
   status: null,
   stage: "",
   finished: false,
@@ -79,8 +80,14 @@ export function useJobStream(jobId: string | null): JobStreamState {
         const payload = event.payload ?? {};
 
         switch (event.type) {
-          case "result_stream":
-            next.streamText = prev.streamText + String(payload.delta ?? "");
+          case "result_progress":
+            // 모델 출력을 화면에 실시간으로 붙이지 않는다. 완성 전의 원문에는
+            // 기계 판독 블록이 섞여 있고, 보고서 자리에는 그것을 걷어낸 최종
+            // 결과만 놓는다. 여기서는 진행 정도만 받는다.
+            next.resultChars = Number(payload.chars ?? prev.resultChars);
+            next.stage = `결과 수신 중 (${Number(
+              payload.chars ?? 0,
+            ).toLocaleString()}자)`;
             break;
           case "status":
             next.status = payload.status as JobStatus;

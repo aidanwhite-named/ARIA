@@ -400,7 +400,7 @@ def _assemble(tmp_path, **kwargs):
     base = dict(
         job_kind=JobKind.PATENT_ANALYSIS,
         master_prompt="마스터 프롬프트",
-        attachments=[_attachment(tmp_path)],
+        attachments=kwargs["attachments"] if "attachments" in kwargs else [_attachment(tmp_path)],
         runtime_context="런타임 컨텍스트",
         runtime_context_enabled=True,
         max_chars=None,
@@ -463,6 +463,63 @@ def test_retrieval_does_not_inline_the_citation_body(tmp_path) -> None:
     body = assembly.representative.user_message
     assert "제40 실시예" not in body
     assert "로컬 색인" in body
+
+
+@pytest.mark.parametrize("claim_size", [463, 5_000, 20_000])
+def test_retrieval_budget_subtracts_actual_overhead(tmp_path, claim_size) -> None:
+    from app import retrieval
+    provider = AgyCliProvider()
+    options = dict(
+        attachments=[_attachment(tmp_path)],
+        retrieval_mode=RetrievalMode.RETRIEVAL,
+        retrieval_budget=RetrievalBudget(max_evidence_chars=100_000),
+        provider_byte_budget=provider.max_input_bytes,
+        provider_measure=provider.payload_bytes,
+        claim_text="한" * claim_size,
+        followup_instruction="추가 지시" * 200,
+    )
+    assembly = _assemble(tmp_path, **options)
+    budget = assembly.evidence_budget
+    assert budget.max_evidence_chars == 100_000
+    assert assembly.lane_bytes(provider)["single"] <= provider.max_input_bytes
+    empty = _assemble(tmp_path, **{
+        **options, "evidence_bundle": {retrieval.PLACEHOLDER_KEY: "a"},
+    })
+    assert budget.max_evidence_bytes == provider.max_input_bytes - (empty.lane_bytes(provider)["single"] - 1)
+    # ASCII 는 같은 바이트 안에서 54,000자보다 많이 담을 수 있다.
+    actual = _assemble(tmp_path, **{
+        **options, "evidence_bundle": {retrieval.PLACEHOLDER_KEY: "a" * min(100_000, budget.max_evidence_bytes)},
+    })
+    assert actual.lane_bytes(provider)["single"] <= provider.max_input_bytes
+
+
+def test_retrieval_budget_respects_model_tokens_and_transport_wrapping(tmp_path) -> None:
+    cap = 50_000
+    provider = AgyCliProvider()
+    def wrapped(system, user):
+        return provider.payload_bytes(system, user) + 700
+    wrapped_result = _assemble(
+        tmp_path, retrieval_mode=RetrievalMode.RETRIEVAL,
+        provider_byte_budget=cap, provider_measure=wrapped,
+    )
+    lane = wrapped_result.representative
+    assert wrapped(lane.system_prompt, lane.user_message) == cap
+    model_result = _assemble(
+        tmp_path, retrieval_mode=RetrievalMode.RETRIEVAL,
+        provider_id="codex", model="small",
+        model_context_overrides={"codex:small": 25_000},
+        model_output_reserve_tokens=5_000, unknown_model_context_tokens=128_000,
+    )
+    lane = model_result.representative
+    assert model_limits.estimate_tokens(lane.system_prompt, lane.user_message) == 20_000
+
+
+def test_claims_alone_exceed_transport_limit_before_retrieval(tmp_path) -> None:
+    with pytest.raises(job_assembly.TransportInputTooLarge):
+        _assemble(
+            tmp_path, retrieval_mode=RetrievalMode.RETRIEVAL,
+            provider_byte_budget=180_000, claim_text="한" * 65_000,
+        )
 
 
 def test_final_retrieval_prompt_is_checked_against_the_model_budget(tmp_path) -> None:
@@ -622,6 +679,57 @@ def test_tight_budget_keeps_the_candidate_before_its_neighbours() -> None:
 
 def test_page_expansion_is_off_when_there_is_no_room() -> None:
     assert _pages([5], char_budget=0) == []
+
+
+def test_oversized_pages_are_partial_and_never_claimed_as_full() -> None:
+    """페이지별 한도 초과는 부분 수록하며 누락량과 미확인 상태를 남긴다."""
+    skipped: list[str] = []
+    built = pages_module.build(
+        corpus=[_FakeDocument({page: "x" * 500 for page in range(1, 11)})],
+        finding_pages={"doc": {5}},
+        neighbours=1,
+        char_budget=100,
+        skipped=skipped,
+    )
+    assert built[0]["included_pages"] == [4, 5, 6]
+    assert all(page["text"] == "x" * 25 for page in built[0]["pages"])
+    assert all(page["truncated"] and page["omitted_chars"] == 475 for page in built[0]["pages"])
+    assert 5 in pages_module.unverified_pages(built[0])
+    assert skipped == []
+
+
+def test_zero_budget_still_names_the_pages_it_could_not_take() -> None:
+    skipped: list[str] = []
+    built = pages_module.build(
+        corpus=[_FakeDocument({page: "본문" for page in range(1, 11)})],
+        finding_pages={"doc": {2, 9}},
+        neighbours=1,
+        char_budget=0,
+        skipped=skipped,
+    )
+    assert built == []
+    assert skipped == ["ATT-01 p.2", "ATT-01 p.9"]
+
+
+def test_page_expansion_turned_off_by_setting_is_not_a_budget_reduction() -> None:
+    """설정으로 끈 것을 「예산 때문에 뺐다」고 적으면 원인을 잘못 가리킨다."""
+    skipped: list[str] = []
+    pages_module.build(
+        corpus=[_FakeDocument({1: "본문"})],
+        finding_pages={"doc": {1}},
+        neighbours=-1,
+        char_budget=100_000,
+        skipped=skipped,
+    )
+    assert skipped == []
+
+
+def test_render_says_so_when_no_page_made_it_in() -> None:
+    text = "\n".join(pages_module.render([], ["ATT-01 p.5"]))
+    assert "한 쪽도 담지 못했습니다" in text
+    assert "ATT-01 p.5" in text
+    # 담은 페이지가 없으니 위쪽 「미확인 페이지」 목록을 가리키면 안 된다.
+    assert "위 미확인 페이지" not in text
 
 
 def test_budget_shrinks_pages_before_touching_findings() -> None:

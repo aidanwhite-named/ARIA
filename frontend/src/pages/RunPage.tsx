@@ -159,6 +159,8 @@ function SizeNotice({
             <>
               {" · 근거 패키지 예산 "}
               {(preflight.evidence_budget_chars ?? 0).toLocaleString()}자
+              {preflight.evidence_budget_bytes != null &&
+                ` / ${preflight.evidence_budget_bytes.toLocaleString()} bytes`}
             </>
           )}
           {" — 위 숫자는 예산을 모두 썼을 때의 최댓값이고 실제 실행은 이보다 작습니다."}
@@ -841,7 +843,9 @@ export default function RunPage({ kind }: { kind: JobKind }) {
     setFollowupInstruction("");
   };
 
-  const displayText = job?.result_text ?? stream.streamText;
+  // 실행 중에는 본문이 없다. 모델 출력을 실시간으로 붙이지 않기 때문이며,
+  // 진행 상황은 stream.stage 가 알린다.
+  const displayText = job?.result_text ?? "";
   const errors = job?.errors ?? stream.errors;
 
   const searchSpecPanel = (
@@ -923,6 +927,17 @@ export default function RunPage({ kind }: { kind: JobKind }) {
           )}
         </div>
       )}
+      <label className="search-cutoff-field">
+        검색 기준일 (선택)
+        <input
+          id="searchCutoffDate"
+          type="date"
+          aria-label="검색 기준일"
+          value={searchCutoffDate}
+          onChange={(e) => setSearchCutoffDate(e.target.value)}
+          disabled={running}
+        />
+      </label>
     </section>
   );
 
@@ -1075,54 +1090,6 @@ export default function RunPage({ kind }: { kind: JobKind }) {
                 }
                 disabled={running}
               />
-            </section>
-
-            <section className="input-panel search-panel-input">
-              <div className="input-panel-head">
-                <span className="input-step">
-                  {searchPrompts.length >= 2 ? 3 : 2}
-                </span>
-                <div>
-                  <strong>검색 기준일 (선택)</strong>
-                  {/* .hint 안의 strong 은 이 앱 CSS 에서 block 이다. 문장
-                      가운데서 강조하려면 인라인인 b 를 쓴다 — strong 을 쓰면
-                      한 낱말이 제 줄로 떨어져 나간다. */}
-                  <div className="hint">
-                    이 날짜까지 <b>공개된</b> 문헌만 검색 대상으로 삼습니다. 판단
-                    기준은 출원일·우선일이 아니라 공개일입니다.
-                    <br />
-                    비워 두면 날짜 제한을 적용하지 않습니다 — 과거·최근·미래
-                    공개문헌을 구분 없이 관련성 중심으로 검색합니다. 비워 두었다고
-                    오늘 날짜가 대신 들어가지 않습니다.
-                  </div>
-                </div>
-              </div>
-              <div className="row" style={{ gap: 8, alignItems: "center" }}>
-                <input
-                  id="searchCutoffDate"
-                  type="date"
-                  aria-label="검색 기준일"
-                  value={searchCutoffDate}
-                  onChange={(e) => setSearchCutoffDate(e.target.value)}
-                  disabled={running}
-                />
-                {searchCutoffDate ? (
-                  <button
-                    type="button"
-                    className="btn small"
-                    onClick={() => setSearchCutoffDate("")}
-                    disabled={running}
-                  >
-                    날짜 제한 해제
-                  </button>
-                ) : (
-                  <span className="faint">날짜 제한 없음</span>
-                )}
-              </div>
-              <div className="hint" style={{ marginTop: 6 }}>
-                공개일을 확인할 수 없는 후보는 삭제하지 않고 「공개일 미확인」으로
-                따로 표시합니다.
-              </div>
             </section>
 
             <SizeNotice
@@ -1685,6 +1652,23 @@ export default function RunPage({ kind }: { kind: JobKind }) {
             </div>
           </div>
 
+          {/* 「미대응 구성 검색」을 누른 자리 바로 아래에 연다. 보고서 뒤에 두면
+              보고서 길이만큼 화면 밖에서 열려서, 누른 사람에게는 아무 일도
+              일어나지 않은 것으로 보인다 — 이 버튼은 보고서의 맨 위에 있다. */}
+          {gapSearchOpen && job.job_kind === "patent_analysis" && !running && (
+            <GapSearchPanel
+              job={job}
+              components={eligibleGapComponents}
+              selectedIds={selectedGapIds}
+              providerLabel={selectedProvider?.display_name ?? providerId}
+              searchAvailable={searchAvailable}
+              submitting={submitting}
+              onSelectionChange={setSelectedGapIds}
+              onRun={runGapSearch}
+              onClose={() => setGapSearchOpen(false)}
+            />
+          )}
+
           {job.error_code && (
             <div className="notice danger">
               <strong>{ERROR_LABEL[job.error_code] ?? job.error_code}</strong>
@@ -1701,7 +1685,7 @@ export default function RunPage({ kind }: { kind: JobKind }) {
           {stream.events.length > 0 && running && (
             <div className="event-log no-print" style={{ marginBottom: 14 }}>
               {stream.events
-                .filter((e) => e.type !== "result_stream")
+                .filter((e) => e.type !== "result_progress")
                 .slice(-40)
                 .map((e) => (
                   <div key={e.seq}>
@@ -1720,6 +1704,17 @@ export default function RunPage({ kind }: { kind: JobKind }) {
             </div>
           )}
 
+          {job.job_kind === "patent_analysis" && !running && job.analysis_manifest_error && (
+            <div className="notice danger" role="alert" style={{ marginBottom: 14 }}>
+              <strong>구성별 분석 결과를 읽지 못했습니다.</strong>
+              <div>{job.analysis_manifest_error}</div>
+              <div>
+                보고서 본문은 아래에서 확인할 수 있지만, 구성별 대응 정도와 미대응
+                구성 검색을 사용할 수 없습니다. 보고서를 확인한 뒤 다시 분석해 주세요.
+              </div>
+            </div>
+          )}
+
           {job.job_kind === "patent_analysis" &&
             !running &&
             job.analysis_manifest && (
@@ -1731,20 +1726,6 @@ export default function RunPage({ kind }: { kind: JobKind }) {
               text={displayText}
               outputMode={job.output_mode}
               streaming={running}
-            />
-          )}
-
-          {gapSearchOpen && job.job_kind === "patent_analysis" && !running && (
-            <GapSearchPanel
-              job={job}
-              components={eligibleGapComponents}
-              selectedIds={selectedGapIds}
-              providerLabel={selectedProvider?.display_name ?? providerId}
-              searchAvailable={searchAvailable}
-              submitting={submitting}
-              onSelectionChange={setSelectedGapIds}
-              onRun={runGapSearch}
-              onClose={() => setGapSearchOpen(false)}
             />
           )}
 

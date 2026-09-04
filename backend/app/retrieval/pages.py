@@ -67,6 +67,7 @@ def build(
     finding_pages: dict[str, set[int]],
     neighbours: int,
     char_budget: int,
+    skipped: list[str] | None = None,
 ) -> list[dict]:
     """문헌별 페이지 전문 묶음.
 
@@ -78,8 +79,32 @@ def build(
     char_budget 은 여기서 쓰는 거친 상한이다. 정확한 맞춤은 evidence.fit() 이
     완성된 문자열을 직접 재서 한다 — 여기서는 300페이지 문헌을 통째로 만들었다가
     하나씩 빼는 O(n²) 렌더링을 피하려고 미리 자를 뿐이다.
+
+    skipped 를 주면 **예산 때문에 담지 못한** 페이지의 짧은 이름을 거기에 넣는다.
+    이것이 없으면 예산이 빠듯한 실행에서 페이지가 한 쪽도 만들어지지 않은 채
+    조용히 넘어간다 — evidence.fit() 의 page_reductions 는 **이미 만들어진**
+    페이지를 뺄 때만 채우므로, 애초에 안 만들어진 것은 아무 데도 남지 않았다.
+    그러면 화면은 "예산이 허락하는 만큼 페이지 전문이 들어갑니다"라고 적어 둔 채
+    「예산 때문에 뺀 페이지」 상자를 비워 두고, 0쪽이 들어간 실행과 전부 들어간
+    실행이 구별되지 않는다. 실측 사례가 있다.
     """
-    if neighbours < 0 or char_budget <= 0:
+    dropped = skipped if skipped is not None else []
+
+    def note(alias: str, page: int) -> None:
+        label = f"{alias} p.{page}"
+        if label not in dropped:
+            dropped.append(label)
+
+    if char_budget <= 0:
+        # 확장할 자리가 없다. 그래도 어느 페이지를 못 담았는지는 남긴다.
+        for document in corpus:
+            last_page = int(getattr(document.index, "page_count", 0) or 0)
+            for page in sorted(finding_pages.get(document.attachment_id, set())):
+                if 1 <= int(page) <= last_page:
+                    note(document.alias, int(page))
+        return []
+    if neighbours < 0:
+        # 설정으로 페이지 확장을 끈 것이지 예산이 모자란 것이 아니다.
         return []
 
     per_page_cap = max(1, int(char_budget * MAX_PAGE_SHARE))
@@ -113,9 +138,18 @@ def build(
         nonlocal used
         text = _page_text(entry["source"], page)
         if not text:
+            # 예산이 아니라 그 페이지에 텍스트가 없는 것이다. 추출 완전성
+            # 보고서에 이미 있으므로 여기서 다시 세지 않는다.
             return False
-        if len(text) > per_page_cap or used + len(text) > char_budget:
+        allowed = min(per_page_cap, max(0, char_budget - used))
+        if allowed <= 0:
+            note(entry["attachment"], page)
             return False
+        source_chars = len(text)
+        truncated = source_chars > allowed
+        # 요청된 부분 수록: 원문 접두 구간을 그대로 보존하며 누락을 명시한다.
+        # 절단 표시는 원문 밖에 렌더링하고, 전문 확인 페이지로 집계하지 않는다.
+        text = text[:allowed]
         status = entry["source"].index.page_status(page) or {}
         entry["pages"].append(
             {
@@ -124,6 +158,12 @@ def build(
                 "candidate": candidate,
                 "extraction_status": status.get("status", ""),
                 "text": text,
+                "truncated": truncated,
+                "source_chars": source_chars,
+                "included_chars": len(text),
+                "omitted_chars": source_chars - len(text),
+                "source_start": 0,
+                "source_end": len(text),
             }
         )
         entry["included_pages"].append(page)
@@ -182,7 +222,10 @@ def unverified_pages(document: dict) -> list[int]:
 
     「찾지 못했다」가 아니라 「보지 않았다」이며, 둘을 섞으면 보고서가 거짓이 된다.
     """
-    included = {int(page["pdf_page"]) for page in document.get("pages", [])}
+    included = {
+        int(page["pdf_page"]) for page in document.get("pages", [])
+        if not page.get("truncated")
+    }
     last = int(document.get("pdf_pages") or 0)
     return [page for page in range(1, last + 1) if page not in included]
 
@@ -191,6 +234,24 @@ def unverified_pages(document: dict) -> list[int]:
 # 적는다 — 목록이 길어지면 그 목록이 다시 예산을 먹고, 줄이려는 fit() 이 수렴을
 # 못 한다.
 MAX_LISTED_DROPS = 8
+
+
+def truncations(documents: list[dict]) -> list[dict]:
+    """현재 패키지에 실제로 남아 있는 부분 수록만 보고한다."""
+    return [
+        {
+            "attachment": document["attachment"],
+            "pdf_page": page["pdf_page"],
+            "source_chars": page["source_chars"],
+            "included_chars": page["included_chars"],
+            "omitted_chars": page["omitted_chars"],
+            "source_start": page.get("source_start", 0),
+            "source_end": page.get("source_end", page["included_chars"]),
+            "reason": "페이지별 또는 전체 문자 예산에 따라 원문 앞부분만 수록",
+        }
+        for document in documents for page in document.get("pages", [])
+        if page.get("truncated")
+    ]
 
 
 def render(documents: list[dict], dropped: list[str] | None = None) -> list[str]:
@@ -210,25 +271,39 @@ def render(documents: list[dict], dropped: list[str] | None = None) -> list[str]
     if not documents and not dropped:
         return []
     if not documents:
-        return ["", "[근거 구간이 있는 페이지 전문]", "", _dropped_line(dropped)]
+        # 한 쪽도 담지 못했다. 머리말만 남기고 넘어가면 "페이지 전문이 아래에
+        # 있다"고 읽히므로 없다고 먼저 적는다.
+        return [
+            "",
+            "[근거 구간이 있는 페이지 전문]",
+            "",
+            "이번 실행은 페이지 전문을 한 쪽도 담지 못했습니다. 근거 구간 발췌만으로",
+            "예산이 찼습니다. 아래 페이지는 이번 검토 범위 밖입니다 — 검토하지 않은",
+            "것과 문헌에 없는 것은 다릅니다.",
+            "",
+            _dropped_line(dropped, has_pages=False),
+        ]
     lines = [
         "",
         "[근거 구간이 있는 페이지 전문]",
         "",
-        "아래는 위 근거 구간이 실린 페이지의 **전문**과 그 앞뒤 페이지입니다.",
+        "아래는 위 근거 구간이 실린 페이지와 앞뒤 페이지의 원문입니다.",
+        "부분 수록으로 표시된 페이지는 전문이 아니며, 누락 구간은 확인되지 않았습니다.",
         "발췌만으로는 앞뒤 문맥이 끊기므로, 예산이 허락하는 만큼 페이지를 통째로",
         "담았습니다. 여기 없는 페이지는 이번 검토 범위 밖입니다 — 검토하지 않은",
         "것과 문헌에 없는 것은 다릅니다.",
     ]
     for document in documents:
         missing = page_list(unverified_pages(document))
+        partial = [page for page in document["pages"] if page.get("truncated")]
         lines += [
             "",
             f"[{document['attachment']} · {document['filename']}]",
             f"- 전체 {document['pdf_pages']}페이지 중 "
-            f"{len(document['pages'])}페이지를 전문으로 담았습니다.",
+            f"{len(document['pages']) - len(partial)}페이지를 전문으로 담았습니다. "
+            f"부분 수록 {len(partial)}페이지.",
             f"- 담은 페이지: {page_list(document['included_pages']) or '(없음)'}",
-            f"- **미확인 페이지**: {missing or '(없음)'}",
+            f"- **미확인 페이지** (전문 기준, 부분 수록 포함): {missing or '(없음)'}",
         ]
         for page in document["pages"]:
             mark = "근거 페이지" if page["candidate"] else "앞뒤 문맥"
@@ -241,18 +316,30 @@ def render(documents: list[dict], dropped: list[str] | None = None) -> list[str]
                 f"{mark} · 추출 {page['extraction_status']} ---",
                 page["text"],
             ]
+            if page.get("truncated"):
+                # 원문과 구분된 행에 위치·포함량·누락량을 남긴다.
+                lines.insert(len(lines) - 1,
+                    f"[ARIA 부분 수록: 원문 첫 {page['included_chars']:,}자 / "
+                    f"전체 {page['source_chars']:,}자. 뒤 {page['omitted_chars']:,}자는 "
+                    "예산으로 누락됐으며 검토 범위 밖입니다.]")
     if dropped:
         lines += ["", _dropped_line(dropped)]
     return lines
 
 
-def _dropped_line(dropped: list[str]) -> str:
+def _dropped_line(dropped: list[str], *, has_pages: bool = True) -> str:
     listed = dropped[:MAX_LISTED_DROPS]
     rest = len(dropped) - len(listed)
     tail = f" 외 {rest}쪽" if rest > 0 else ""
+    # 담은 페이지가 하나도 없으면 위에 「미확인 페이지」 목록 자체가 없다.
+    where = (
+        "위 미확인 페이지에 포함됩니다. "
+        if has_pages
+        else "이 페이지들은 전문으로 확인하지 않았습니다. "
+    )
     return (
-        f"- 예산 때문에 뺀 페이지: {', '.join(listed)}{tail}. 위 미확인 페이지에 "
-        "포함됩니다. 근거 구간과 그 발췌는 그대로입니다."
+        f"- 예산 때문에 뺀 페이지: {', '.join(listed)}{tail}. {where}"
+        "근거 구간과 그 발췌는 그대로입니다."
     )
 
 

@@ -236,24 +236,15 @@ def test_final_reassembly_keeps_the_model_budget_policy(
     assert final_call["model_output_reserve_tokens"] == 32_000
 
 
-def test_preflight_blocks_when_the_evidence_budget_ceiling_exceeds_the_limit(
+def test_preflight_adapts_the_evidence_budget_to_the_transport_limit(
     client, prompt, monkeypatch, settings_guard
 ) -> None:
-    """근거 패키지 예산이 전송 한도를 넘으면 준비 화면이 먼저 막는다.
-
-    화면이 재는 것은 **예산 상한**이다. 실제 패키지는 그보다 작을 수 있고, 그때는
-    실행이 성공한다 — 그래도 미리 알려 주는 편이 낫다. 검색 비용을 다 쓴 뒤
-    Provider 호출 직전에 막히는 것보다 낫기 때문이다.
-
-    상한이 아니라 **실제** 패키지가 한도를 넘는 경우의 차단은 실행 직전 게이트가
-    맡는다(tests/test_agy_input_bytes.py 의
-    test_runner_gate_uses_the_provider_measurement).
-    """
+    """큰 문자 예산도 실행별 바이트 상한 안에서 사용할 수 있다."""
     monkeypatch.setattr(DeterministicTestProvider, "max_input_bytes", AGY_BYTE_BUDGET)
     _settings(
         client,
         {
-            # 한글이면 3배가 되므로 이 예산의 상한은 한도를 넘는다.
+            # 문자 예산은 유지하되 실제 전송할 바이트는 별도로 제한한다.
             "retrieval_mode": "retrieval",
             "retrieval_evidence_chars": 200_000,
         },
@@ -264,15 +255,14 @@ def test_preflight_blocks_when_the_evidence_budget_ceiling_exceeds_the_limit(
     )
 
     assert preflight["delivery_plan"] == "local_retrieval"
-    assert preflight["over_bytes"] is True
-    assert preflight["blocked"] is True
-
-    # 실제 패키지가 상한보다 작으면 실행은 통과한다. 그때도 나간 크기는
-    # 반드시 한도 안이다 — 넘겼다면 게이트가 막았어야 한다.
-    if final["status"] == "SUCCEEDED":
-        assert final["delivery_manifest"]["actual_payload_bytes"] <= AGY_BYTE_BUDGET
-    else:
-        assert final["error_code"] == "INPUT_TOO_LARGE"
+    assert preflight["over_bytes"] is False
+    assert preflight["blocked"] is False
+    assert preflight["evidence_budget_chars"] == 200_000
+    assert preflight["evidence_budget_bytes"] < AGY_BYTE_BUDGET
+    assert preflight["bytes"] <= AGY_BYTE_BUDGET
+    assert final["status"] == "SUCCEEDED", final["errors"]
+    assert final["delivery_manifest"]["actual_payload_bytes"] <= preflight["bytes"]
+    assert final["retrieval_manifest"]["budget"]["max_evidence_bytes"] == preflight["evidence_budget_bytes"]
 
 
 def test_small_case_is_untouched(client, prompt, settings_guard) -> None:

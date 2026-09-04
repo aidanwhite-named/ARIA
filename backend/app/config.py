@@ -297,13 +297,12 @@ DEFAULTS: dict[str, object] = {
     "retrieval_mode": "auto",
     # 로컬 검색 예산. preflight 와 실행이 같은 값을 쓴다
     # (retrieval.budget_from_settings).
-    "retrieval_max_rounds": 10,
+    "retrieval_max_rounds": 5,
     "retrieval_max_page_reads": 80,
     # 근거 패키지에 담을 수 있는 원문 문자 수의 상한. preflight 는 이 값으로
-    # 최대 크기를 계산하고, 실행은 같은 값을 넘지 못한다. 한글 1자는 UTF-8
-    # 3 bytes 이므로 40,000자는 최악의 경우 120,000 bytes 다 — agy 의 전송 한도
-    # 180,000 bytes 에서 Master Prompt 와 청구항을 빼고도 들어간다.
-    "retrieval_evidence_chars": 40_000,
+    # 최대 크기를 계산하고, 실행은 같은 값을 넘지 못한다. 전송 가능한 바이트는
+    # Provider/모델 한도에서 실제 청구항·지시문 크기를 빼서 별도로 제한한다.
+    "retrieval_evidence_chars": 100_000,
     # 한 구성 × 한 문헌에서 확보하는 후보 수. 전역 top-k 가 아니라 문헌마다
     # 따로 걸리므로, 문헌이 늘어도 한 문헌이 결과를 독점하지 않는다.
     "retrieval_hits_per_document": 6,

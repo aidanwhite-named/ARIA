@@ -246,6 +246,7 @@ class PreflightOut(BaseModel):
     # local_retrieval 일 때 위 chars/bytes 는 예산 상한으로 계산한 **최댓값**이다.
     # 실제 근거 패키지는 이 값을 넘지 못한다.
     evidence_budget_chars: int | None = None
+    evidence_budget_bytes: int | None = None
     message: str = ""
     # 조립 자체가 불가능한 상태(명세서 본문을 읽지 못함 등). 크기는 재지 못한다.
     error: str | None = None
@@ -273,6 +274,7 @@ class JobOut(BaseModel):
     citation_mapping_error: str | None = None
     analysis_manifest: dict[str, Any] | None = None
     analysis_manifest_error: str | None = None
+    analysis_completeness: dict[str, Any] | None = None
     search_manifest: dict[str, Any] | None = None
     search_manifest_error: str | None = None
     search_focus: dict[str, Any] | None = None

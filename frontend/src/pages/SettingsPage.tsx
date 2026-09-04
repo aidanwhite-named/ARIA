@@ -847,7 +847,7 @@ export default function SettingsPage() {
         )}
       </div>
 
-      <div className="card">
+      <div className="card settings-run-limits">
         <h2>전체 실행 상한</h2>
         <p className="hint">검색 깊이 프리셋도 이 상한을 넘지 않습니다. 시간 상한은 분석 작업에도 적용됩니다.</p>
         <NumberField label="검색 도구 호출 총 상한" value={v.max_search_tool_calls}
@@ -1300,15 +1300,17 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <div className="card settings-limits">
+      {/* 설정값과 실행 처리는 유지하고 이 카드만 화면에서 숨긴다. */}
+      <div className="card settings-limits" style={{ display: "none" }}>
         <h2>대용량 인용발명 전달 방식</h2>
         <p className="muted">
           인용발명 PDF 를 최종 분석 모델에게 어떻게 전달할지 정합니다. 폭은
           둘입니다 — <strong>전체 인라인</strong> 또는{" "}
           <strong>로컬 검색</strong>. 로컬 검색은 찾은 구간만 넣지 않고, 그 구간이
           실린 <strong>페이지 전문과 앞뒤 페이지</strong>를 예산이 허락하는 만큼
-          함께 넣습니다. 어느 방식이든 ARIA 는 문서를 임의로 자르거나 요약하지
-          않습니다. 넣지 못한 범위는 「미확인 페이지」로 보고서에 남습니다. OCR 은
+          함께 넣습니다. 페이지별 예산을 넘으면 원문 앞부분만 수록하고 포함·누락
+          글자 수를 명시합니다. 요약하지 않으며 부분 수록은 전문 확인으로 세지 않습니다.
+          넣지 못한 범위는 「미확인 페이지」로 보고서에 남습니다. OCR 은
           수행하지 않습니다.
         </p>
         <p className="muted">
@@ -1344,7 +1346,9 @@ export default function SettingsPage() {
             hint={
               "실행 전 크기 안내가 이 값으로 최댓값을 계산하고, 실행은 그 값을 " +
               "넘지 못합니다. 페이지 전문도 이 예산 안에서 자리를 얻습니다. " +
-              "한글 1자는 UTF-8 3 bytes 이므로 40,000자는 최대 120,000 bytes 입니다."
+              "문자 상한과 별도로, 실행마다 청구항·지시문 크기를 뺀 바이트 " +
+              "예산을 계산합니다. Provider 전송 한도와 모델 입력 예산 안에서 " +
+              "담을 수 있는 양은 실행 전 안내에서 확인할 수 있습니다."
             }
             onSave={(n) => saveValue("retrieval_evidence_chars", n)}
           />

@@ -38,6 +38,7 @@ Claude 와 다른 두 가지 제약이 있다.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import sys
@@ -436,11 +437,22 @@ class AgyCliProvider(Provider):
         )
         budget_exceeded = False
         content_budget_exceeded = False
+        # agy 1.1.26 은 최종 result 를 보낸 뒤에도 프로세스가 남는 경우가 있다.
+        # 실측(job d39dc2cc): 15:58:47 에 response + status SUCCESS 가 왔는데
+        # stdout 이 닫히지 않아 ARIA 가 16:13:29 까지 기다리다 타임아웃으로
+        # 실패 처리했다. result 를 본 순간을 신호로 넘겨서 프로세스 종료를
+        # 기다리는 것과 결과 수신을 분리한다.
+        finished = asyncio.Event()
 
         async def on_stdout(line: str) -> None:
             nonlocal budget_exceeded, content_budget_exceeded
             for event_type, payload in parser.feed(line):
                 await emit(event_type, payload)
+            if parser.state.saw_result:
+                # 신호일 뿐 판정이 아니다. status 가 무엇이든(SUCCESS/FAILURE/
+                # CANCELED) 더 기다릴 이유가 없다는 뜻이고, 성공·실패는 아래
+                # evaluator 가 status·도구 기록·인증 상태를 보고 정한다.
+                finished.set()
             if search_policy is None:
                 return
 
@@ -504,6 +516,7 @@ class AgyCliProvider(Provider):
             on_stdout_line=on_stdout,
             on_stderr_line=on_stderr,
             timeout_seconds=request.timeout_seconds,
+            completion_signal=finished,
         )
 
         state = parser.state
@@ -524,15 +537,41 @@ class AgyCliProvider(Provider):
         outcome.raw_stderr = run.stderr
         outcome.exit_code = run.exit_code
         outcome.timed_out = run.timed_out
+        outcome.completed_without_exit = run.completed_without_exit
         outcome.cancelled = run.cancelled
+        # 신호를 못 붙인 경로(구버전 호출부, 신호와 제한 시간이 같은 순간에
+        # 만료된 경우)를 위한 안전망. **최종 result 이벤트와 본문이 둘 다 있을
+        # 때만** 타임아웃에서 빼낸다. 본문 없이 시간만 넘긴 실행은 그대로
+        # 타임아웃이다.
+        if run.timed_out and state.saw_result and state.final_text.strip():
+            outcome.timed_out = False
+            outcome.completed_without_exit = True
         outcome.result_text = state.final_text
         outcome.usage = state.usage
         outcome.is_error = state.is_error
         outcome.auth_required = state.auth_required
         outcome.rate_limited = state.rate_limited
         outcome.terminal_reason = state.status or (
-            "cancelled" if run.cancelled else "timeout" if run.timed_out else None
+            "cancelled"
+            if run.cancelled
+            else "timeout"
+            if outcome.timed_out
+            else "completed_without_exit"
+            if outcome.completed_without_exit
+            else None
         )
+        if outcome.completed_without_exit:
+            # 감사용 기록. 실패가 아니므로 errors 에는 넣지 않는다.
+            await emit(
+                "provider_lingering",
+                {
+                    "status": state.status,
+                    "message": (
+                        "모델의 최종 응답을 모두 받았지만 CLI 프로세스가 스스로 "
+                        "종료하지 않아 ARIA 가 종료했습니다."
+                    ),
+                },
+            )
 
         # 도구를 끌 수 없는 Provider 다. 광고된 목록은 정보로만 남기고,
         # 실제 호출만 정책 위반으로 다룬다.

@@ -334,7 +334,7 @@ class EvidenceBuilder:
             # 검색어 3개로 뒤지고 D2 는 건드리지도 않은 채 "검토 범위에서
             # 미발견"을 받을 수 있다. 검색하지 않은 문헌은 검토한 문헌이 아니다.
             for document in self.corpus:
-                record = component.searched.get(document.attachment_id)
+                record = component.search_attempts.get(document.attachment_id)
                 if record is None:
                     reasons.append(
                         f"{document.alias}({document.filename}): 이 구성에 대해 "
@@ -401,8 +401,8 @@ class EvidenceBuilder:
             )
         if self.run.budget_exhausted:
             blockers.append(
-                "검색 라운드 또는 페이지 읽기 예산을 모두 사용해 검토를 "
-                "중단했습니다."
+                "예산 제한으로 검색·열람 요청 또는 검색 마무리를 완료하지 "
+                "못했습니다."
             )
 
         finalize_by_id = {
@@ -481,12 +481,12 @@ class EvidenceBuilder:
                     "search_channels_failed": list(state.failed_channels),
                     # 문헌별 검색 실행 기록. 결과가 0건인 검색도 들어 있다.
                     "searched_documents": [
-                        record.to_dict() for record in state.searched.values()
+                        record.to_dict() for record in state.search_attempts.values()
                     ],
                     "unsearched_documents": [
                         document.alias
                         for document in self.corpus
-                        if document.attachment_id not in state.searched
+                        if document.attachment_id not in state.search_attempts
                     ],
                     "candidate_documents": sorted(
                         {entry["alias"] for entry in state.hit_chunks.values()}
@@ -537,19 +537,25 @@ class EvidenceBuilder:
                 if attachment_id and page:
                     finding_pages.setdefault(attachment_id, set()).add(int(page))
 
+        # 예산 때문에 뺀 페이지. package_reductions 와 다른 채널이다 — 위 pages
+        # 모듈 주석 참조. 목록을 build() 에 넘겨서 **만들어 보지도 못한** 페이지
+        # 까지 같은 곳에 담는다. fit() 만 채우게 두면 근거 발췌로 예산이 찬
+        # 실행에서 페이지가 0쪽 들어간 사실이 아무 데도 남지 않는다.
+        page_reductions: list[str] = []
+        evidence_pages = pages_module.build(
+            corpus=self.corpus,
+            finding_pages=finding_pages,
+            neighbours=self.budget.neighbor_pages,
+            char_budget=max(0, self.budget.max_evidence_chars - self._used_chars),
+            skipped=page_reductions,
+        )
+
         return {
             "version": BUNDLE_VERSION,
             "generated_at": _utcnow(),
             "delivery_mode": "local_retrieval",
-            # 예산 때문에 뺀 페이지. package_reductions 와 다른 채널이다 —
-            # 위 pages 모듈 주석 참조.
-            "page_reductions": [],
-            "evidence_pages": pages_module.build(
-                corpus=self.corpus,
-                finding_pages=finding_pages,
-                neighbours=self.budget.neighbor_pages,
-                char_budget=max(0, self.budget.max_evidence_chars - self._used_chars),
-            ),
+            "page_reductions": page_reductions,
+            "evidence_pages": evidence_pages,
             "ocr_performed": False,
             "claim_chars": len(self.claim_text or ""),
             "documents": [
@@ -565,6 +571,7 @@ class EvidenceBuilder:
             "package_reductions": [],
             "budget": self.budget.to_dict(),
             "budget_exhausted": self.run.budget_exhausted or self.truncated,
+            "budget_limited": self.run.budget_limited or self.truncated,
             "rounds": len(self.run.rounds),
             "pages_read": self.run.pages_read,
             "evidence_chars": self._used_chars,
@@ -631,7 +638,7 @@ PLACEHOLDER_KEY = "__preflight_placeholder__"
 def render(bundle: dict) -> str:
     """최종 분석 프롬프트에 넣을 근거 패키지 본문."""
     placeholder = (bundle or {}).get(PLACEHOLDER_KEY)
-    if placeholder:
+    if placeholder is not None:
         return str(placeholder)
 
     lines = [
@@ -818,8 +825,8 @@ REDUCTION_DROPPED_FINDINGS = (
     "되지 않습니다."
 )
 REDUCTION_OVER_BUDGET = (
-    "근거 패키지가 설정한 예산에 들어가지 않습니다. 환경설정의 「근거 패키지 "
-    "최대 문자 수」를 올려야 합니다."
+    "근거 패키지가 이번 실행의 문자 또는 바이트 예산에 들어가지 않습니다. "
+    "근거 패키지 예산과 Provider 입력 한도를 확인해야 합니다."
 )
 
 
@@ -941,9 +948,24 @@ def fit(bundle: dict, budget: RetrievalBudget) -> str:
     막힌다.
     """
     max_chars = budget.max_evidence_chars
-    max_bytes = max_chars * 3
+    max_bytes = budget.evidence_byte_limit
 
     def current() -> tuple[str, bool]:
+        partial = pages_module.truncations(bundle.get("evidence_pages") or [])
+        bundle["page_truncations"] = partial
+        if partial or bundle.get("page_reductions") or bundle.get("package_reductions"):
+            bundle["budget_exhausted"] = True
+            bundle["budget_limited"] = True
+        if partial:
+            bundle["budget_exhausted"] = True
+            for component in bundle.get("components", []):
+                component["needs_original_review"] = True
+                if component.get("status") == STATUS_NOT_FOUND_SCOPE:
+                    component["status"] = STATUS_COVERAGE
+                    component["status_label"] = STATUS_LABEL[STATUS_COVERAGE]
+                    reason = "페이지 일부가 예산으로 누락돼 전문 검토가 완료되지 않았습니다."
+                    if reason not in component.setdefault("status_reasons", []):
+                        component["status_reasons"].append(reason)
         _apply_reductions(bundle)
         text = render(bundle)
         return text, (
@@ -991,6 +1013,7 @@ def fit(bundle: dict, budget: RetrievalBudget) -> str:
     text, _ok = current()
     # 사용자가 올려야 할 값. 렌더링에는 들어가지 않으므로 크기에 영향이 없다.
     bundle["package_required_chars"] = len(text)
+    bundle["package_required_bytes"] = len(text.encode("utf-8"))
     return text
 
 
@@ -1001,12 +1024,17 @@ def render_placeholder(budget: RetrievalBudget, documents: list[dict]) -> str:
     이므로, 자리표는 그냥 그 길이만큼의 문자다. fit() 이 완성된 문자열을 직접
     재서 이 값을 넘지 못하게 하므로, 여기서 잰 크기가 실제 크기의 상한이 된다.
 
-    채움 문자를 한글로 쓰는 이유는 Provider 한도가 UTF-8 바이트로 걸리기
-    때문이다. 한글 음절은 3 bytes 이고 fit() 도 max_evidence_chars * 3 bytes 를
-    함께 강제하므로, 이 자리표의 바이트 수가 실제 바이트 수의 상한이다.
-    ASCII 로 채우면 3배 작게 재고, 화면이 안내한 크기보다 실제 실행이 커진다.
+    fit() 이 문자 수와 실행별 UTF-8 바이트 수를 함께 강제한다. 자리표도 두
+    상한을 동시에 나타내므로 영문 문헌에서도 바이트 여유를 사용할 수 있다.
 
     documents 는 더 이상 크기에 영향을 주지 않는다. 문헌 목록도 예산 안에
     들어가는 렌더링의 일부이기 때문이다.
     """
-    return "가" * max(0, budget.max_evidence_chars)
+    # 문자 상한과 바이트 상한을 동시에 나타낸다. 영문이 많은 패키지는 같은
+    # 바이트 안에 더 많은 문자를 담을 수 있으므로 바이트를 무조건 3으로 나눠
+    # 문자 상한을 낮추지 않는다. fit() 이 두 상한을 각각 검사한다.
+    chars = min(max(0, budget.max_evidence_chars), budget.evidence_byte_limit)
+    byte_count = min(chars * 3, budget.evidence_byte_limit)
+    extra = byte_count - chars
+    triples, doubles = divmod(extra, 2)
+    return "가" * triples + "é" * doubles + "a" * (chars - triples - doubles)

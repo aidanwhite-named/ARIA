@@ -143,6 +143,7 @@ export interface RetrievalManifest {
     max_rounds: number;
     max_page_reads: number;
     max_evidence_chars: number;
+    max_evidence_bytes?: number;
     hits_per_document: number;
     max_round_result_chars: number;
   };
@@ -173,6 +174,7 @@ export interface RetrievalManifest {
     input_sha256: string;
     output_sha256: string;
     input_chars: number;
+    input_bytes?: number;
     output_chars: number;
     actions: number;
     error: string;
@@ -184,7 +186,7 @@ export interface RetrievalManifest {
    *
    *  예산(budget.max_evidence_chars)은 이 값의 상한이다. 넘으면 ARIA 가 서지
    *  발췌 → 구성 메타데이터 → 근거 구간 순으로 줄이고, 그래도 안 되면 실행을
-   *  실패시킨다. 원문은 절대 자르지 않는다. */
+   *  실패시킨다. 페이지 확장의 부분 수록은 page_truncations에 별도로 기록한다. */
   evidence_chars: number;
   components: {
     id: string;
@@ -220,6 +222,14 @@ export interface RetrievalManifest {
   /** 예산 때문에 뺀 페이지. package_reductions 와 **다른 채널**이다 — 페이지를
    *  뺀 것은 근거를 뺀 것이 아니므로 구성 판정을 흔들지 않는다. */
   page_reductions?: string[];
+  /** 일부만 수록한 페이지. 전문 확인 페이지와 구분한다. */
+  page_truncations?: {
+    attachment: string;
+    pdf_page: number;
+    source_chars: number;
+    included_chars: number;
+    omitted_chars: number;
+  }[];
   error: string;
   error_code: string;
   status: "complete" | "partial" | "failed";
@@ -459,6 +469,30 @@ export interface JobAttachment extends AttachmentAnalysis {
   required: boolean;
 }
 
+/** backend/app/analysis_completeness.py 의 check() 결과. */
+export interface AnalysisCompleteness {
+  process_succeeded: boolean;
+  manifest_parsed: boolean;
+  manifest_error: string | null;
+  declared_components: number;
+  reported_components: number;
+  /** 검색이 선언한 구성 이름과 보고서의 구성 이름을 대조할 수 있었는가. */
+  comparable: boolean;
+  missing_components: string[];
+  inferred_components: string[];
+  scope: {
+    status?: string;
+    rounds?: number;
+    max_rounds?: number;
+    budget_exhausted?: boolean;
+    pending_actions?: number;
+    pages_read?: number;
+    limited_components?: string[];
+    limited?: boolean;
+  };
+  complete: boolean;
+}
+
 export interface Job {
   id: string;
   status: JobStatus;
@@ -484,6 +518,11 @@ export interface Job {
   /** 구성별 유사도와 미발견 상태를 검증한 보완 검색 입력. */
   analysis_manifest: AnalysisManifest | null;
   analysis_manifest_error: string | null;
+  /**
+   * 분석 완전성 점검. 저장하지 않고 조회 시점에 retrieval_manifest 와
+   * analysis_manifest 에서 계산한 파생값이다. 검색 실행에서는 null.
+   */
+  analysis_completeness: AnalysisCompleteness | null;
   /** 유사 문헌 검색의 감사 기록. 분석 실행에서는 null. */
   search_manifest: SearchManifest | null;
   /** 모델 보고 블록을 읽지 못한 사유. 관측 기록은 이 경우에도 남는다. */
@@ -748,6 +787,7 @@ export type Preflight = {
    * **최댓값**이다. 실제 실행은 이 값을 넘지 못한다. full_inline 이면 null.
    */
   evidence_budget_chars: number | null;
+  evidence_budget_bytes?: number | null;
   message: string;
   error: string | null;
 };

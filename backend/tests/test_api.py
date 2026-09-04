@@ -794,3 +794,96 @@ def test_reasoning_effort_rejects_an_unknown_level(client) -> None:
         ).status_code
         == 400
     )
+
+
+# ------------------------------------------------- 원문 이벤트 비노출 / 결과 저장
+
+def _stream_events(client, job_id: str) -> list[dict]:
+    """끝난 작업의 이벤트를 클라이언트가 받는 그대로 읽는다.
+
+    BUS 내부를 들여다보지 않고 실제 SSE 경로를 쓴다. 작업이 끝나면 버스가
+    닫히므로 재생 목록을 흘려보낸 뒤 스트림이 스스로 끝난다.
+    """
+    body = client.get(f"/api/jobs/{job_id}/events").text
+    events = []
+    for line in body.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type") != "stream_end":
+            events.append(payload)
+    return events
+
+
+def test_model_output_never_reaches_the_event_stream(client, prompt) -> None:
+    """진행 신호만 나가고 모델 원문은 나가지 않는다.
+
+    예전에는 result_stream 델타가 그대로 화면에 붙었다. 그 원문에는 기계 판독
+    블록이 섞여 있어서, 완성되기 전까지 사용자가 보고서 자리에서 JSON 을 보고
+    있어야 했다. 지금은 받은 글자 수만 내보낸다.
+    """
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 이벤트 비노출 확인",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
+    final = wait_for_job(client, job["id"])
+    assert final["status"] == "SUCCEEDED"
+
+    events = _stream_events(client, job["id"])
+    assert events, "이벤트가 하나도 없습니다"
+
+    types = {event["type"] for event in events}
+    assert "result_stream" not in types
+    assert "result_progress" in types
+
+    # 어떤 이벤트에도 감사 블록이나 보고서 본문이 실려 있지 않아야 한다.
+    blob = json.dumps(events, ensure_ascii=False)
+    assert "ARIA_COMPONENT_ANALYSIS_V1" not in blob
+    assert "ARIA_CITATION_MAPPING_V1" not in blob
+    assert "citation_number" not in blob
+
+    progress = [e["payload"] for e in events if e["type"] == "result_progress"]
+    assert all(set(payload) == {"chars"} for payload in progress)
+    # 글자 수는 늘어나기만 한다.
+    counts = [payload["chars"] for payload in progress]
+    assert counts == sorted(counts) and counts[-1] > 0
+
+
+def test_completed_result_is_stored_and_served_clean(client, prompt) -> None:
+    """완료된 결과는 블록을 걷어낸 형태로 저장되고 조회된다."""
+    job = client.post(
+        "/api/jobs",
+        json={
+            "prompt_id": prompt["id"],
+            "provider": "test",
+            "claim_text": "청구항 1. 결과 저장 확인",
+            "batch_id": citation_batch(client),
+        },
+    ).json()
+    final = wait_for_job(client, job["id"])
+
+    assert final["status"] == "SUCCEEDED"
+    assert final["result_text"].strip()
+    assert "ARIA_COMPONENT_ANALYSIS_V1" not in final["result_text"]
+    assert "ARIA_CITATION_MAPPING_V1" not in final["result_text"]
+
+    # 파싱 결과는 따로 남는다 — 본문에서 지웠다고 잃어버리지 않는다.
+    assert final["analysis_manifest"]["items"]
+
+    # 완전성 점검은 저장하지 않고 조회 시점에 계산한다.
+    completeness = final["analysis_completeness"]
+    assert completeness is not None
+    assert completeness["process_succeeded"] is True
+    assert completeness["manifest_parsed"] is True
+    assert completeness["reported_components"] == len(
+        final["analysis_manifest"]["items"]
+    )
+
+    # 다시 조회해도 같은 값이 나온다(파생값이므로 저장 여부와 무관하다).
+    again = client.get(f"/api/jobs/{job['id']}").json()
+    assert again["analysis_completeness"] == completeness

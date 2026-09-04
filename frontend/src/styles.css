@@ -716,6 +716,7 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 .page-settings > .settings-context { grid-column: span 7; }
 .page-settings > .settings-storage { grid-column: span 5; }
 .page-settings > .settings-limits { grid-column: 1 / -1; }
+.page-settings > .settings-run-limits,
 .page-settings > .settings-kiwee,
 .page-settings > .settings-epo,
 .page-settings > .settings-literature,
@@ -997,6 +998,10 @@ button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
 }
 .search-spec-panel { margin: 0; }
 .search-spec-panel .file-prepare-row { margin-top: 12px; padding-top: 12px; }
+.search-spec-panel .search-cutoff-field {
+  display: flex; align-items: center; gap: 8px;
+  border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px;
+  color: var(--text-muted); font-size: 11px; font-weight: 680; }
 .search-spec-card .search-spec-panel .input-panel-head { margin-bottom: 11px; }
 .search-spec-card .search-spec-panel .input-step {
   width: 25px;

@@ -305,6 +305,11 @@ class ExecutionOutcome:
     cli_args: list[str] = field(default_factory=list)
     cancelled: bool = False
     timed_out: bool = False
+    # 최종 결과를 다 받았는데 CLI 프로세스가 끝나지 않아 ARIA 가 끊었다.
+    # timed_out 과 반드시 구분한다 — 이쪽은 result_text·usage·tool_calls 가
+    # 전부 손에 있는 상태이고, 판정은 평소 경로(도구 정책·인증·상태값)를
+    # 그대로 거친다. 이 값이 참이라고 해서 성공으로 건너뛰지 않는다.
+    completed_without_exit: bool = False
     auth_required: bool = False
     rate_limited: bool = False
 

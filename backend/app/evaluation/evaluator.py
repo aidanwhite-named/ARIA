@@ -268,7 +268,11 @@ def evaluate(
     ):
         return Verdict(JobStatus.CANCELLED, ErrorCode.CANCELLED, errors)
 
-    if outcome.timed_out:
+    # 최종 결과를 다 받은 뒤 CLI 가 안 죽어서 ARIA 가 끊은 실행은 타임아웃이
+    # 아니다. 결과 텍스트·사용량·도구 기록이 전부 있으므로 아래의 인증·사용량·
+    # 도구 정책 검사를 그대로 통과해야만 성공이 된다. 여기서 성공으로 건너뛰지
+    # 않는다 — status 가 SUCCESS 라는 문자열 하나로 정책 위반을 덮으면 안 된다.
+    if outcome.timed_out and not outcome.completed_without_exit:
         errors.append("실행 제한 시간을 초과했습니다.")
         return Verdict(JobStatus.FAILED, ErrorCode.TIMED_OUT, errors)
 

@@ -117,8 +117,9 @@ def upload_pdf(client, data: bytes, filename: str = "citation.pdf") -> dict:
 # --------------------------------------------------------------------- 1
 
 
+@pytest.mark.parametrize("evidence_chars", [20_000, 100_000])
 def test_oversized_citation_runs_through_retrieval(
-    client, prompt, monkeypatch, settings_guard
+    client, prompt, monkeypatch, settings_guard, evidence_chars
 ) -> None:
     """1. 180,000 bytes 를 넘는 인용문헌도 작은 근거 패키지로 조립된다."""
     monkeypatch.setattr(
@@ -126,7 +127,7 @@ def test_oversized_citation_runs_through_retrieval(
     )
     client.put(
         "/api/settings",
-        json={"values": {"retrieval_mode": "auto", "retrieval_evidence_chars": 20_000}},
+        json={"values": {"retrieval_mode": "auto", "retrieval_evidence_chars": evidence_chars}},
     )
 
     data = large_korean_pdf()
@@ -145,7 +146,7 @@ def test_oversized_citation_runs_through_retrieval(
     preflight = client.post("/api/jobs/preflight", json=body).json()
     assert preflight["delivery_plan"] == "local_retrieval"
     assert preflight["full_inline_bytes"] > AGY_BYTE_BUDGET
-    assert preflight["evidence_budget_chars"] == 20_000
+    assert preflight["evidence_budget_chars"] == evidence_chars
     assert preflight["blocked"] is False
 
     RECEIVED.clear()
@@ -155,6 +156,7 @@ def test_oversized_citation_runs_through_retrieval(
     assert final["status"] == "SUCCEEDED", final["errors"]
     assert final["delivery_plan"] == "local_retrieval"
     assert final["retrieval_manifest"] is not None
+    assert final["retrieval_manifest"]["budget"]["max_evidence_bytes"] == preflight["evidence_budget_bytes"]
 
     # 최종 분석 호출은 마지막 요청이다. 검색 라운드는 그 앞에 있다.
     analysis = RECEIVED[-1]

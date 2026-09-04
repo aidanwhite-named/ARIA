@@ -41,6 +41,71 @@ function pageCount(pages: number[] | undefined): number {
   return pages?.length ?? 0;
 }
 
+/** 이 문헌이 왜 「정상」에서 내려갔는가.
+ *
+ *  두 갈래로 나눠서 돌려준다.
+ *    unreadable  내용을 **얻지 못한** 페이지. 원본을 봐야만 확인된다.
+ *    suspect     텍스트는 얻었으나 추출 결과를 그대로 믿기 어려운 페이지.
+ *
+ *  섞으면 뒤엣것까지 OCR 문제로 읽힌다. 실제로 추출 방식 간 차이 하나로 올라온
+ *  텍스트 PDF 가 「원본 PDF 를 직접 확인해야 한다」 목록에 실렸고, 그 줄에는
+ *  사유가 통째로 비어 있었다 — 여기서 나열하던 셋(도면 전용·저문자·추출 실패)
+ *  중 어디에도 안 걸리는 사유였기 때문이다. 이유 없는 「원본을 보라」가 가장
+ *  나쁘다. 그래서 마지막에 빈 줄이 되지 않도록 한 번 더 막는다. */
+function reviewReasons(document: RetrievalDocument): {
+  unreadable: string[];
+  suspect: string[];
+} {
+  const extraction = document.extraction;
+  const unreadable: string[] = [];
+  const suspect: string[] = [];
+
+  if (pageCount(extraction.visual_review_required_pages)) {
+    unreadable.push(
+      `도면·이미지만 있는 페이지 ${extraction.visual_review_required_pages.join(", ")}`,
+    );
+  }
+  if (pageCount(extraction.empty_or_low_text_pages)) {
+    unreadable.push(
+      `텍스트를 얻지 못한 페이지 ${extraction.empty_or_low_text_pages.join(", ")}`,
+    );
+  }
+  if (pageCount(extraction.extraction_failed_pages)) {
+    unreadable.push(
+      `추출 실패 페이지 ${extraction.extraction_failed_pages.join(", ")}`,
+    );
+  }
+  if (extraction.open_error) {
+    unreadable.push(`파일을 열지 못했습니다: ${extraction.open_error}`);
+  }
+  if (extraction.status === "unusable" && unreadable.length === 0) {
+    unreadable.push("쓸 수 있는 페이지가 없습니다");
+  }
+
+  if (pageCount(extraction.extraction_divergence_pages)) {
+    suspect.push(
+      `두 가지 추출 방식의 결과가 어긋난 페이지 ${extraction.extraction_divergence_pages.join(", ")}`,
+    );
+  }
+  if (extraction.page_count_mismatch) {
+    suspect.push(
+      `원본 ${extraction.source_page_count}쪽 중 ${extraction.processed_page_count}쪽만 처리했습니다`,
+    );
+  }
+
+  if (
+    extraction.status !== "complete" &&
+    unreadable.length === 0 &&
+    suspect.length === 0
+  ) {
+    suspect.push(
+      `추출 상태가 「${EXTRACTION_LABEL[extraction.status] ?? extraction.status}」인데 사유가 기록되지 않았습니다`,
+    );
+  }
+
+  return { unreadable, suspect };
+}
+
 function DocumentRow({ document }: { document: RetrievalDocument }) {
   const extraction = document.extraction;
   const warnings = [
@@ -98,12 +163,19 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
 
   if (!isNarrowed(job.delivery_plan) && !manifest) return null;
 
-  const reviewNeeded =
-    manifest?.documents.filter(
-      (document) =>
-        document.extraction.status !== "complete" ||
-        pageCount(document.extraction.visual_review_required_pages) > 0,
-    ) ?? [];
+  // 상자를 둘로 나눈다. 내용을 못 얻은 문헌과 추출을 믿기 어려운 문헌은
+  // 사용자가 할 일이 다르다 — 앞은 원본을 봐야 하고, 뒤는 대조해 보면 된다.
+  // 한 문헌이 양쪽 사유를 다 가지면 무거운 쪽에만 넣고 사유를 합쳐 적는다.
+  const reviewed = (manifest?.documents ?? []).map((document) => ({
+    document,
+    ...reviewReasons(document),
+  }));
+  const unreadableDocuments = reviewed.filter(
+    (entry) => entry.unreadable.length > 0,
+  );
+  const suspectDocuments = reviewed.filter(
+    (entry) => entry.unreadable.length === 0 && entry.suspect.length > 0,
+  );
 
   return (
     <section className="card" style={{ marginTop: 16 }}>
@@ -163,6 +235,11 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
               <strong>
                 {manifest.evidence_chars.toLocaleString()} /{" "}
                 {manifest.budget.max_evidence_chars.toLocaleString()}자
+                {manifest.budget.max_evidence_bytes != null && (
+                  <span className="faint">
+                    {" · 바이트 상한 "}{manifest.budget.max_evidence_bytes.toLocaleString()} bytes
+                  </span>
+                )}
               </strong>
             </div>
             <div className="run-ready-row">
@@ -189,9 +266,24 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
 
           {manifest.budget_exhausted && (
             <div className="notice warn" style={{ marginTop: 12 }}>
-              검색 라운드 또는 페이지 읽기 예산을 모두 사용해 검토를
-              중단했습니다. 확인하지 못한 범위가 근거 패키지에 그대로
-              기록되어 있습니다.
+              검색·열람 중 예산 제한이 발생했습니다. 확인하지 못한 범위와
+              미처리 요청은 근거 패키지에 기록되어 있습니다.
+            </div>
+          )}
+
+          {(manifest.page_truncations ?? []).length > 0 && (
+            <div className="notice warn" style={{ marginTop: 12 }}>
+              <strong>페이지 부분 수록</strong>
+              <ul>
+                {manifest.page_truncations!.map((page) => (
+                  <li key={`${page.attachment}-${page.pdf_page}`}>
+                    {page.attachment} p.{page.pdf_page}: 첫 {page.included_chars.toLocaleString()}자 수록
+                    {" / 전체 "}{page.source_chars.toLocaleString()}자
+                    {" · 누락 "}{page.omitted_chars.toLocaleString()}자
+                  </li>
+                ))}
+              </ul>
+              <div className="faint">부분 수록은 페이지 전문 확인이 아닙니다. 누락 구간은 검토 범위 밖입니다.</div>
             </div>
           )}
 
@@ -202,9 +294,9 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
                 {(manifest.page_reductions ?? []).join(", ")}
               </div>
               <div className="faint" style={{ marginTop: 4 }}>
-                근거 구간과 그 발췌는 그대로입니다. 빠진 것은 앞뒤 문맥이며, 해당
-                페이지는 「미확인 페이지」로 기록됩니다. 환경설정의 「근거 패키지
-                최대 문자 수」를 올리면 더 담습니다.
+                근거 구간과 그 발췌는 그대로입니다. 빠진 것은 페이지 전문과 앞뒤
+                문맥이며, 해당 페이지는 「미확인 페이지」로 기록됩니다. 문자 예산을
+                올리면 입력 바이트 한도에 여유가 있는 범위에서 더 담을 수 있습니다.
               </div>
             </div>
           )}
@@ -220,28 +312,19 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
               <div className="faint" style={{ marginTop: 4 }}>
                 원문은 자르지 않았습니다. 줄인 범위는 검토 범위 제한으로
                 기록되며, 그 때문에 해당 구성은 「없음」으로 판정되지 않습니다.
-                환경설정의 「근거 패키지 최대 문자 수」를 올리면 줄이지 않습니다.
+                환경설정의 문자 예산과 실행 전 안내의 바이트 예산을 함께 확인해 주세요.
               </div>
             </div>
           )}
 
-          {reviewNeeded.length > 0 && (
+          {unreadableDocuments.length > 0 && (
             <div className="notice warn" style={{ marginTop: 12 }}>
               <strong>원본 PDF 를 직접 확인해야 하는 문헌이 있습니다</strong>
               <ul style={{ marginTop: 6 }}>
-                {reviewNeeded.map((document) => (
-                  <li key={document.attachment_id}>
-                    {document.alias} · {document.filename} —{" "}
-                    {[
-                      pageCount(document.extraction.visual_review_required_pages) &&
-                        `도면·이미지만 있는 페이지 ${document.extraction.visual_review_required_pages.join(", ")}`,
-                      pageCount(document.extraction.empty_or_low_text_pages) &&
-                        `텍스트를 얻지 못한 페이지 ${document.extraction.empty_or_low_text_pages.join(", ")}`,
-                      pageCount(document.extraction.extraction_failed_pages) &&
-                        `추출 실패 페이지 ${document.extraction.extraction_failed_pages.join(", ")}`,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
+                {unreadableDocuments.map((entry) => (
+                  <li key={entry.document.attachment_id}>
+                    {entry.document.alias} · {entry.document.filename} —{" "}
+                    {[...entry.unreadable, ...entry.suspect].join(" · ")}
                   </li>
                 ))}
               </ul>
@@ -249,6 +332,28 @@ export default function RetrievalManifestView({ job }: { job: Job }) {
                 ARIA 는 OCR 을 수행하지 않습니다. 이 페이지들의 내용은 확인되지
                 않았으며, 그 사실 때문에 해당 구성은 「문헌에 없음」으로
                 판정되지 않습니다.
+              </div>
+            </div>
+          )}
+
+          {suspectDocuments.length > 0 && (
+            <div className="notice" style={{ marginTop: 12 }}>
+              <strong>추출 결과를 원본과 대조해 두면 좋은 문헌이 있습니다</strong>
+              <ul style={{ marginTop: 6 }}>
+                {suspectDocuments.map((entry) => (
+                  <li key={entry.document.attachment_id}>
+                    {entry.document.alias} · {entry.document.filename} —{" "}
+                    {entry.suspect.join(" · ")}
+                  </li>
+                ))}
+              </ul>
+              <div className="faint" style={{ marginTop: 4 }}>
+                이 문헌들은 텍스트를 정상적으로 얻었습니다. ARIA 가 같은 페이지를
+                두 가지 방식으로 뽑아 견주었을 때 글자 수가 크게 어긋났다는
+                뜻이며, 회전된 라벨이나 다단 편집처럼 배치가 까다로운 페이지에서
+                자주 나옵니다. OCR 로 해결되는 문제가 아니고 본문 판독에도 대개
+                지장이 없습니다. 그 페이지가 판단의 근거가 됐다면 원본을 한 번
+                보십시오.
               </div>
             </div>
           )}

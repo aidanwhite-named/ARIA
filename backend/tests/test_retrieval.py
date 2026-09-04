@@ -18,7 +18,7 @@ from app.ingestion.service import IngestedFile
 from app.retrieval import chunking, evidence, extraction, index as index_module, search
 from app.retrieval.agent import RetrievalBudget
 
-from .fake_provider import DeterministicTestProvider
+from .fake_provider import DeterministicTestProvider, _round_payload
 from .pdf_fixture import build_korean_pdf, build_pdf, build_scanned_like_pdf
 
 # ------------------------------------------------------------------ 도우미
@@ -677,7 +677,9 @@ def test_last_valid_finalize_is_kept_when_round_limit_is_reached(tmp_path, monke
     class FallbackProvider(DeterministicTestProvider):
         async def execute(self, request, emit):
             outcome = ExecutionOutcome(cli_path="(test)", cli_version="0")
-            if '"round": 1' in request.user_message:
+            # 전송 JSON 은 공백 없는 compact 형식이다. 문자열 모양이 아니라
+            # 되읽은 payload 로 라운드를 가린다.
+            if _round_payload(request.user_message).get("round") == 1:
                 response = {
                     "components": [
                         {
@@ -1239,7 +1241,10 @@ def test_package_stays_within_budget_under_stress(tmp_path) -> None:
         for n in range(20)
     ]
     corpus, _ = _corpus(tmp_path, items)
-    budget = RetrievalBudget()  # 기본 예산 40,000자
+    # 예산을 명시한다. 이 시험이 재는 것은 "예산이 상한인가"와 "줄였으면
+    # 기록하는가"이고, 뒤쪽은 예산이 실제로 모자라야 관측된다. 기본값을 쓰면
+    # 기본값을 올리는 순간 압박이 사라져 시험이 아무것도 재지 않게 된다.
+    budget = RetrievalBudget(max_evidence_chars=40_000)
     try:
         bundle, rendered = _stress_bundle(20, 180, 900, budget, corpus=corpus)
     finally:
@@ -1265,13 +1270,111 @@ def test_fit_returns_exactly_what_the_prompt_renders(tmp_path) -> None:
     반영 전에 잰 문자열을 돌려주면 최종 프롬프트가 안내한 크기보다 커진다.
     실행이 실제로 넘는 구간이 예산에 따라 생긴다.
     """
-    for max_chars in (21_300, 27_500, 40_000):
+    for max_chars in (21_300, 27_500, 40_000, RetrievalBudget().max_evidence_chars):
         budget = RetrievalBudget(max_evidence_chars=max_chars)
         bundle, rendered = _stress_bundle(20, 180, 900, budget)
         # 최종 프롬프트가 하는 것과 같은 호출.
         assert retrieval.render(bundle) == rendered
         if not bundle.get("package_over_budget"):
             assert len(rendered) <= max_chars
+
+
+@pytest.mark.parametrize("byte_limit", [0, 999, 1_000, 1_001, 1_999, 3_000])
+def test_placeholder_covers_independent_char_and_byte_limits(byte_limit) -> None:
+    budget = RetrievalBudget(max_evidence_chars=1_000, max_evidence_bytes=byte_limit)
+    placeholder = retrieval.render_placeholder(budget, [])
+    assert len(placeholder) == min(1_000, byte_limit)
+    assert len(placeholder.encode("utf-8")) == byte_limit
+
+
+def test_fit_enforces_bytes_even_when_the_char_budget_has_room() -> None:
+    budget = RetrievalBudget(max_evidence_chars=100_000, max_evidence_bytes=10_000)
+    bundle, rendered = _stress_bundle(1, 1_000, 4_000, budget)
+    assert not bundle.get("package_over_budget")
+    assert bundle["package_reductions"]
+    assert len(rendered) < budget.max_evidence_chars
+    assert len(rendered.encode("utf-8")) <= budget.max_evidence_bytes
+    assert rendered == evidence.render(bundle)
+
+
+@pytest.mark.parametrize("kind", ["read", "search"])
+def test_partial_return_preserves_waiting_age_and_eventually_serves(tmp_path, kind) -> None:
+    """실제 handler 가 일부 결과를 재이월해도 기다린 이력이 사라지지 않는다."""
+    from dataclasses import replace
+    from app.retrieval import agent as agent_module
+    from app.retrieval.actions import ReadPage, SearchDocument
+
+    item = _pdf_attachment(tmp_path, "doc.pdf", KOREAN_PAGES)
+    corpus, _ = _corpus(tmp_path, [item])
+    try:
+        agent = agent_module.RetrievalAgent(
+            job_id="age", provider=DeterministicTestProvider(), model=None,
+            timeout_seconds=60, work_dir=tmp_path, corpus=corpus, claim_text="센서",
+            budget=RetrievalBudget(max_round_result_chars=200),
+            trace=agent_module.TraceWriter(tmp_path / "trace.jsonl"),
+        )
+        agent._components["R001"] = agent_module.ComponentState("R001", "센서", "센서")
+        action = (
+            ReadPage(action="read_page", component_id="R001", attachment="ATT-01", page=1)
+            if kind == "read" else
+            SearchDocument(action="search_document", component_id="R001", attachment="ATT-01", queries=["센서"])
+        )
+        run = agent_module.RetrievalRun()
+        for round_no in range(1, 9):
+            asyncio.run(agent._execute_actions([action] if round_no == 1 else [], run, round_no))
+            assert agent._deferred_actions
+            assert all(entry.first_round == 1 for entry in agent._deferred_actions)
+            assert min(entry.attempts for entry in agent._deferred_actions) >= round_no - 1
+        assert not run.exposed_chunks
+        agent._components["R001"].current_priority = "low"
+        agent._components["R002"] = agent_module.ComponentState(
+            "R002", "새 구성", "센서", current_priority="high"
+        )
+        urgent = SearchDocument(
+            action="search_document", component_id="R002", attachment="ATT-01", queries=["센서"]
+        )
+        agent.budget = replace(agent.budget, max_round_result_chars=20_000)
+        response = asyncio.run(agent._execute_actions([urgent], run, 9))
+        assert response
+        # 후보 0건 검색의 예약 몫을 준 뒤에도 오래 기다린 요청은 같은 라운드에 처리된다.
+        if kind == "search":
+            assert response[0].get("component_id") == "R001"
+        else:
+            assert any(entry.get("pages") for entry in response)
+        assert run.exposed_chunks
+        assert not agent._deferred_actions
+    finally:
+        retrieval.close_documents(corpus)
+
+
+@pytest.mark.parametrize("kind", ["search", "read", "status"])
+def test_unreturnable_envelope_does_not_enqueue_parent_and_children(tmp_path, kind) -> None:
+    from app.retrieval import agent as agent_module
+    from app.retrieval.actions import GetDocumentStatus, ReadPage, SearchDocument
+
+    documents = [_pdf_attachment(tmp_path, f"d{i}.pdf", KOREAN_PAGES, sha=f"s{i}") for i in range(2)]
+    corpus, _ = _corpus(tmp_path, documents)
+    try:
+        agent = agent_module.RetrievalAgent(
+            job_id="envelope", provider=DeterministicTestProvider(), model=None,
+            timeout_seconds=60, work_dir=tmp_path, corpus=corpus, claim_text="센서",
+            budget=RetrievalBudget(max_round_result_chars=20),
+            trace=agent_module.TraceWriter(tmp_path / "trace.jsonl"),
+        )
+        agent._components["R001"] = agent_module.ComponentState("R001", "센서", "센서")
+        action = {
+            "search": SearchDocument(action="search_document", component_id="R001", queries=["센서"]),
+            "read": ReadPage(action="read_page", component_id="R001", attachment="ATT-01", page=1),
+            "status": GetDocumentStatus(action="get_document_status", attachment="*"),
+        }[kind]
+        run = agent_module.RetrievalRun()
+        assert asyncio.run(agent._execute_actions([action], run, 1)) == []
+        assert len(agent._deferred_actions) == 1
+        assert agent._deferred_actions[0].item == action
+        assert not run.exposed_chunks
+        assert not agent._components["R001"].searched
+    finally:
+        retrieval.close_documents(corpus)
 
 
 def test_package_reduction_downgrades_absent_verdict(tmp_path) -> None:

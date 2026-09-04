@@ -41,6 +41,12 @@ _BLOCK = re.compile(
     re.DOTALL,
 )
 
+# 근거 구분. direct 는 문헌 문언으로 직접 확인한 한정, inferred 는 기재로부터
+# 추론한 한정이다. 빈 값은 "표시하지 않았다"이며 둘 중 어느 쪽도 아니다.
+BASIS_DIRECT = "direct"
+BASIS_INFERRED = "inferred"
+BASES = frozenset({BASIS_DIRECT, BASIS_INFERRED})
+
 _MAX_ITEMS = 300
 _MAX_TEXT = 4000
 
@@ -141,6 +147,15 @@ def parse(text: str, *, threshold: int = DEFAULT_THRESHOLD) -> dict:
                 f"구성 {index}의 matched 상태와 유사도가 맞지 않습니다."
             )
 
+        # 근거의 성격. 문헌 문언으로 직접 확인한 것과 그 기재로부터 추론한 것을
+        # 가른다. 예전 프롬프트에는 이 칸이 없으므로 비어 있어도 거절하지 않는다 —
+        # 없다는 것은 "모른다"이고, 그것과 "추론이다"를 같은 칸에 넣지 않는다.
+        basis = _text(raw.get("basis"), 20).lower()
+        if basis and basis not in BASES:
+            raise ComponentAnalysisError(
+                f"구성 {index}의 근거 구분을 알 수 없습니다: {basis!r}"
+            )
+
         search_eligible = status == STATUS_NOT_FOUND or (
             similarity is not None and similarity < threshold
         )
@@ -154,6 +169,7 @@ def parse(text: str, *, threshold: int = DEFAULT_THRESHOLD) -> dict:
                 "similarity": similarity,
                 "status": status,
                 "difference": difference,
+                "basis": basis,
                 "search_eligible": search_eligible,
             }
         )

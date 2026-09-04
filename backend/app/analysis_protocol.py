@@ -31,18 +31,28 @@ from .analysis_manifest import DEFAULT_THRESHOLD
 from .analysis_manifest import _OPEN as _COMPONENT_OPEN
 from .citation_mapping import _OPEN as _MAPPING_OPEN
 
-# 기본 Master Prompt 에 있던 절을 그대로 옮겨 온 것이다. 유사도 기준값은
-# 파서와 어긋나면 안 되므로 analysis_manifest 의 상수에서 채운다.
+# 기본 Master Prompt 에 있던 절을 옮겨 온 것이다. 유사도 기준값은 파서와
+# 어긋나면 안 되므로 analysis_manifest 의 상수에서 채운다.
+#
+# `unreadable` 에서 `similarity` 가 `null` 이어야 한다는 것을 문장과 예시 양쪽에
+# 적는다. 옮겨 오기 전 문구는 "유사도를 생략한 경우는 unreadable" 이라고만 했고
+# 예시에도 그 경우가 없었다. 근거 패키지가 예산에 눌려 구성 상태를
+# coverage_insufficient 로 내리면 모델은 본문에서 유사도를 생략하면서 블록에는
+# `"similarity":0` 을 적었고, 파서가 그 블록을 통째로 거절했다. 그러면
+# analysis_manifest 가 통째로 비어서 「구성별 대응 정도」도 「미대응 구성 검색」도
+# 함께 사라진다 — 예산이 빠듯한 실행일수록 후속 작업 수단을 잃는 셈이다.
+# 0 을 파서가 조용히 흡수하게 만들지는 않는다. 0% 는 「확인 범위 기준 대응 없음」
+# 이라는 판단이고, 판단 불가와 같은 칸에 넣으면 그 둘이 화면에서 구별되지 않는다.
 INSTRUCTIONS = f"""# ARIA 기계 판독 블록
 
 종합 요약 뒤에 아래 두 블록을 출력한다. 화면에서는 제거되므로 본문에서 설명하지 않는다.
 
 ## 구성별 분석 블록
 
-모든 구성요소를 보고서 순서로 한 번만 기록한다. `similarity`는 본문과 같은 정수, `status`는 {DEFAULT_THRESHOLD}% 이상 `matched`, 0~{DEFAULT_THRESHOLD - 1}% `below_threshold`, 판독 또는 검토 범위 제한으로 유사도를 생략한 경우는 `unreadable`이다(`not_found` 미사용). `difference`에는 미대응 기능을 간결히 쓴다. 한 줄 JSON이며 코드펜스를 쓰지 않는다.
+모든 구성요소를 보고서 순서로 한 번만 기록한다. **로컬 검색 근거 패키지가 제공된 경우에는 그 패키지가 선언한 구성을 하나도 빼지 않는다 — 전제부처럼 중요도가 낮게 표시된 구성도 목록에서 생략하지 않고, 확인하지 못했으면 `unreadable` 로 남긴다.** `basis`는 그 구성의 **핵심 한정마다** 문헌의 문언으로 직접 확인했으면 `direct`, 기재로부터 추론했으면 `inferred`다. 한정 중 하나라도 직접 근거 없이 추론으로 메웠으면 `inferred`이며, 그 한정이 무엇인지는 `difference`에 적는다. `status`는 {DEFAULT_THRESHOLD}% 이상 `matched`, 0~{DEFAULT_THRESHOLD - 1}% `below_threshold`, 판독 또는 검토 범위 제한으로 유사도를 생략한 경우는 `unreadable`이다(`not_found` 미사용). `similarity`는 `matched`·`below_threshold`에서 본문과 같은 정수이고, **`unreadable`에서는 반드시 `null`이다.** 0은 「확인 범위 기준 대응 없음」이라는 다른 판단이므로 유사도를 생략한 자리에 대신 쓰지 않는다. `difference`에는 미대응 기능과, 직접 근거 없이 추론으로 메운 한정을 간결히 쓴다. 한 줄 JSON이며 코드펜스를 쓰지 않는다.
 
 {_COMPONENT_OPEN}
-{{"items":[{{"claim":"청구항 1","symbol":"(A)","feature":"청구항 구성 내용","similarity":92,"status":"matched","difference":""}},{{"claim":"청구항 1","symbol":"(B)","feature":"청구항 구성 내용","similarity":0,"status":"below_threshold","difference":"확인 범위에서 대응 내용 없음"}}]}}
+{{"items":[{{"claim":"청구항 1","symbol":"(A)","feature":"청구항 구성 내용","similarity":92,"status":"matched","basis":"direct","difference":""}},{{"claim":"청구항 1","symbol":"(B)","feature":"청구항 구성 내용","similarity":0,"status":"below_threshold","basis":"inferred","difference":"확인 범위에서 대응 내용 없음"}},{{"claim":"청구항 1","symbol":"(C)","feature":"청구항 구성 내용","similarity":null,"status":"unreadable","basis":"inferred","difference":"검토 범위 제한으로 확인하지 못한 기능"}}]}}
 [/ARIA_COMPONENT_ANALYSIS_V1]
 
 ## 문헌 매핑 블록

@@ -48,6 +48,10 @@ class ProcessResult:
     stdout: str = ""
     stderr: str = ""
     launch_error: str | None = None
+    # 최종 결과를 다 받았는데 CLI 가 스스로 끝나지 않아 ARIA 가 끊었다.
+    # 이건 타임아웃이 아니다 — 결과는 전부 손에 있다. 둘을 같은 칸에 넣으면
+    # "답을 못 받았다"와 "답은 받았는데 프로세스가 안 죽었다"가 구분되지 않는다.
+    completed_without_exit: bool = False
 
 
 @dataclass
@@ -155,7 +159,22 @@ async def run_streaming(
     on_stderr_line: LineHandler | None = None,
     timeout_seconds: int = 900,
     max_capture_chars: int = 8_000_000,
+    completion_signal: asyncio.Event | None = None,
+    completion_grace_seconds: float = 15.0,
 ) -> ProcessResult:
+    """CLI 를 실행하며 stdout/stderr 를 줄 단위로 흘려보낸다.
+
+    completion_signal 을 주면 "최종 결과를 다 받았다"는 신호로 쓴다. 스트림이
+    닫히기를 기다리는 것만으로는 부족하기 때문이다 — 실측(job d39dc2cc, agy
+    1.1.26): 모델이 최종 response 와 status SUCCESS 를 보낸 뒤에도 프로세스가
+    끝나지 않아 stdout 이 열린 채로 남았고, ARIA 는 15분 뒤 타임아웃으로 실패
+    처리했다. 결과 텍스트·사용량·도구 기록이 전부 손에 있는데도 보고서가
+    버려졌다.
+
+    신호가 오면 CLI 가 스스로 끝날 시간을 completion_grace_seconds 만큼 주고,
+    그래도 살아 있으면 트리를 끊고 completed_without_exit 로 표시한다. 신호 없이
+    시간만 넘긴 경우는 예전 그대로 timed_out 이다.
+    """
     result = ProcessResult()
 
     try:
@@ -201,20 +220,63 @@ async def run_streaming(
         ),
     ]
 
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), timeout=timeout_seconds
-        )
-        result.exit_code = await asyncio.wait_for(process.wait(), timeout=30)
-    except (asyncio.TimeoutError, TimeoutError):
-        result.timed_out = True
+    pump = asyncio.ensure_future(asyncio.gather(*tasks, return_exceptions=True))
+    signal_wait: asyncio.Task | None = None
+    if completion_signal is not None:
+        signal_wait = asyncio.ensure_future(completion_signal.wait())
+
+    async def _reap(limit: float) -> None:
+        # 프로세스가 실제로 사라진 것을 확인하고 종료 코드를 남긴다.
+        with contextlib.suppress(Exception):
+            result.exit_code = await asyncio.wait_for(process.wait(), timeout=limit)
+
+    async def _kill() -> None:
         if process.pid is not None:
             await asyncio.to_thread(kill_process_tree, process.pid)
+        pump.cancel()
         for task in tasks:
             task.cancel()
-        with contextlib.suppress(Exception):
-            result.exit_code = await asyncio.wait_for(process.wait(), timeout=10)
+
+    try:
+        waiters: list[asyncio.Future] = [pump]
+        if signal_wait is not None:
+            waiters.append(signal_wait)
+        done, _ = await asyncio.wait(
+            waiters, timeout=timeout_seconds, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        if pump in done:
+            # 스트림이 정상적으로 닫혔다. 예전 경로 그대로.
+            try:
+                result.exit_code = await asyncio.wait_for(process.wait(), timeout=30)
+            except (asyncio.TimeoutError, TimeoutError):
+                result.timed_out = True
+                await _kill()
+                await _reap(10)
+        elif signal_wait is not None and signal_wait in done:
+            # 최종 결과는 받았다. CLI 가 스스로 끝날 시간을 준다.
+            finished, _ = await asyncio.wait([pump], timeout=completion_grace_seconds)
+            if pump in finished:
+                try:
+                    result.exit_code = await asyncio.wait_for(process.wait(), timeout=30)
+                except (asyncio.TimeoutError, TimeoutError):
+                    result.completed_without_exit = True
+                    await _kill()
+                    await _reap(10)
+            else:
+                result.completed_without_exit = True
+                await _kill()
+                await _reap(10)
+        else:
+            # 신호도 없고 스트림도 안 닫혔다. 진짜 타임아웃이다.
+            result.timed_out = True
+            await _kill()
+            await _reap(10)
     finally:
+        if signal_wait is not None and not signal_wait.done():
+            signal_wait.cancel()
+        if not pump.done():
+            pump.cancel()
         for task in tasks:
             if not task.done():
                 task.cancel()

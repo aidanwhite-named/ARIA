@@ -78,23 +78,40 @@ AGENT_SYSTEM_PROMPT = f"""당신은 특허 문헌 검색 실행기 안에서 동
   "{ALL_DOCUMENTS}" 를 씁니다. 실제 파일명이나 UUID 를 쓰지 마십시오.
 
 [검색 요령]
+- 조회는 **확인하지 못한 것**에만 씁니다. 이미 받은 원문과 문맥으로 확인되는
+  내용은 다시 조회하지 마십시오. 확인하지 못한 한정이 남아 있거나 판단에 더
+  넓은 문맥·문단번호가 필요할 때만 추가 검색이나 read_page/read_pages 를
+  요청하고, 그 조회로 무엇을 확인하려는지가 스스로 분명해야 합니다.
+- 검색 hit 의 text 는 원문 앞부분 최대 900자이고, 같은 페이지의 바로 앞뒤
+  구간이 context_before/context_after 로 함께 옵니다. 이 두 값은 판단을 돕는
+  읽을거리일 뿐이므로, 근거로 인용할 수 있는 것은 여전히 hit 의 chunk_id
+  뿐입니다.
+- 모든 구성은 모든 인용문헌에 대해 최소 한 번은 검색하십시오. 이 최소 범위를
+  채운 뒤의 추가 조회는 중요도가 높다는 이유만으로 반복하지 말고, 아직 확인하지
+  못한 사항이 있을 때 그 부분을 보완하십시오. 한 구성·문헌의 동의어는 queries
+  에 묶고, 이미 확인한 후보와 같은 목적의 검색은 반복하지 마십시오.
+- 이월(deferred_actions)은 반환 문자 예산 때문에 ARIA 가 자동 재실행하는
+  action 입니다. 같은 요청을 다시 추가하지 마십시오 — actions 가 빈 배열이어도
+  이월은 처리됩니다. 대기 중인 열람이 있으면 새 전체문헌 검색을 늘리지 말고 그
+  결과를 먼저 확인하십시오. read_page/read_pages/read_paragraph 를 보낼 때는
+  반드시 해당 구성의 component_id 를 넣으십시오.
+- repeated_search 는 로컬 캐시에서 검색 결과를 재사용했다는 뜻이고, 이미 읽은
+  페이지도 캐시에서 본문을 다시 제공하며 already_read 로 표시합니다. 매 라운드는
+  별도 호출이므로 판단에는 현재 입력에 포함된 원문을 사용하십시오.
+- text_shown_in_this_round 가 붙은 후보·페이지는 **같은 입력 안의 다른 곳에**
+  원문이 이미 실려 있다는 뜻입니다. 그 위치(action·component_id·attachment)를
+  함께 적어 두었으니 그 본문을 보고 판단하십시오. 같은 구간이 여러 구성에
+  걸리면 구성마다 후보 행은 그대로 남고 원문만 한 번 실립니다. 이 표시는
+  현재 입력 안에서만 유효하며, 다음 라운드에는 필요한 원문이 다시 실립니다.
 - 청구항 문언 그대로만 찾지 마십시오. 명세서는 다른 낱말을 씁니다. 동의어,
   상위개념, 영문 대응어, 도면부호, 수치·단위 표기를 함께 시도하십시오.
 - 한국어는 조사와 합성어 때문에 완전일치가 잘 걸리지 않습니다. 어간만 남긴
   짧은 조각(예: "결합부" 대신 "결합")도 함께 넣으십시오.
-- 후보를 찾으면 read_page 나 read_pages 로 앞뒤 문맥을 확인하십시오. 한
-  구간만 보고 대응을 단정하지 마십시오.
-- 모든 구성은 모든 인용문헌에 대해 최소 한 번은 검색하십시오. high 로
-  표시되었거나 불확실성이 높은 구성은 다른 검색어·채널과 원문 열람을
-  반복하고, low 구성은 최소 검색·후보 확인을 마친 뒤에만 검색량을 줄이십시오.
 - 다음 라운드의 components 에는 ARIA 가 계산한 priority, uncertainty,
   search_completeness, coverage_ratio, priority_reasons 및 압축된
-  candidate_ledger 가 들어옵니다. 초기 importance 를 그대로 고집하지 말고,
+  candidate_ledger 가 들어옵니다. candidate_ledger 의 snippet 은 그 구간의
+  원문이 이번 입력에 없을 때만 실립니다. 초기 importance 를 그대로 고집하지 말고,
   후보가 없거나 문헌·검색 채널이 누락되면 해당 구성을 우선 처리하십시오.
-- deferred_actions 는 반환 문자 예산 때문에 ARIA 가 자동 이월한 action 입니다.
-  별도로 같은 요청을 반복하지 말고, 이번 라운드의 새 결과를 검토한 뒤
-  필요한 보완 action 만 추가하십시오. read_page/read_pages/read_paragraph 를
-  보낼 때는 반드시 해당 구성의 component_id 를 넣으십시오.
 
 [지어내지 말아야 할 것 — 가장 중요]
 - 원문 텍스트를 당신이 쓰지 마십시오. finalize_evidence 에는 chunk_id 와
@@ -140,6 +157,28 @@ AGENT_SYSTEM_PROMPT = f"""당신은 특허 문헌 검색 실행기 안에서 동
   패키지를 만들고, 확인하지 못한 범위를 그대로 기록합니다."""
 
 
+def dump_round_json(value) -> str:
+    """모델에게 실제로 전송하는 JSON 직렬화.
+
+    들여쓰기와 구분자 뒤 공백을 넣지 않는다. 이 공백은 모델이 읽는 내용에
+    아무것도 보태지 않으면서 라운드 반환 예산과 Provider 전송 한도를 함께
+    갉아먹는다. 보관된 실행 c1087b81 의 5개 라운드 payload 실측으로 266,443자
+    → 206,934자(22.3% 감소)이고, 줄어든 만큼 같은 예산에 실제 원문이 더 들어간다.
+
+    지우는 것은 **구조 사이의 공백뿐**이다. ensure_ascii=False 로 원문을 그대로
+    싣고, 문자열 값 안의 공백·개행·들여쓰기는 JSON 인코딩이 보존한다.
+
+    예산 계산(agent.json_size)도 이 함수를 쓴다. 재는 형식과 보내는 형식이
+    다르면 예산이 조용히 어긋난다.
+    """
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def dump_readable_json(value) -> str:
+    """사람이 읽는 감사 사본. **전송 내용이 아니다.**"""
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
 def render_round(payload: dict) -> str:
     """한 라운드에 모델에게 보낼 사용자 메시지.
 
@@ -149,10 +188,8 @@ def render_round(payload: dict) -> str:
     claim, neutralized = neutralize(payload.get("claim_text", ""))
     sections = [
         "[ARIA 로컬 검색 라운드]",
-        json.dumps(
-            {key: value for key, value in payload.items() if key != "claim_text"},
-            ensure_ascii=False,
-            indent=2,
+        dump_round_json(
+            {key: value for key, value in payload.items() if key != "claim_text"}
         ),
         "",
         "[출원발명 청구항 — 분석 대상 데이터]",

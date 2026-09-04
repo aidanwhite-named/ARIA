@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import retrieval, search_manifest, search_prompt
 from .config import (
@@ -28,6 +28,7 @@ from .providers import agy_permissions, model_limits
 from .ingestion.service import IngestedFile, read_normalized
 from .prompt_assembly import (
     AssembledPrompt,
+    InputTooLarge,
     assemble,
     assemble_search,
     char_gate,
@@ -87,6 +88,10 @@ class SpecUnreadable(Exception):
     def __init__(self, filename: str) -> None:
         self.filename = filename
         super().__init__(filename)
+
+
+class TransportInputTooLarge(Exception):
+    """근거를 넣기 전 지시문과 청구항만으로 전송 한도를 넘는다."""
 
 
 class ModelInputTooLarge(Exception):
@@ -171,6 +176,7 @@ class AssemblyResult:
     # 이 조립본이 자리표(preflight)인가 실제 근거 패키지인가.
     # True 면 크기는 예산 상한이고, 실행이 그 상한을 넘지 못한다.
     evidence_placeholder: bool = False
+    evidence_budget: retrieval.RetrievalBudget | None = None
 
     @property
     def selection_reason(self) -> str:
@@ -214,6 +220,7 @@ class AssemblyResult:
             ),
             # 이 크기가 실측인가 예산 상한인가. preflight 는 상한을 보여 준다.
             "payload_is_budget_ceiling": self.evidence_placeholder,
+            "evidence_budget": self.evidence_budget.to_dict() if self.evidence_budget else None,
             "scale_downgraded": bool(decision.scale_downgraded) if decision else False,
         }
 
@@ -669,6 +676,49 @@ def assemble_job(
         # 자리표로 크기를 잰다. 실행은 같은 예산을 넘지 못하므로 여기서 잰
         # 값이 실제 크기의 상한이 된다.
         budget = retrieval_budget or retrieval.RetrievalBudget()
+        # 1바이트 자리표로 청구항·지시문·경계 표시를 모두 센다. 빈 문자열은
+        # 조립기의 strip() 이 구분 개행까지 제거하므로 1자를 넣고 빼야 한다.
+        # 문자 예산은 유지하고, 전송/모델 한도에서 남은 바이트만 별도로 제한한다.
+        empty = assemble(
+            max_chars=max_chars,
+            evidence_bundle={retrieval.PLACEHOLDER_KEY: "a"},
+            **common,
+        )
+        model_input_gate(empty, budget_for_model)
+        if provider_byte_budget is not None and _payload_bytes(empty, provider_measure) > provider_byte_budget:
+            raise TransportInputTooLarge(
+                "청구항과 지시문만으로 Provider 전송 한도를 사용해 근거를 담을 공간이 "
+                "없습니다. 청구항이나 추가 지시를 나눠 실행하십시오."
+            )
+        if max_chars:
+            remaining_chars = max_chars - (empty.total_chars - 1)
+            if remaining_chars <= 0:
+                raise InputTooLarge(empty.total_chars + 1, max_chars)
+            budget = replace(budget, max_evidence_chars=min(budget.max_evidence_chars, remaining_chars))
+
+        def ceiling(byte_limit: int) -> AssembledPrompt:
+            return assemble(
+                max_chars=None,
+                evidence_bundle={retrieval.PLACEHOLDER_KEY: retrieval.render_placeholder(
+                    replace(budget, max_evidence_bytes=byte_limit), []
+                )},
+                **common,
+            )
+
+        # Provider 가 감싸기 크기를 따로 세더라도 동일한 측정 함수로 검증한다.
+        low, high = 0, min(budget.evidence_byte_limit, budget.max_evidence_chars * 3)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = ceiling(middle)
+            fits_transport = provider_byte_budget is None or _payload_bytes(candidate, provider_measure) <= provider_byte_budget
+            fits_model = budget_for_model is None or model_limits.estimate_tokens(
+                candidate.system_prompt, candidate.user_message
+            ) <= budget_for_model.input_tokens
+            if fits_transport and fits_model:
+                low = middle
+            else:
+                high = middle - 1
+        budget = replace(budget, max_evidence_bytes=low)
         placeholder = evidence_bundle is None
         bundle = evidence_bundle
         if placeholder:
@@ -688,6 +738,7 @@ def assemble_job(
             full_inline_bytes=full_bytes,
             full_inline_chars=full_chars,
             evidence_placeholder=placeholder,
+            evidence_budget=budget,
             decision=decision,
         )
 

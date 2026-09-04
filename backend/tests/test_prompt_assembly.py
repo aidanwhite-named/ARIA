@@ -142,11 +142,16 @@ def test_zero_or_none_budget_means_no_char_limit() -> None:
 
 
 def test_budget_counts_system_prompt() -> None:
-    long_rules = "r" * 1200
+    # 한도를 상수로 두지 않고 출력 규칙 길이에서 잡는다. 상수면 규칙이 길어지는
+    # 순간 "런타임 컨텍스트를 껐는데도 넘는다"로 깨지고, 이 시험이 재려던 것과
+    # 다른 이유로 빨개진다. 재려는 것은 규칙의 길이가 아니라 시스템 프롬프트가
+    # 예산에 세어지는가다.
+    budget = len(analysis_protocol.INSTRUCTIONS) + 500
+    long_rules = "r" * (budget + 200)
     with pytest.raises(InputTooLarge):
-        assemble("body", [], long_rules, True, 1000)
+        assemble("body", [], long_rules, True, budget)
     # 런타임 컨텍스트를 끄면 같은 입력이 통과한다.
-    assert assemble("body", [], long_rules, False, 1000)
+    assert assemble("body", [], long_rules, False, budget)
 
 
 def test_hash_is_stable_for_identical_input() -> None:
@@ -263,10 +268,21 @@ def test_the_attached_rules_parse_with_the_real_parsers() -> None:
     예시 블록을 그대로 파서에 먹여서 두 짝이 붙어 있는지 확인한다.
     """
     parsed = analysis_manifest.parse(analysis_protocol.INSTRUCTIONS)
+    # 세 상태가 모두 예시에 있어야 한다. unreadable 예시가 없던 동안 모델은
+    # 유사도를 생략한 자리에 0 을 적었고, 파서가 블록 전체를 거절했다. 그러면
+    # analysis_manifest 가 통째로 비어서 「구성별 대응 정도」도 「미대응 구성
+    # 검색」도 함께 사라진다 — 실측한 실패다.
     assert [item["status"] for item in parsed["items"]] == [
         "matched",
         "below_threshold",
+        "unreadable",
     ]
+    # 유사도를 생략한 자리는 0 이 아니라 null 이다. 0% 는 「확인 범위 기준 대응
+    # 없음」이라는 별개의 판단이라, 같은 값으로 적으면 화면에서 구별되지 않는다.
+    unreadable = [row for row in parsed["items"] if row["status"] == "unreadable"]
+    assert [row["similarity"] for row in unreadable] == [None]
+    # 예시만으로는 부족하다. 문장으로도 적혀 있어야 한다.
+    assert "`unreadable`에서는 반드시 `null`이다" in analysis_protocol.INSTRUCTIONS
 
     aliases = {
         "ATT-02": citation_mapping.AliasedAttachment(
